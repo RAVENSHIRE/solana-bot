@@ -11,6 +11,7 @@ import type { DexScreenerClient } from '../data/dexscreener';
 import type { GeckoTerminalClient } from '../data/geckoterminal';
 import type { RaydiumClient } from '../data/raydium';
 import type { TokenSafetyChecker } from '../analysis/token-safety';
+import type { Telemetry } from '../core/telemetry';
 import {
   BASE_FEE_LAMPORTS,
   SOL_MINT,
@@ -39,6 +40,7 @@ export interface StrategyContext {
   gecko: GeckoTerminalClient;
   raydium: RaydiumClient;
   safety: TokenSafetyChecker;
+  telemetry: Telemetry;
   wallet: PublicKey;
 }
 
@@ -56,6 +58,12 @@ export interface OpenParams {
   tags?: Record<string, string | number | boolean>;
   /** Risiko-Prüfung überspringen (nur für bereits geprüfte, atomar gedachte Legs). */
   skipRiskCheck?: boolean;
+}
+
+/** Preis pro ganzem Token in SOL aus einem Lamport-Betrag und einer Token-Rohmenge. */
+export function pricePerToken(lamports: bigint, tokenRaw: bigint, decimals: number): number {
+  if (tokenRaw <= 0n) return NaN;
+  return Number(lamports) / 1e9 / (Number(tokenRaw) / 10 ** decimals);
 }
 
 export interface ExitDecision {
@@ -159,6 +167,9 @@ export abstract class BaseStrategy implements Strategy {
     }
 
     const cost = -fill.solDeltaLamports;
+    // Einstiegsgebühr in der Strategie-Statistik erfassen (Exit-Fee kommt über closePosition)
+    portfolio.stats(this.name).feesLamports += fill.feeLamports;
+    this.ctx.telemetry.recordTick(p.mint, p.symbol, pricePerToken(fill.inAmountRaw, tokenAmount, p.decimals), 'BUY');
     const pos: Position = {
       id: `${this.name}-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`,
       strategy: this.name,
@@ -291,6 +302,7 @@ export abstract class BaseStrategy implements Strategy {
       }
       this.ctx.risk.recordTxResult(true);
 
+      this.ctx.telemetry.recordTick(current.mint, current.symbol, pricePerToken(fill.outAmountRaw, amount, current.decimals), 'SELL');
       const rent = await executor.closeTokenAccountIfEmpty(current.mint);
       const proceeds = fill.solDeltaLamports + rent;
       const trade = portfolio.closePosition(current.id, proceeds, reason, fill.feeLamports);
@@ -402,6 +414,7 @@ export abstract class BaseStrategy implements Strategy {
         amountRaw: pos.tokenAmountRaw,
         slippageBps: this.ctx.cfg.execution.defaultSlippageBps,
       });
+      this.ctx.telemetry.recordTick(pos.mint, pos.symbol, pricePerToken(BigInt(q.outAmount), pos.tokenAmountRaw, pos.decimals));
       const priority = await this.ctx.executor.estimatePriorityFeeLamports();
       const rent = this.ctx.cfg.execution.closeEmptyAccounts ? TOKEN_ACCOUNT_RENT_LAMPORTS - BASE_FEE_LAMPORTS : 0n;
       return BigInt(q.outAmount) - BASE_FEE_LAMPORTS - priority + rent;
@@ -461,6 +474,20 @@ export abstract class BaseStrategy implements Strategy {
 
     const decision = this.evaluateExit(fresh, value) ?? (await this.customExit(fresh, value));
     if (decision) {
+      this.ctx.telemetry.recordDecision({
+        strategy: this.name,
+        symbol: fresh.symbol,
+        name: null,
+        mint: fresh.mint,
+        action: 'SELL',
+        label: decision.reason,
+        score: null,
+        min_score: null,
+        components: [],
+        latency_ms: 0,
+        price_usd: null,
+        safety: { checks_passed: null, reasons: [], wash_ratio: null, organic_score: null, liquidity_usd: null },
+      });
       this.log.info(`Exit-Signal ${fresh.symbol}: ${decision.reason}`, { valueSol: lamportsToSol(value), costSol: lamportsToSol(fresh.costLamports) });
       await this.closePosition(fresh, decision.reason, decision.emergency);
     } else if (this.log.isDebugEnabled()) {

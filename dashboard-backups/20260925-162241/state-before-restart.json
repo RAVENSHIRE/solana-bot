@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "mode": "SIMULATION",
+  "createdAt": "2026-09-24T21:51:26.451Z",
+  "updatedAt": "2026-09-25T14:23:03.290Z",
+  "initialVirtualLamports": {
+    "$bigint": "5000000000"
+  },
+  "virtualSolLamports": {
+    "$bigint": "4999346739"
+  },
+  "positions": [],
+  "closed": [
+    {
+      "id": "SuckUpTheRent-muh1piiu-3609a1",
+      "strategy": "SuckUpTheRent",
+      "mint": "7GUnr7krtQhJwd6ASY2VUprd9t4c64zcgCsjdmZepump",
+      "symbol": "NPC",
+      "openedAt": 1790345875206,
+      "closedAt": 1790345877202,
+      "costLamports": {
+        "$bigint": "52044280"
+      },
+      "proceedsLamports": {
+        "$bigint": "51391019"
+      },
+      "pnlLamports": {
+        "$bigint": "-653261"
+      },
+      "pnlPct": -1.2552,
+      "reason": "ARB_LEG2 (erwartet 178 bps)",
+      "entrySignal": "ARB_LEG1 edge=178bps velocity=0.56/h"
+    }
+  ],
+  "lp": [
+    {
+      "id": "LP-muh1iqyk-5e9727",
+      "strategy": "SuckUpTheRent",
+      "poolId": "82BHvVSeHgcGNtiH8fGTaYRsKbbjF53beAZp8LCATXsc",
+      "pairName": "SHARTCOIN/SOL",
+      "tokenMint": "UpBBfyC75u3kxDGWmmmW2yauk9YY3CqZhdt1KUDkids",
+      "tokenIsMintA": false,
+      "depositLamports": 1000000000,
+      "entryTokenPriceSol": 0.00000849958432816247,
+      "lastTokenPriceSol": 0.000008415132101747488,
+      "feeAprPct": 5893.14,
+      "accruedFeesLamports": 1166815.2851027397,
+      "unhedgedPnlLamports": -3813607.99632815,
+      "deltaNeutralPnlLamports": 1154412.9770716303,
+      "openedAt": 1790345559548,
+      "lastUpdateAt": 1790346182287,
+      "missedUpdates": 0
+    },
+    {
+      "id": "LP-muh1iqzf-404ed4",
+      "strategy": "SuckUpTheRent",
+      "poolId": "CheJUxVQrmpeb4UFWHZ72afQPTKM7AEb8giyzNR7cPvH",
+      "pairName": "GO/SOL",
+      "tokenMint": "D1YZZg9dBZ7AbfknZVbaeVLto36eySwoFYEVhZrD4F4n",
+      "tokenIsMintA": false,
+      "depositLamports": 1000000000,
+      "entryTokenPriceSol": 0.00006856641927771656,
+      "lastTokenPriceSol": 0.00007535494474320183,
+      "feeAprPct": 7141.69,
+      "accruedFeesLamports": 1404173.1791476407,
+      "unhedgedPnlLamports": 49739311.55436427,
+      "deltaNeutralPnlLamports": 236030.3782719709,
+      "openedAt": 1790345559579,
+      "lastUpdateAt": 1790346182287,
+      "missedUpdates": 0
+    }
+  ],
+  "stats": {
+    "SuckUpTheRent:LP-PAPER": {
+      "trades": 2,
+      "wins": 2,
+      "losses": 0,
+      "realizedPnlLamports": {
+        "$bigint": "186575542"
+      },
+      "feesLamports": {
+        "$bigint": "0"
+      }
+    },
+    "SuckUpTheRent": {
+      "trades": 1,
+      "wins": 0,
+      "losses": 1,
+      "realizedPnlLamports": {
+        "$bigint": "-653261"
+      },
+      "feesLamports": {
+        "$bigint": "10000"
+      }
+    }
+  },
+  "cooldowns": {
+    "7GUnr7krtQhJwd6ASY2VUprd9t4c64zcgCsjdmZepump": 1790353077202,
+    "BPxxfRCXkUVhig4HS1Lh7kZqV6SPJhzfEk4x6fVBjPCy": 1790367501191
+  },
+  "daily": {
+    "date": "2026-09-25",
+    "pnlLamports": {
+      "$bigint": "-653261"
+    }
+  }
+}

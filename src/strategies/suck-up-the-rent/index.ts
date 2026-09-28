@@ -125,18 +125,42 @@ export class SuckUpTheRentStrategy extends BaseStrategy {
     }
 
     let best: ArbProbe | null = null;
+    const started = Date.now();
     for (const { pool, velocity } of candidates) {
       const probe = await this.probe(pool, velocity);
       if (probe && (!best || probe.edgeBps > best.edgeBps)) best = probe;
     }
     if (!best) return;
+    const executes = best.edgeBps >= this.c.arbMinEdgeBps;
+    this.ctx.telemetry.recordDecision({
+      strategy: this.name,
+      symbol: best.symbol,
+      name: best.pool.name || null,
+      mint: best.pool.baseTokenMint,
+      action: executes ? 'BUY' : 'SKIP',
+      label: executes
+        ? `Roundtrip ${this.c.arbSizeSol} SOL (Edge ${best.edgeBps} bps)`
+        : `Skip: Edge ${best.edgeBps} bps < ${this.c.arbMinEdgeBps} bps`,
+      score: null,
+      min_score: null,
+      components: [],
+      latency_ms: Date.now() - started,
+      price_usd: best.pool.priceUsd || null,
+      safety: {
+        checks_passed: true,
+        reasons: [],
+        wash_ratio: null,
+        organic_score: null,
+        liquidity_usd: best.pool.reserveUsd || null,
+      },
+    });
 
     this.log.info(
       `Arb: bester Roundtrip ${best.symbol} edge=${best.edgeBps} bps (${lamportsToSol(best.edgeLamports)} SOL) ` +
         `velocity=${round(best.velocity, 2)}/h route=${best.route}`,
       { probesTotal: this.probeStats.probes, bestEverBps: this.probeStats.bestEdgeBps, executed: this.probeStats.executed },
     );
-    if (best.edgeBps < this.c.arbMinEdgeBps) return;
+    if (!executes) return;
 
     await this.executeRoundtrip(best);
   }

@@ -22,6 +22,7 @@ export class SimulatedExecutor extends BaseExecutor {
   constructor(
     deps: ExecutorDeps,
     private readonly portfolio: Portfolio,
+    private readonly strictRequote = false,
   ) {
     super(deps);
   }
@@ -59,7 +60,12 @@ export class SimulatedExecutor extends BaseExecutor {
         slippageBps: req.slippageBps,
       });
     } catch (e) {
+      if (this.strictRequote) throw new SwapError('Fresh simulation re-quote unavailable', 'quote');
       this.deps.logger.debug('Re-Quote in Simulation fehlgeschlagen – nutze ersten Quote', { error: errorMessage(e) });
+    }
+
+    if (this.strictRequote && q2 && JupiterClient.priceImpactPct(q2) > (req.maxPriceImpactPct ?? this.deps.cfg.execution.maxPriceImpactPct)) {
+      throw new SwapError('Re-quote exceeds price-impact limit', 'impact');
     }
 
     const out1 = BigInt(q1.outAmount);

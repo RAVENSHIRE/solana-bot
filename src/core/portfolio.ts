@@ -4,12 +4,13 @@ import type { ClosedTrade, ExecMode, LpPaperPosition, Position, StrategyStats } 
 import type { Logger } from '../utils/logger';
 import { errorMessage } from '../utils/errors';
 import { lamportsToSol, pctChange } from '../utils/format';
+import { atomicWriteFile } from '../utils/fs';
 
 const STATE_VERSION = 1;
 const MAX_CLOSED_HISTORY = 1_000;
 const SAVE_DEBOUNCE_MS = 1_000;
 
-interface PersistedState {
+export interface PersistedState {
   version: number;
   mode: ExecMode;
   createdAt: string;
@@ -22,13 +23,14 @@ interface PersistedState {
   stats: Record<string, StrategyStats>;
   cooldowns: Record<string, number>;
   daily: { date: string; pnlLamports: bigint };
+  strategyData?: Record<string, unknown>;
 }
 
 // bigint ↔ JSON: { "$bigint": "123" }
 function replacer(_k: string, v: unknown): unknown {
   return typeof v === 'bigint' ? { $bigint: v.toString() } : v;
 }
-function reviver(_k: string, v: unknown): unknown {
+export function stateReviver(_k: string, v: unknown): unknown {
   if (v && typeof v === 'object' && !Array.isArray(v)) {
     const o = v as Record<string, unknown>;
     const keys = Object.keys(o);
@@ -50,6 +52,7 @@ const emptyStats = (): StrategyStats => ({ trades: 0, wins: 0, losses: 0, realiz
 export class Portfolio {
   private saveTimer: NodeJS.Timeout | null = null;
   private dirty = false;
+  private saveQueue: Promise<void> = Promise.resolve();
 
   private constructor(
     private readonly file: string,
@@ -58,7 +61,7 @@ export class Portfolio {
     private readonly log: Logger,
   ) {}
 
-  static async load(dir: string, mode: ExecMode, initialVirtualLamports: bigint, logger: Logger): Promise<Portfolio> {
+  static async load(dir: string, mode: ExecMode, initialVirtualLamports: bigint, logger: Logger, strict = false): Promise<Portfolio> {
     await fs.promises.mkdir(dir, { recursive: true });
     const file = path.resolve(dir, `state-${mode}.json`);
     const log = logger.child('portfolio');
@@ -84,7 +87,7 @@ export class Portfolio {
     } else {
       try {
         const raw = await fs.promises.readFile(file, 'utf8');
-        const parsed = JSON.parse(raw, reviver) as Partial<PersistedState>;
+        const parsed = JSON.parse(raw, stateReviver) as Partial<PersistedState>;
         if (parsed.mode !== mode) throw new Error(`Zustandsdatei gehört zu Modus ${String(parsed.mode)}`);
         state = { ...fresh(), ...parsed, version: STATE_VERSION } as PersistedState;
         // Positionen, die beim Crash gerade geschlossen wurden, wieder freigeben
@@ -96,7 +99,7 @@ export class Portfolio {
           closedHistory: state.closed.length,
         });
       } catch (e) {
-        if (mode === 'LIVE') {
+        if (mode === 'LIVE' || strict) {
           // Im Live-Modus niemals mit leerem Zustand weitermachen: offene Positionen gingen "verloren"
           throw new Error(`Zustandsdatei ${file} unlesbar – manuell prüfen! (${errorMessage(e)})`);
         }
@@ -215,6 +218,42 @@ export class Portfolio {
 
   recentClosed(limit = 20): ClosedTrade[] {
     return this.state.closed.slice(-limit);
+  }
+
+  /** Strategy checkpoints share the same atomic file as balances and fills. */
+  getStrategyData(key: string): unknown {
+    return this.state.strategyData?.[key];
+  }
+
+  setStrategyData(key: string, value: unknown): void {
+    this.state.strategyData ??= {};
+    this.state.strategyData[key] = value;
+    this.markDirty();
+  }
+
+  /** Realize a tranche. Rent basis stays with the final remainder; no rent refund here.
+   * Each executed exit tranche is one realized trade in the existing statistics.
+   */
+  closePartial(id: string, soldRaw: bigint, proceedsLamports: bigint, reason: string, feesLamports = 0n): ClosedTrade {
+    const p = this.getPosition(id);
+    if (!p || soldRaw <= 0n || soldRaw >= p.tokenAmountRaw) throw new Error('Invalid partial exit amount');
+    const held = p.tokenAmountRaw;
+    const rent = BigInt(typeof p.tags.playbookRent === 'string' ? p.tags.playbookRent : '0');
+    if (rent < 0n || rent > p.costLamports) throw new Error('Invalid rent basis');
+    const basis = ((p.costLamports - rent) * soldRaw) / held;
+    const input = (p.entryInputLamports * soldRaw) / held;
+    // Use the ordinary realization path, but only for the sold lot.
+    const lot = { ...p, id: `${p.id}:part:${held}`, tokenAmountRaw: soldRaw, costLamports: basis, entryInputLamports: input };
+    this.state.positions.push(lot);
+    const trade = this.closePosition(lot.id, proceedsLamports, reason, feesLamports)!;
+    this.updatePosition(id, {
+      tokenAmountRaw: held - soldRaw,
+      costLamports: p.costLamports - basis,
+      entryInputLamports: p.entryInputLamports - input,
+      lastValueLamports: (p.lastValueLamports * (held - soldRaw)) / held,
+      peakValueLamports: (p.peakValueLamports * (held - soldRaw)) / held,
+    });
+    return trade;
   }
 
   // ---------------------------------------------------------------- Cooldowns
@@ -360,7 +399,13 @@ export class Portfolio {
   }
 
   /** Schreibt den Zustand sofort (atomisch). */
-  async flush(): Promise<void> {
+  flush(): Promise<void> {
+    const pending = this.saveQueue.then(() => this.flushNow());
+    this.saveQueue = pending.catch(() => undefined);
+    return pending;
+  }
+
+  private async flushNow(): Promise<void> {
     if (this.saveTimer) {
       clearTimeout(this.saveTimer);
       this.saveTimer = null;
@@ -368,13 +413,12 @@ export class Portfolio {
     if (!this.dirty && fs.existsSync(this.file)) return;
     this.dirty = false;
     this.state.updatedAt = new Date().toISOString();
-    const tmp = `${this.file}.tmp-${process.pid}`;
     const data = JSON.stringify(this.state, replacer, 2);
     try {
-      await fs.promises.writeFile(tmp, data, { encoding: 'utf8', mode: 0o600 });
-      await fs.promises.rename(tmp, this.file);
+      await atomicWriteFile(this.file, data);
     } catch (e) {
-      this.dirty = true;
+      // Beim nächsten Debounce-Zyklus erneut versuchen
+      this.markDirty();
       throw e;
     }
   }

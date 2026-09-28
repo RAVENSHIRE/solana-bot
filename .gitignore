@@ -3,8 +3,16 @@ dist/
 .env
 .env.*
 !.env.example
-data/
+/data/
 logs/
 *.log
 *.tsbuildinfo
 .DS_Store
+
+data-playbook/
+
+dist-playbook/
+
+playbook-backup-*/
+
+solana-playbook-update/

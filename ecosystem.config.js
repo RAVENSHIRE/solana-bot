@@ -52,5 +52,21 @@ module.exports = {
         LOG_COLOR: 'false',
       },
     },
+    {
+      // Web-Dashboard (liest nur Dateien aus ./data, braucht keinen Private Key)
+      name: 'solana-bot-dashboard',
+      script: './dist/dashboard/server.js',
+      cwd: __dirname,
+      exec_mode: 'fork',
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      node_args: ['--disable-warning=DEP0040'],
+      max_memory_restart: '200M',
+      exp_backoff_restart_delay: 100,
+      out_file: './logs/pm2-dashboard-out.log',
+      error_file: './logs/pm2-dashboard-error.log',
+      env: { NODE_ENV: 'production' },
+    },
   ],
 };

@@ -20,7 +20,12 @@
     "pm2:start": "pm2 start ecosystem.config.js",
     "pm2:reload": "pm2 reload ecosystem.config.js --update-env",
     "pm2:stop": "pm2 stop solana-bot",
-    "pm2:logs": "pm2 logs solana-bot --lines 200"
+    "pm2:logs": "pm2 logs solana-bot --lines 200",
+    "dashboard": "tsx src/dashboard/server.ts",
+    "dashboard:dist": "node dist/dashboard/server.js",
+    "build:playbook": "tsc -p tsconfig.playbook.json",
+    "sim:playbook": "node --enable-source-maps dist-playbook/strategies/reversal-sniper/playbook/runtime.js",
+    "test:playbook": "node --import tsx --test tests/playbook.test.ts"
   },
   "dependencies": {
     "@solana/spl-token": "^0.4.9",

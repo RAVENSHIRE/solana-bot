@@ -34,9 +34,23 @@ export class TradeJournal {
     fs.mkdirSync(dir, { recursive: true });
   }
 
+  private readonly listeners: Array<(r: TradeRecord) => void> = [];
+
+  /** Registriert einen Empfänger für jeden neuen Eintrag (z. B. Dashboard-Telemetrie). */
+  onRecord(fn: (r: TradeRecord) => void): void {
+    this.listeners.push(fn);
+  }
+
   record(r: Omit<TradeRecord, 'ts' | 'mode'>): void {
     const rec: TradeRecord = { ts: new Date().toISOString(), mode: this.mode, ...r };
     this.printLine(rec);
+    for (const fn of this.listeners) {
+      try {
+        fn(rec);
+      } catch (e) {
+        this.log.warn('Journal-Listener fehlgeschlagen', { error: errorMessage(e) });
+      }
+    }
     const file = path.join(this.dir, `trades-${this.mode}-${rec.ts.slice(0, 10)}.jsonl`);
     const line = `${JSON.stringify(rec)}\n`;
     // Serialisiert schreiben, damit Zeilen nie verschachtelt werden

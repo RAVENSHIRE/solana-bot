@@ -6,6 +6,7 @@ import { analyzeSupport, bullishDivergence, type SupportAnalysis } from '../../a
 import { analyzeVolumeQuality, type VolumeQuality } from '../../analysis/wash-trading';
 import { analyzeSmartMoney, type SmartMoneyAnalysis } from '../../analysis/smart-money';
 import { errorMessage } from '../../utils/errors';
+import type { DecisionAction } from '../../core/telemetry';
 import { clamp, pctChange, round, shortAddr, solToLamports } from '../../utils/format';
 
 interface Candidate {
@@ -31,9 +32,18 @@ interface Analysis {
   volume: VolumeQuality;
   smart: SmartMoneyAnalysis;
   notes: string[];
+  sparkline: number[];
 }
 
-type Rejection = { rejected: string };
+type Rejection = { rejected: string; sparkline?: number[] };
+
+const COMPONENT_MAX: Record<keyof ScoreBreakdown, [string, number]> = {
+  support: ['Support', 25],
+  momentum: ['Momentum', 20],
+  exhaustion: ['Erschöpfung', 10],
+  volume: ['Volumenqualität', 20],
+  accumulation: ['Akkumulation', 25],
+};
 
 const OHLCV_AGGREGATE_MIN = 5;
 const OHLCV_LIMIT = 288; // 24 h in 5-Minuten-Kerzen
@@ -98,6 +108,7 @@ export class ReversalSniperStrategy extends BaseStrategy {
     for (const cand of shortlisted) {
       this.evaluatedAt.set(cand.mint, Date.now());
       const symbol = cand.pair.baseToken.symbol || shortAddr(cand.mint);
+      const started = Date.now();
       let result: Analysis | Rejection;
       try {
         result = await this.analyze(cand);
@@ -105,14 +116,17 @@ export class ReversalSniperStrategy extends BaseStrategy {
         this.log.warn(`Analyse ${symbol} fehlgeschlagen`, { error: errorMessage(e) });
         continue;
       }
+      const latency = Date.now() - started;
       if ('rejected' in result) {
         this.log.info(`✗ ${symbol}: ${result.rejected}`);
+        this.report(cand, symbol, 'SKIP', `Skip: ${result.rejected}`, null, latency, result.sparkline ?? []);
         continue;
       }
       const b = result.breakdown;
       const summary = `score=${result.score} [S${b.support} M${b.momentum} E${b.exhaustion} V${b.volume} A${b.accumulation}] dd=${result.drawdownPct}% rsi=${round(result.rsiNow, 1)}`;
       if (result.score < this.c.minScore) {
         this.log.info(`✗ ${symbol}: ${summary} < ${this.c.minScore}`, { notes: result.notes });
+        this.report(cand, symbol, 'WAIT', `Warten: Score ${result.score} < ${this.c.minScore}`, result, latency, result.sparkline);
         continue;
       }
       this.log.info(`✓ Umkehr-Signal ${symbol}: ${summary}`, {
@@ -122,9 +136,61 @@ export class ReversalSniperStrategy extends BaseStrategy {
         accumulators: result.smart.accumulatorCount,
         knownSmart: result.smart.knownSmartBuyers,
       });
-      await this.enter(cand, symbol, result, summary);
+      await this.enter(cand, symbol, result, summary, latency);
       if (portfolio.positions().length >= cfg.risk.maxOpenPositions) break;
     }
+  }
+
+  /** Überträgt eine Entscheidung samt Watchlist-Eintrag an die Dashboard-Telemetrie. */
+  private report(
+    cand: Candidate,
+    symbol: string,
+    action: DecisionAction,
+    label: string,
+    a: Analysis | null,
+    latencyMs: number,
+    sparkline: number[],
+    safety?: { ok: boolean; reasons: string[] },
+  ): void {
+    const priceUsd = Number(cand.pair.priceUsd ?? NaN);
+    const px = Number.isFinite(priceUsd) ? priceUsd : null;
+    const t = this.ctx.telemetry;
+    t.recordDecision({
+      strategy: this.name,
+      symbol,
+      name: cand.pair.baseToken.name || null,
+      mint: cand.mint,
+      action,
+      label,
+      score: a ? a.score : null,
+      min_score: this.c.minScore,
+      components: a
+        ? (Object.keys(COMPONENT_MAX) as Array<keyof ScoreBreakdown>).map((k) => ({
+            label: COMPONENT_MAX[k][0],
+            value: a.breakdown[k],
+            max: COMPONENT_MAX[k][1],
+          }))
+        : [],
+      latency_ms: latencyMs,
+      price_usd: px,
+      safety: {
+        checks_passed: safety ? safety.ok : null,
+        reasons: safety ? safety.reasons : [],
+        wash_ratio: a ? a.volume.washRatio : null,
+        organic_score: a ? a.volume.organicScore : null,
+        liquidity_usd: cand.pair.liquidity?.usd ?? null,
+      },
+    });
+    t.upsertWatch({
+      mint: cand.mint,
+      symbol,
+      name: cand.pair.baseToken.name || null,
+      strategy: this.name,
+      price_usd: px,
+      sparkline,
+      last_action: action,
+      score: a ? a.score : null,
+    });
   }
 
   private async discover(): Promise<Candidate[]> {
@@ -187,13 +253,14 @@ export class ReversalSniperStrategy extends BaseStrategy {
     if (candles.length < MIN_CANDLES) return { rejected: `zu wenig Kursdaten (${candles.length} Kerzen)` };
 
     const closes = candles.map((k) => k.c);
+    const sparkline = closes.slice(-48);
     const current = closes[closes.length - 1]!;
     const high = Math.max(...candles.map((k) => k.h));
     const drawdownPct = round(((high - current) / high) * 100, 1);
-    if (drawdownPct < c.minDrawdownPct) return { rejected: `Drawdown ${drawdownPct}% < ${c.minDrawdownPct}%` };
+    if (drawdownPct < c.minDrawdownPct) return { rejected: `Drawdown ${drawdownPct}% < ${c.minDrawdownPct}%`, sparkline };
 
     const support = analyzeSupport(candles, c.supportTolerancePct);
-    if (support.fallingKnife) return { rejected: `fallendes Messer (neues Tief in den letzten Kerzen, dd=${drawdownPct}%)` };
+    if (support.fallingKnife) return { rejected: `fallendes Messer (neues Tief in den letzten Kerzen, dd=${drawdownPct}%)`, sparkline };
 
     const notes: string[] = [];
     const rsiV = rsi(closes, 14);
@@ -209,14 +276,14 @@ export class ReversalSniperStrategy extends BaseStrategy {
     // Frühabbruch: ohne Chart-Basis lohnt sich der teure Trade-Abruf nicht
     const chartScore = breakdown.support + breakdown.momentum + breakdown.exhaustion;
     if (chartScore + 45 < c.minScore) {
-      return { rejected: `Chartstruktur schwach (${chartScore}/55)` };
+      return { rejected: `Chartstruktur schwach (${chartScore}/55)`, sparkline };
     }
 
     const trades = await this.ctx.gecko.getTrades(cand.pair.pairAddress, 0);
     const volume = analyzeVolumeQuality(trades);
-    if (volume.tradeCount < 10) return { rejected: 'zu wenige Einzel-Trades für Volumenanalyse' };
+    if (volume.tradeCount < 10) return { rejected: 'zu wenige Einzel-Trades für Volumenanalyse', sparkline };
     if (volume.washRatio > c.maxWashRatio) {
-      return { rejected: `Wash-Trading ${Math.round(volume.washRatio * 100)}% > ${Math.round(c.maxWashRatio * 100)}% (${volume.flags.join(', ')})` };
+      return { rejected: `Wash-Trading ${Math.round(volume.washRatio * 100)}% > ${Math.round(c.maxWashRatio * 100)}% (${volume.flags.join(', ')})`, sparkline };
     }
     breakdown.volume = round((volume.organicScore / 100) * 20, 1);
     if (volume.flags.length > 0) notes.push(...volume.flags);
@@ -235,7 +302,7 @@ export class ReversalSniperStrategy extends BaseStrategy {
       breakdown.support + breakdown.momentum + breakdown.exhaustion + breakdown.volume + breakdown.accumulation,
       1,
     );
-    return { score, breakdown, drawdownPct, rsiNow, support, volume, smart, notes };
+    return { score, breakdown, drawdownPct, rsiNow, support, volume, smart, notes, sparkline };
   }
 
   /** Max. 25 Punkte */
@@ -314,11 +381,12 @@ export class ReversalSniperStrategy extends BaseStrategy {
 
   // ======================================================================= Einstieg
 
-  private async enter(cand: Candidate, symbol: string, a: Analysis, summary: string): Promise<void> {
+  private async enter(cand: Candidate, symbol: string, a: Analysis, summary: string, latencyMs: number): Promise<void> {
     const c = this.c;
     const safety = await this.ctx.safety.safeCheck(cand.mint, { rejectMintAuthority: true });
     if (!safety.ok) {
       this.log.info(`✗ ${symbol}: Sicherheitsprüfung – ${safety.reasons.join('; ')}`);
+      this.report(cand, symbol, 'SKIP', `Skip: Sicherheit – ${safety.reasons[0] ?? 'unbekannt'}`, a, latencyMs, a.sparkline, safety);
       this.ctx.portfolio.setCooldown(cand.mint, 24 * 3_600_000);
       return;
     }
@@ -331,6 +399,16 @@ export class ReversalSniperStrategy extends BaseStrategy {
       stopLossPct = clamp(round(distToSupport + c.supportTolerancePct + 2, 1), 5, c.stopLossPct);
     }
 
+    this.report(
+      cand,
+      symbol,
+      'BUY',
+      `Kauf ${c.tradeSizeSol} SOL (Score ${a.score}, Stop −${stopLossPct}%)`,
+      a,
+      latencyMs,
+      a.sparkline,
+      safety,
+    );
     const priceUsd = Number(cand.pair.priceUsd ?? NaN);
     await this.openPosition({
       mint: cand.mint,

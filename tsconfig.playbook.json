@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "outDir": "dist-playbook" },
+  "include": ["src/strategies/reversal-sniper/playbook/**/*.ts"],
+  "exclude": ["node_modules", "dist", "dist-playbook"]
+}

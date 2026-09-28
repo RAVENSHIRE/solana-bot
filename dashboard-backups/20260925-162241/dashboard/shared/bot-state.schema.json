@@ -1,0 +1,712 @@
+{
+  "$ref": "#/definitions/BotState",
+  "definitions": {
+    "BotState": {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "type": "object",
+          "properties": {
+            "bot_name": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mode": {
+              "type": "string",
+              "enum": ["SIMULATION", "LIVE"]
+            },
+            "network": {
+              "$ref": "#/definitions/BotState/properties/meta/properties/bot_name"
+            },
+            "decision_cadence_seconds": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "rpc_latency_ms": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "active_tokens_count": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "skipped_tokens_count": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/BotState/properties/meta/properties/active_tokens_count/anyOf/0"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "closed_tokens_count": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/BotState/properties/meta/properties/active_tokens_count/anyOf/0"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "bot_name",
+            "mode",
+            "network",
+            "decision_cadence_seconds",
+            "rpc_latency_ms",
+            "active_tokens_count",
+            "skipped_tokens_count",
+            "closed_tokens_count"
+          ],
+          "additionalProperties": false
+        },
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "total_equity_usd": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "return_percentage": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "gas_priority_fees_paid_usd": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "total_trades": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/BotState/properties/meta/properties/active_tokens_count/anyOf/0"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "win_rate_percentage": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "avg_hold_duration_seconds": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "max_drawdown_percentage": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/BotState/properties/metrics/properties/win_rate_percentage/anyOf/0"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "avg_decision_time_ms": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "total_decisions": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/BotState/properties/meta/properties/active_tokens_count/anyOf/0"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "total_equity_usd",
+            "return_percentage",
+            "gas_priority_fees_paid_usd",
+            "total_trades",
+            "win_rate_percentage",
+            "avg_hold_duration_seconds",
+            "max_drawdown_percentage",
+            "avg_decision_time_ms",
+            "total_decisions"
+          ],
+          "additionalProperties": false
+        },
+        "active_token": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "symbol": {
+                  "$ref": "#/definitions/BotState/properties/meta/properties/bot_name"
+                },
+                "name": {
+                  "$ref": "#/definitions/BotState/properties/meta/properties/bot_name"
+                },
+                "contract_address": {
+                  "$ref": "#/definitions/BotState/properties/meta/properties/bot_name"
+                },
+                "current_price_usd": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "price_change_2m_high": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/BotState/properties/metrics/properties/return_percentage/anyOf/0"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "price_change_2m_low": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/BotState/properties/metrics/properties/return_percentage/anyOf/0"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "baseline_entry_price": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "ticks": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "timestamp": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          {
+                            "type": "string",
+                            "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d$"
+                          }
+                        ]
+                      },
+                      "price": {
+                        "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+                      },
+                      "action_marker": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "enum": ["BUY", "SELL"]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": ["timestamp", "price"],
+                    "additionalProperties": false
+                  },
+                  "maxItems": 10000
+                }
+              },
+              "required": [
+                "symbol",
+                "name",
+                "contract_address",
+                "current_price_usd",
+                "price_change_2m_high",
+                "price_change_2m_low",
+                "baseline_entry_price",
+                "ticks"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "watchlist": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "symbol": {
+                "$ref": "#/definitions/BotState/properties/meta/properties/bot_name"
+              },
+              "name": {
+                "$ref": "#/definitions/BotState/properties/meta/properties/bot_name"
+              },
+              "price_usd": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "sparkline": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+                },
+                "maxItems": 1000
+              },
+              "ai_status": {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": ["HOLD", "SKIP", "CLOSE", "BUY", "SELL"]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "confidence_pct": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/BotState/properties/metrics/properties/win_rate_percentage/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": ["action", "confidence_pct"],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "symbol",
+              "name",
+              "price_usd",
+              "sparkline",
+              "ai_status"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 1000
+        },
+        "decisions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "symbol": {
+                "$ref": "#/definitions/BotState/properties/meta/properties/bot_name"
+              },
+              "timestamp": {
+                "$ref": "#/definitions/BotState/properties/active_token/anyOf/0/properties/ticks/items/properties/timestamp"
+              },
+              "action": {
+                "type": "string",
+                "enum": ["BUY", "SELL", "SKIP", "WAIT"]
+              },
+              "action_label": {
+                "$ref": "#/definitions/BotState/properties/meta/properties/bot_name"
+              },
+              "probabilities": {
+                "type": "object",
+                "properties": {
+                  "long_pct": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/BotState/properties/metrics/properties/win_rate_percentage/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "short_pct": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/BotState/properties/metrics/properties/win_rate_percentage/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "wait_pct": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/BotState/properties/metrics/properties/win_rate_percentage/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": ["long_pct", "short_pct", "wait_pct"],
+                "additionalProperties": false
+              },
+              "confidence_pct": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BotState/properties/metrics/properties/win_rate_percentage/anyOf/0"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "latency_ms": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "safety": {
+                "type": "object",
+                "properties": {
+                  "rug_score_pct": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/BotState/properties/metrics/properties/win_rate_percentage/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "liquidity_usd": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": ["rug_score_pct", "liquidity_usd"],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "symbol",
+              "timestamp",
+              "action",
+              "action_label",
+              "probabilities",
+              "confidence_pct",
+              "latency_ms",
+              "safety"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 10000
+        },
+        "positions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "symbol": {
+                "$ref": "#/definitions/BotState/properties/meta/properties/bot_name"
+              },
+              "token_address": {
+                "$ref": "#/definitions/BotState/properties/meta/properties/bot_name"
+              },
+              "side": {
+                "type": "string",
+                "enum": ["LONG", "SHORT"]
+              },
+              "entry_price_usd": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "current_price_usd": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "size_tokens": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "unrealized_pnl_usd": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BotState/properties/metrics/properties/return_percentage/anyOf/0"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "unrealized_pnl_pct": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BotState/properties/metrics/properties/return_percentage/anyOf/0"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "stop_loss_usd": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "take_profit_usd": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "opened_at": {
+                "$ref": "#/definitions/BotState/properties/active_token/anyOf/0/properties/ticks/items/properties/timestamp"
+              }
+            },
+            "required": [
+              "id",
+              "symbol",
+              "token_address",
+              "side",
+              "entry_price_usd",
+              "current_price_usd",
+              "size_tokens",
+              "unrealized_pnl_usd",
+              "unrealized_pnl_pct",
+              "stop_loss_usd",
+              "take_profit_usd",
+              "opened_at"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 10000
+        },
+        "trade_history": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "symbol": {
+                "$ref": "#/definitions/BotState/properties/meta/properties/bot_name"
+              },
+              "side": {
+                "type": "string",
+                "enum": ["BUY", "SELL"]
+              },
+              "realized_pnl_usd": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BotState/properties/metrics/properties/return_percentage/anyOf/0"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "realized_pnl_pct": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BotState/properties/metrics/properties/return_percentage/anyOf/0"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "slippage_pct": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "tx_hash": {
+                "$ref": "#/definitions/BotState/properties/meta/properties/bot_name"
+              },
+              "timestamp": {
+                "$ref": "#/definitions/BotState/properties/active_token/anyOf/0/properties/ticks/items/properties/timestamp"
+              }
+            },
+            "required": [
+              "id",
+              "symbol",
+              "side",
+              "realized_pnl_usd",
+              "realized_pnl_pct",
+              "slippage_pct",
+              "tx_hash",
+              "timestamp"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 10000
+        },
+        "equity_curve": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "$ref": "#/definitions/BotState/properties/active_token/anyOf/0/properties/ticks/items/properties/timestamp"
+              },
+              "equity_usd": {
+                "$ref": "#/definitions/BotState/properties/meta/properties/decision_cadence_seconds/anyOf/0"
+              }
+            },
+            "required": ["timestamp", "equity_usd"],
+            "additionalProperties": false
+          },
+          "maxItems": 10000
+        }
+      },
+      "required": [
+        "meta",
+        "metrics",
+        "active_token",
+        "watchlist",
+        "decisions",
+        "positions",
+        "trade_history",
+        "equity_curve"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

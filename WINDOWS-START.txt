@@ -1,0 +1,25 @@
+WINDOWS DASHBOARD SETUP
+
+1. Download this ZIP and use Extract All in File Explorer.
+2. Choose your existing repository folder as the extraction destination:
+   C:\Users\j.krayenbuehl\Desktop\dev\solana-bot
+3. The result must contain:
+   solana-bot\dashboard\package.json
+   solana-bot\dashboard\start-dashboard.cmd
+4. Double-click dashboard\start-dashboard.cmd.
+5. Wait for the Dashboard URL to appear, then open http://localhost:3000.
+   Keep the command window open.
+
+If you already made changes inside dashboard, preserve a copy of that folder
+before extracting. Extract the ZIP fully before running the launcher.
+
+The launcher installs dependencies and builds only the dashboard. It stops on
+an error. The default state source is solana-bot\data\state-SIMULATION.json.
+If that file is absent, the page opens with placeholders until state arrives.
+
+The errors referencing SuckUpTheRentStrategy inside src/index.ts are a separate
+bot-source issue. This archive installs under dashboard; it contains no bot
+entrypoint or trading-engine files.
+
+The application build and automated tests were verified in Linux. The Windows
+CMD launcher was reviewed but could not be executed in this Linux environment.

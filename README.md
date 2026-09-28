@@ -30,7 +30,9 @@ src/
 │   ├── base-strategy.ts           Ein-/Ausstieg, Slippage-Eskalation, Exits, Bewertung
 │   ├── suck-up-the-rent/          Roundtrip-Arb + LP-Fee-Simulation + Rent-Reclaimer
 │   └── reversal-sniper/           Umkehr-Score aus Support, Momentum, Volumenqualität, Akkumulation
+├── dashboard/                     Dashboard-Server (Watcher + SSE), Datenvertrag, Adapter
 └── scripts/test-connection.ts     Isolierter Verbindungstest
+dashboard/index.html               Browser-Oberfläche (Tailwind, SVG-Charts)
 ```
 
 ## Strategien
@@ -177,6 +179,29 @@ LIVE_TRADING_CONFIRMED=I_UNDERSTAND_THE_RISKS
 ```
 
 Klein anfangen (`RS_TRADE_SIZE_SOL`, `SUTR_ARB_SIZE_SOL`, `RISK_*`), dann `pm2 reload ecosystem.config.js --update-env`. Der LIVE-Zustand wird getrennt in `data/state-LIVE.json` geführt.
+
+## Web-Dashboard
+
+Das Dashboard ist ein eigener, schlanker Prozess. Er liest nur die Dateien im `STATE_DIR` und braucht weder Private Key noch RPC-Zugang:
+
+- `state-{MODE}.json`: Positionen, abgeschlossene Trades, Statistik, virtuelles Konto (schreibt das Portfolio)
+- `dashboard-{MODE}.json`: Entscheidungen, Watchlist, Kurs-Ticks, Equity-Kurve, RPC-Latenz, SOL/USD-Kurs (schreibt die Telemetrie des Bots)
+
+Änderungen werden per Datei-Watcher erkannt und über Server-Sent Events sofort an den Browser gestreamt. Alle angezeigten Werte stammen aus diesen Dateien. Was der Bot nicht misst, erscheint als `--`. Der vollständige Datenvertrag steht in `src/dashboard/contract.ts`.
+
+Lokal (auch Windows) in einem zweiten Terminal neben dem Bot:
+
+```bash
+npm run dashboard
+```
+
+Dann http://127.0.0.1:8787 öffnen. Port und Host lassen sich über `DASHBOARD_PORT` und `DASHBOARD_HOST` einstellen.
+
+Auf dem VPS läuft das Dashboard als zweite PM2-App (`solana-bot-dashboard`, startet mit `pm2 start ecosystem.config.js`). Es lauscht nur auf 127.0.0.1 und hat keinen Login. Öffne es deshalb über einen SSH-Tunnel statt den Port freizugeben:
+
+```bash
+ssh -L 8787:127.0.0.1:8787 solbot@DEIN_SERVER
+```
 
 ## Stabilitäts- und Sicherheitsmechanismen
 
