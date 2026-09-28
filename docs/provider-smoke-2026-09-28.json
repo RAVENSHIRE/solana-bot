@@ -1,0 +1,91 @@
+{
+  "checkedAt": "2026-09-28",
+  "requests": [
+    {
+      "source": "dex",
+      "ok": true,
+      "at": 1790575227459,
+      "keys": "array",
+      "rows": 1
+    },
+    {
+      "source": "gecko",
+      "ok": true,
+      "at": 1790575229389,
+      "keys": [
+        "data"
+      ],
+      "rows": null
+    },
+    {
+      "source": "raydium",
+      "ok": true,
+      "at": 1790575226554,
+      "keys": [
+        "id",
+        "success",
+        "data"
+      ],
+      "rows": null
+    },
+    {
+      "source": "ohlcv",
+      "ok": true,
+      "at": 1790575301508
+    },
+    {
+      "source": "trades",
+      "ok": true,
+      "at": 1790575300372
+    },
+    {
+      "source": "raydium-ids",
+      "ok": true,
+      "at": 1790575299099
+    }
+  ],
+  "normalization": [
+    {
+      "source": "dex",
+      "ok": true,
+      "count": 1
+    },
+    {
+      "source": "gecko",
+      "ok": true,
+      "count": 20
+    },
+    {
+      "source": "raydium",
+      "ok": true,
+      "count": 3
+    },
+    {
+      "source": "raydium-ids",
+      "ok": true,
+      "count": 1
+    },
+    {
+      "source": "ohlcv",
+      "ok": true,
+      "count": 59,
+      "partial": 1,
+      "gaps": 2
+    },
+    {
+      "source": "trades",
+      "ok": true,
+      "count": 300
+    }
+  ],
+  "publicClientSmoke": {
+    "command": "npm run data:check",
+    "exitCode": 0,
+    "counts": {
+      "dexscreenerProfiles": 20,
+      "geckoTrendingPools": 20,
+      "raydiumPools": 3
+    }
+  },
+  "authenticatedExecution": "unverified"
+}

@@ -38,7 +38,7 @@ goto failed
 
 :wrong_package
 echo The dashboard package is missing or has the wrong name.
-echo Extract the complete ZIP, then open dashboard\start-dashboard.cmd.
+echo Restore the dashboard package from Git, then open dashboard\start-dashboard.cmd.
 goto failed
 
 :location_error

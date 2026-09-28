@@ -1,5 +1,8 @@
+import { roundtripOutcome } from '../../execution/roundtrip';
+import { checkTask, requestScope } from '../../data/core/request-scope';
+import { assertFresh } from '../../data/core/data-types';
 import { randomBytes } from 'node:crypto';
-import { BaseStrategy, inFlightMints, type StrategyContext } from '../base-strategy';
+import { BaseStrategy, entryMaintenance, inFlightMints, type StrategyContext } from '../base-strategy';
 import type { GeckoPool } from '../../data/geckoterminal';
 import type { RaydiumPool } from '../../data/raydium';
 import { JupiterClient } from '../../execution/jupiter-client';
@@ -8,7 +11,10 @@ import { errorMessage } from '../../utils/errors';
 import { lamportsToSol, round, shortAddr, solToLamports } from '../../utils/format';
 
 const YEAR_MS = 365 * 24 * 3_600_000;
-const LP_MAX_MISSED_UPDATES = 10;
+type CompletePool = RaydiumPool & { price: number; tvl: number; day: RaydiumPool['day'] & { feeApr: number; priceMin: number; priceMax: number } };
+function completePool(p: RaydiumPool): p is CompletePool {
+  return p.constantProduct && p.price !== null && p.price > 0 && p.tvl !== null && p.tvl > 0 && p.day.feeApr !== null && p.day.priceMin !== null && p.day.priceMin > 0 && p.day.priceMax !== null;
+}
 
 interface ArbProbe {
   pool: GeckoPool;
@@ -74,15 +80,17 @@ export class SuckUpTheRentStrategy extends BaseStrategy {
 
   async scan(): Promise<void> {
     const now = Date.now();
-    if (this.c.arbEnabled) await this.guard('arb', () => this.arbTick());
-    if (this.c.lpSimEnabled && now - this.lastLpTick >= this.c.lpScanIntervalMs) {
-      this.lastLpTick = now;
-      await this.guard('lp-sim', () => this.lpTick());
-    }
+    const work: Promise<void>[] = [];
     if (this.c.rentReclaimEnabled && now - this.lastRentTick >= this.c.rentReclaimIntervalMs) {
       this.lastRentTick = now;
-      await this.guard('rent-reclaim', () => this.rentTick());
+      work.push(requestScope.run({ ...requestScope.getStore(), category: 'position' }, () => this.guard('rent-reclaim', () => this.rentTick())));
     }
+    if (this.c.arbEnabled) work.push(this.guard('arb', () => this.arbTick()));
+    if (this.c.lpSimEnabled && now - this.lastLpTick >= this.c.lpScanIntervalMs) {
+      this.lastLpTick = now;
+      work.push(this.guard('lp-sim', () => this.lpTick()));
+    }
+    await Promise.all(work);
   }
 
   /** Isoliert Sub-Module: ein Fehler in einem Modul blockiert die anderen nicht. */
@@ -111,8 +119,8 @@ export class SuckUpTheRentStrategy extends BaseStrategy {
     const candidates = [...pools.values()]
       .filter((p) => p.quoteTokenMint === SOL_MINT || QUOTE_MINTS.has(p.quoteTokenMint))
       .filter((p) => !QUOTE_MINTS.has(p.baseTokenMint) && p.baseTokenMint.length > 0)
-      .filter((p) => p.reserveUsd >= this.c.minLiquidityUsd)
-      .filter((p) => p.createdAt === null || now - p.createdAt >= this.c.minPoolAgeMin * 60_000)
+      .filter((p): p is GeckoPool & { reserveUsd: number; volumeUsd: { h1: number; h24: number | null } } => p.reserveUsd !== null && p.reserveUsd >= this.c.minLiquidityUsd && p.reserveUsd > 0 && p.volumeUsd.h1 !== null)
+      .filter((p) => p.createdAt !== null && now - p.createdAt >= this.c.minPoolAgeMin * 60_000)
       .map((p) => ({ pool: p, velocity: p.reserveUsd > 0 ? p.volumeUsd.h1 / p.reserveUsd : 0 }))
       .filter((x) => x.velocity >= this.c.minVelocity)
       .filter((x) => !portfolio.hasOpenPosition(x.pool.baseTokenMint) && !portfolio.isCoolingDown(x.pool.baseTokenMint))
@@ -166,10 +174,11 @@ export class SuckUpTheRentStrategy extends BaseStrategy {
   }
 
   private async probe(pool: GeckoPool, velocity: number): Promise<ArbProbe | null> {
-    const { jupiter, safety, executor } = this.ctx;
+    const { jupiter, safety } = this.ctx;
+    assertFresh(pool.meta, this.ctx.cfg.data.maxPriceAgeMs);
     const mint = pool.baseTokenMint;
     const symbol = pool.name.split('/')[0]?.trim() || shortAddr(mint);
-    const check = await safety.safeCheck(mint, { rejectMintAuthority: false });
+    const check = await safety.safeCheck(mint, { rejectMintAuthority: false, fresh: true });
     if (!check.ok) {
       this.log.debug(`Arb: ${symbol} übersprungen – ${check.reasons.join('; ')}`);
       this.ctx.portfolio.setCooldown(mint, 6 * 3_600_000);
@@ -179,14 +188,12 @@ export class SuckUpTheRentStrategy extends BaseStrategy {
     const slippageBps = Math.min(this.ctx.cfg.execution.defaultSlippageBps, 100);
     try {
       const q1 = await jupiter.quote({ inputMint: SOL_MINT, outputMint: mint, amountRaw: size, slippageBps });
-      const tokens = BigInt(q1.outAmount);
+      const tokens = BigInt(q1.otherAmountThreshold);
       if (tokens <= 0n) return null;
       const q2 = await jupiter.quote({ inputMint: mint, outputMint: SOL_MINT, amountRaw: tokens, slippageBps });
-      const priority = await executor.estimatePriorityFeeLamports();
-      // 2 Swaps + 1 ATA-Close (Rent kommt zurück, die Close-Tx kostet nur die Basis-Fee)
-      const costs = 2n * (BASE_FEE_LAMPORTS + priority) + BASE_FEE_LAMPORTS;
-      const edge = BigInt(q2.outAmount) - size - costs;
-      const edgeBps = Number((edge * 10_000n) / size);
+      const outcome = roundtripOutcome(q1, q2, BigInt(this.ctx.cfg.jupiter.maxPriorityFeeLamports), this.ctx.cfg.execution.closeEmptyAccounts);
+      const { costs, edgeBps, edgeLamports: edge } = outcome;
+      this.ctx.data.record('roundtrip-probe', this.name, { mint, buy: q1, sell: q2, outcome });
       this.probeStats.probes++;
       this.probeStats.bestEdgeBps = Math.max(this.probeStats.bestEdgeBps, edgeBps);
       this.log.debug(`Arb-Probe ${symbol}`, {
@@ -221,6 +228,13 @@ export class SuckUpTheRentStrategy extends BaseStrategy {
       sizeLamports: solToLamports(this.c.arbSizeSol),
       slippageBps: Math.min(this.ctx.cfg.execution.defaultSlippageBps, 100),
       maxPriceImpactPct: 1,
+      validateBuyQuote: async buy => {
+        const sell = await this.ctx.jupiter.quote({ inputMint: mint, outputMint: SOL_MINT,
+          amountRaw: BigInt(buy.otherAmountThreshold), slippageBps: buy.slippageBps });
+        const outcome = roundtripOutcome(buy, sell, BigInt(this.ctx.cfg.jupiter.maxPriorityFeeLamports), this.ctx.cfg.execution.closeEmptyAccounts);
+        this.ctx.data.record('roundtrip-execution-check', this.name, outcome);
+        if (outcome.edgeBps < this.c.arbMinEdgeBps) throw new Error('Fresh roundtrip edge below threshold');
+      },
       exitRules: {
         takeProfitPct: 1_000,
         stopLossPct: 3,
@@ -256,7 +270,7 @@ export class SuckUpTheRentStrategy extends BaseStrategy {
 
   private tokenPriceInSol(pool: RaydiumPool, tokenIsMintA: boolean): number {
     // Raydium: price = Menge mintB pro 1 mintA
-    if (!(pool.price > 0)) return NaN;
+    if (pool.price === null || !(pool.price > 0)) return NaN;
     return tokenIsMintA ? pool.price : 1 / pool.price;
   }
 
@@ -264,21 +278,26 @@ export class SuckUpTheRentStrategy extends BaseStrategy {
     const { raydium, portfolio } = this.ctx;
     const open = portfolio.lpPositions(this.name);
     if (open.length === 0) return;
-    const pools = await raydium.getPoolsByIds(open.map((l) => l.poolId));
+    let pools: RaydiumPool[];
+    try { pools = await raydium.getPoolsByIds(open.map((l) => l.poolId)); }
+    catch (error) {
+      for (const lp of open) portfolio.updateLp(lp.id, { missedUpdates: lp.missedUpdates + 1, lastUpdateAt: Date.now() });
+      throw error;
+    }
     const byId = new Map(pools.map((p) => [p.id, p]));
     const now = Date.now();
 
     for (const lp of open) {
       const pool = byId.get(lp.poolId);
       const price = pool ? this.tokenPriceInSol(pool, lp.tokenIsMintA) : NaN;
-      if (!pool || !Number.isFinite(price) || price <= 0) {
+      if (!pool || !completePool(pool) || !Number.isFinite(price) || price <= 0) {
         const missed = lp.missedUpdates + 1;
-        portfolio.updateLp(lp.id, { missedUpdates: missed });
-        if (missed >= LP_MAX_MISSED_UPDATES) this.closeLp(lp, 'POOL_GONE');
+        portfolio.updateLp(lp.id, { missedUpdates: missed, lastUpdateAt: now });
+        this.log.warn('LP valuation unavailable; retain position without invented fees', { pool: lp.poolId, missed });
         continue;
       }
 
-      const dt = Math.max(0, now - lp.lastUpdateAt);
+      const dt = lp.missedUpdates > 0 ? 0 : Math.min(this.c.lpScanIntervalMs, Math.max(0, now - lp.lastUpdateAt));
       const feeApr = pool.day.feeApr;
       const fees = lp.accruedFeesLamports + (lp.depositLamports * (feeApr / 100) * dt) / YEAR_MS;
       const r = price / lp.entryTokenPriceSol;
@@ -323,7 +342,7 @@ export class SuckUpTheRentStrategy extends BaseStrategy {
     const taken = new Set(open.map((l) => l.poolId));
     const takenTokens = new Set(open.map((l) => l.tokenMint));
     const candidates = pools
-      .filter((p) => p.type === 'Standard')
+      .filter(completePool)
       .filter((p) => (p.mintA.address === SOL_MINT) !== (p.mintB.address === SOL_MINT))
       .map((p) => {
         const tokenIsMintA = p.mintB.address === SOL_MINT;
@@ -346,10 +365,11 @@ export class SuckUpTheRentStrategy extends BaseStrategy {
       if (opened >= slots) break;
       const price = this.tokenPriceInSol(x.pool, x.tokenIsMintA);
       if (!Number.isFinite(price) || price <= 0) continue;
-      const check = await safety.safeCheck(x.token.address, { rejectMintAuthority: false });
+      const check = await safety.safeCheck(x.token.address, { rejectMintAuthority: false, fresh: true });
       if (!check.ok) continue;
 
       const pairName = `${x.token.symbol || shortAddr(x.token.address)}/SOL`;
+      checkTask();
       const lp: LpPaperPosition = {
         id: `LP-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`,
         strategy: this.name,
@@ -418,6 +438,12 @@ export class SuckUpTheRentStrategy extends BaseStrategy {
   // ======================================================================= (c) Rent-Reclaimer
 
   private async rentTick(): Promise<void> {
+    if (entryMaintenance.busy) return;
+    entryMaintenance.busy = true;
+    try { await this.reclaimRent(); } finally { entryMaintenance.busy = false; }
+  }
+
+  private async reclaimRent(): Promise<void> {
     const { executor, portfolio } = this.ctx;
     const exclude = new Set<string>([...portfolio.positions().map((p) => p.mint), ...inFlightMints]);
     const res = await executor.reclaimEmptyAccounts(exclude);

@@ -1,3 +1,5 @@
+import type { DataHealth } from '../data/core/data-health';
+import { redactText } from '../utils/redact';
 import { Connection, type Commitment } from '@solana/web3.js';
 import { TokenBucket } from '../utils/rate-limiter';
 import { errorMessage } from '../utils/errors';
@@ -42,6 +44,8 @@ export class ConnectionManager {
   private readonly endpoints: Endpoint[];
   private healthTimer: NodeJS.Timeout | null = null;
   private readonly log: Logger;
+  private dataHealth?: DataHealth;
+  attachDataHealth(health: DataHealth): void { this.dataHealth = health; }
 
   constructor(urls: string[], private readonly o: ConnectionManagerOptions) {
     if (urls.length === 0) throw new Error('ConnectionManager: keine Endpoints');
@@ -95,18 +99,22 @@ export class ConnectionManager {
       const ep = this.pick(tried);
       await ep.limiter.acquire();
       const started = Date.now();
+      const health = this.dataHealth?.status('solana-rpc');
+      if (health) { health.requests++; if (attempt > 0) health.retries++; }
       try {
         const result = await withTimeout(fn(ep.connection), opts.timeoutMs ?? this.o.timeoutMs, `${label}@${ep.label}`);
         const latency = Date.now() - started;
+        if (health) { health.latencyMs = latency; health.lastSuccessAt = Date.now(); }
         ep.latencyMs = ep.latencyMs === null ? latency : Math.round(ep.latencyMs * 0.8 + latency * 0.2);
         if (ep.failures > 0) this.log.debug(`${ep.label} wieder stabil`);
         ep.failures = 0;
         return result;
       } catch (e) {
         lastErr = e;
+        this.dataHealth?.failure('solana-rpc', isRateLimitError(e) ? 'rate-limited' : isTransientError(e) ? 'transient' : 'on-chain-verification');
         if (!isTransientError(e)) throw e;
         ep.failures++;
-        ep.lastError = errorMessage(e);
+        ep.lastError = redactText(errorMessage(e));
         if (isRateLimitError(e)) ep.limiter.pause(Math.min(15_000, 1_000 * 2 ** Math.min(ep.failures, 4)));
         if (ep.failures >= 3) {
           const cooldown = Math.min(120_000, 5_000 * ep.failures);
@@ -172,7 +180,7 @@ export class ConnectionManager {
           return { label: ep.label, ok: true, latencyMs: latency, slot, error: null };
         } catch (e) {
           ep.failures++;
-          ep.lastError = errorMessage(e);
+          ep.lastError = redactText(errorMessage(e));
           ep.cooldownUntil = Date.now() + 30_000;
           return { label: ep.label, ok: false, latencyMs: null, slot: null, error: ep.lastError };
         }

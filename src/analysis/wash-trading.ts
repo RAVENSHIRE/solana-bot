@@ -79,7 +79,7 @@ export function analyzeVolumeQuality(trades: PoolTrade[]): VolumeQuality {
     const lo = Math.min(w.buyUsd, w.sellUsd);
     if (w.trades.length >= 2 && hi > 0 && lo / hi >= 0.8) {
       washWallets.add(addr);
-      for (const t of w.trades) washTx.add(t.txHash);
+      for (const t of w.trades) washTx.add(t.id ?? t.txHash);
       continue;
     }
     // (2) Schnelle Round-Trips gleicher Größe
@@ -91,8 +91,8 @@ export function analyzeVolumeQuality(trades: PoolTrade[]): VolumeQuality {
       if (a.kind === b.kind || b.ts - a.ts > ROUND_TRIP_WINDOW_MS) continue;
       const big = Math.max(a.volumeUsd, b.volumeUsd);
       if (big > 0 && Math.abs(a.volumeUsd - b.volumeUsd) / big <= ROUND_TRIP_SIZE_TOLERANCE) {
-        washTx.add(a.txHash);
-        washTx.add(b.txHash);
+        washTx.add(a.id ?? a.txHash);
+        washTx.add(b.id ?? b.txHash);
         pairs++;
       }
     }
@@ -113,7 +113,7 @@ export function analyzeVolumeQuality(trades: PoolTrade[]): VolumeQuality {
     const distinctWallets = new Set(list.map((t) => t.wallet)).size;
     if (list.length >= 5 && distinctWallets >= 3 && list.length / trades.length >= 0.08) {
       repeatedCount += list.length;
-      for (const t of list) washTx.add(t.txHash);
+      for (const t of list) washTx.add(t.id ?? t.txHash);
     }
   }
   if (repeatedCount / trades.length > 0.25) flags.push('viele identische Tradegrößen');
@@ -123,7 +123,7 @@ export function analyzeVolumeQuality(trades: PoolTrade[]): VolumeQuality {
   const dustRatio = dust / trades.length;
   if (dustRatio > 0.3) flags.push('Dust-Spam');
 
-  const washVolume = trades.filter((t) => washTx.has(t.txHash)).reduce((s, t) => s + t.volumeUsd, 0);
+  const washVolume = trades.filter((t) => washTx.has(t.id ?? t.txHash)).reduce((s, t) => s + t.volumeUsd, 0);
   const washRatio = clamp(washVolume / total, 0, 1);
   const uniqueWalletRatio = wallets.size / trades.length;
   const topWalletShare = Math.max(...[...wallets.values()].map((w) => w.buyUsd + w.sellUsd)) / total;

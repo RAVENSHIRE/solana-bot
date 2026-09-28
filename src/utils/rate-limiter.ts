@@ -1,4 +1,4 @@
-import { sleep } from './retry';
+import { setTimeout as delay } from 'node:timers/promises';
 
 /**
  * Token-Bucket-Limiter. Mehrere gleichzeitige Aufrufer werden fair gedrosselt,
@@ -13,17 +13,18 @@ export class TokenBucket {
     private readonly capacity: number,
     private readonly refillPerSecond: number,
   ) {
-    if (capacity <= 0 || refillPerSecond <= 0) {
+    if (capacity < 1 || refillPerSecond <= 0) {
       throw new Error('TokenBucket: capacity und refillPerSecond müssen > 0 sein');
     }
     this.tokens = capacity;
   }
 
-  async acquire(): Promise<void> {
+  async acquire(signal?: AbortSignal): Promise<void> {
     for (;;) {
+      signal?.throwIfAborted();
       const now = Date.now();
       if (now < this.pausedUntil) {
-        await sleep(this.pausedUntil - now);
+        await delay(Math.min(60_000, this.pausedUntil - now), undefined, { signal });
         continue;
       }
       this.refill(now);
@@ -32,7 +33,7 @@ export class TokenBucket {
         return;
       }
       const waitMs = Math.ceil(((1 - this.tokens) / this.refillPerSecond) * 1000);
-      await sleep(Math.max(10, waitMs));
+      await delay(Math.max(10, waitMs), undefined, { signal });
     }
   }
 

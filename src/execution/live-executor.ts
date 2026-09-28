@@ -1,3 +1,4 @@
+import { parse, safeInteger } from '../data/core/data-validator';
 import { VersionedTransaction, type Keypair, type VersionedTransactionResponse } from '@solana/web3.js';
 import { BaseExecutor, SwapError, type ExecutorDeps, type RentReclaimResult, type SwapFill, type SwapRequest } from './executor';
 import { JupiterClient, type JupiterQuote } from './jupiter-client';
@@ -36,6 +37,7 @@ export class LiveExecutor extends BaseExecutor {
       const built = await this.deps.jupiter.buildSwap(quote, owner);
       tx = VersionedTransaction.deserialize(Buffer.from(built.swapTransaction, 'base64'));
       lastValidBlockHeight = built.lastValidBlockHeight;
+      this.ensureFresh(quote);
       tx.sign([this.wallet]);
     } catch (e) {
       throw new SwapError(`Swap-Transaktion konnte nicht gebaut werden: ${errorMessage(e)}`, 'build', 0n, null, { cause: e });
@@ -61,6 +63,7 @@ export class LiveExecutor extends BaseExecutor {
     }
 
     let signature: string;
+    this.ensureFresh(quote);
     try {
       ({ signature } = await this.sender.sendAndConfirm(tx, lastValidBlockHeight));
     } catch (e) {
@@ -74,7 +77,8 @@ export class LiveExecutor extends BaseExecutor {
       throw new SwapError(`Senden fehlgeschlagen: ${errorMessage(e)}`, 'send', 0n, null, { cause: e });
     }
 
-    return this.parseFill(req, quote, signature, started);
+    try { return await this.parseFill(req, quote, signature, started); }
+    catch (error) { throw error instanceof SwapError ? error : new SwapError('Confirmed fill validation failed', 'unknown', 0n, signature); }
   }
 
   /** Liest die tatsächlichen Beträge aus der bestätigten Transaktion. */
@@ -86,35 +90,15 @@ export class LiveExecutor extends BaseExecutor {
     const impact = JupiterClient.priceImpactPct(quote);
 
     if (!tx?.meta) {
-      // Tx ist bestätigt, aber (noch) nicht indexiert → konservativ mit Quote-Werten buchen
-      this.deps.logger.warn('Transaktion bestätigt, Details nicht abrufbar – buche Quote-Mindestwerte', { signature });
-      const fee = BASE_FEE_LAMPORTS;
-      const inAmount = BigInt(quote.inAmount);
-      return {
-        simulated: false,
-        signature,
-        side: req.side,
-        mint: req.mint,
-        inAmountRaw: inAmount,
-        outAmountRaw: minOut,
-        quotedOutRaw: quotedOut,
-        minOutRaw: minOut,
-        solDeltaLamports: req.side === 'BUY' ? -(inAmount + fee) : minOut - fee,
-        feeLamports: fee,
-        rentLamports: 0n,
-        priceImpactPct: impact,
-        realizedSlippageBps: bpsOf(quotedOut - minOut, quotedOut),
-        route,
-        latencyMs: Date.now() - started,
-      };
+      throw new SwapError('Confirmed transaction details unavailable; reconciliation required', 'unknown', 0n, signature);
     }
 
     const meta = tx.meta;
     const keys = tx.transaction.message.getAccountKeys({ accountKeysFromLookups: meta.loadedAddresses ?? undefined });
     const ownerIdx = Array.from({ length: keys.length }, (_, i) => i).find((i) => keys.get(i)?.equals(this.owner));
-    const idx = ownerIdx ?? 0;
-    const solDelta = BigInt(meta.postBalances[idx] ?? 0) - BigInt(meta.preBalances[idx] ?? 0);
-    const fee = BigInt(meta.fee);
+    if (ownerIdx === undefined) throw new SwapError('Transaction owner missing', 'unknown', 0n, signature);
+    const solDelta = BigInt(parse(safeInteger, meta.postBalances[ownerIdx], 'solana-rpc')) - BigInt(parse(safeInteger, meta.preBalances[ownerIdx], 'solana-rpc'));
+    const fee = BigInt(parse(safeInteger, meta.fee, 'solana-rpc'));
     const owner = this.owner.toBase58();
 
     const sumToken = (list: typeof meta.preTokenBalances): bigint =>
@@ -181,7 +165,7 @@ export class LiveExecutor extends BaseExecutor {
 
   async getSolBalanceLamports(): Promise<bigint> {
     const bal = await this.deps.rpc.execute('getBalance', (c) => c.getBalance(this.owner, 'confirmed'));
-    return BigInt(bal);
+    return BigInt(parse(safeInteger, bal, 'solana-rpc'));
   }
 
   async getTokenBalanceRaw(mint: string): Promise<bigint> {
@@ -222,4 +206,3 @@ export class LiveExecutor extends BaseExecutor {
     };
   }
 }
-

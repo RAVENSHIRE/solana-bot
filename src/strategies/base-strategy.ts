@@ -3,6 +3,9 @@ import type { PublicKey } from '@solana/web3.js';
 import type { AppConfig } from '../config/config';
 import type { ConnectionManager } from '../rpc/connection-manager';
 import { SwapError, type SwapFill, type TradeExecutor } from '../execution/executor';
+import { checkTask } from '../data/core/request-scope';
+import type { DataRuntime } from '../data/core/data-runtime';
+import type { JupiterQuote } from '../execution/jupiter-client';
 import type { JupiterClient } from '../execution/jupiter-client';
 import type { Portfolio } from '../core/portfolio';
 import type { RiskManager } from '../core/risk-manager';
@@ -28,6 +31,7 @@ import { sleep } from '../utils/retry';
 import { formatTokenAmount, lamportsToSol, pctChange, round } from '../utils/format';
 
 export interface StrategyContext {
+  data: DataRuntime;
   cfg: AppConfig;
   logger: Logger;
   rpc: ConnectionManager;
@@ -56,8 +60,8 @@ export interface OpenParams {
   signal: string;
   entryPriceUsd: number | null;
   tags?: Record<string, string | number | boolean>;
-  /** Risiko-Prüfung überspringen (nur für bereits geprüfte, atomar gedachte Legs). */
-  skipRiskCheck?: boolean;
+  /** Revalidates the strategy-specific edge on the actual fresh execution quote. */
+  validateBuyQuote?: (quote: JupiterQuote) => Promise<void>;
 }
 
 /** Preis pro ganzem Token in SOL aus einem Lamport-Betrag und einer Token-Rohmenge. */
@@ -78,8 +82,8 @@ export interface ExitDecision {
  */
 export const inFlightMints = new Set<string>();
 
-/** Nach so vielen erfolglosen Bewertungen (kein Quote/keine Route) wird eine Position abgeschrieben. */
-const MAX_VALUATION_MISSES = 30;
+/** Serialize risk-check + execution + booking across strategies. */
+export const entryMaintenance = { busy: false };
 
 /**
  * Gemeinsame Basis aller Strategien: Ein-/Ausstieg mit Risiko-Check, Fehlerbehandlung,
@@ -123,8 +127,19 @@ export abstract class BaseStrategy implements Strategy {
   // ======================================================================= Einstieg
 
   protected async openPosition(p: OpenParams): Promise<Position | null> {
+    checkTask();
+    if (entryMaintenance.busy || inFlightMints.has(p.mint)) return null;
+    entryMaintenance.busy = true; inFlightMints.add(p.mint);
+    try { return await this.openReservedPosition(p); }
+    finally { entryMaintenance.busy = false; inFlightMints.delete(p.mint); }
+  }
+
+  private async openReservedPosition(p: OpenParams): Promise<Position | null> {
     const { executor, portfolio, risk } = this.ctx;
-    if (!p.skipRiskCheck) {
+    if (portfolio.positions().some(pos => pos.valuationMisses > 0 || pos.tags.reconstructed === true)) {
+      this.log.warn('New entry blocked: valuation or accounting requires reconciliation'); return null;
+    }
+    {
       const available = await executor.getSolBalanceLamports();
       const decision = risk.canOpen({ strategy: this.name, mint: p.mint, sizeLamports: p.sizeLamports, availableLamports: available });
       if (!decision.ok) {
@@ -136,8 +151,10 @@ export abstract class BaseStrategy implements Strategy {
     let fill: SwapFill;
     inFlightMints.add(p.mint);
     try {
+      checkTask();
       fill = await executor.swap({
         side: 'BUY',
+        validateBuyQuote: p.validateBuyQuote,
         mint: p.mint,
         amountRaw: p.sizeLamports,
         slippageBps: p.slippageBps,
@@ -149,8 +166,6 @@ export abstract class BaseStrategy implements Strategy {
         return this.reconstructUnknownBuy(p);
       }
       return null;
-    } finally {
-      inFlightMints.delete(p.mint);
     }
     risk.recordTxResult(true);
 
@@ -462,8 +477,7 @@ export abstract class BaseStrategy implements Strategy {
     if (value === null) {
       const misses = pos.valuationMisses + 1;
       portfolio.updatePosition(pos.id, { valuationMisses: misses, lastCheckedAt: Date.now() });
-      if (misses >= MAX_VALUATION_MISSES) this.writeOff(pos, `keine Route seit ${misses} Bewertungen`);
-      else if (misses % 5 === 0) this.log.warn(`${pos.symbol}: ${misses} Bewertungen ohne Quote`);
+      if (misses % 5 === 0) this.log.warn(`${pos.symbol}: ${misses} Bewertungen ohne Quote`);
       return;
     }
 
@@ -498,25 +512,4 @@ export abstract class BaseStrategy implements Strategy {
     }
   }
 
-  private writeOff(pos: Position, why: string): void {
-    const trade = this.ctx.portfolio.closePosition(pos.id, 0n, 'WRITE_OFF');
-    if (!trade) return;
-    this.ctx.portfolio.setCooldown(pos.mint, 7 * 24 * 60 * 60_000);
-    this.ctx.journal.record({
-      strategy: this.name,
-      action: 'WRITE_OFF',
-      symbol: pos.symbol,
-      mint: pos.mint,
-      signal: why,
-      inAmount: `${formatTokenAmount(pos.tokenAmountRaw, pos.decimals)} ${pos.symbol}`,
-      outAmount: '0 SOL',
-      feesSol: '0',
-      priceImpactPct: null,
-      slippageBps: null,
-      signature: null,
-      pnlSol: lamportsToSol(trade.pnlLamports),
-      pnlPct: round(trade.pnlPct, 2),
-      note: this.ctx.executor.mode === 'LIVE' ? 'Tokens verbleiben ggf. in der Wallet (nicht mehr verwaltet)' : undefined,
-    });
-  }
 }

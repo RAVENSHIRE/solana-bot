@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import type { DataSettings } from '../data/core/data-runtime';
 import { z } from 'zod';
 import type { Commitment } from '@solana/web3.js';
 import { BASE58_ADDRESS_REGEX, type ExecMode } from '../core/types';
@@ -57,11 +58,31 @@ const EnvSchema = z.object({
   RPC_TIMEOUT_MS: int(15_000, 1_000, 120_000),
   RPC_HEALTH_INTERVAL_MS: int(30_000, 5_000, 600_000),
 
+  // Shared read-only market-data layer
+  DATA_CACHE_ENABLED: bool(true),
+  DATA_DISCOVERY_TTL_MS: int(60_000, 0, 300_000),
+  DATA_ANALYSIS_TTL_MS: int(15_000, 0, 60_000),
+  DATA_POSITION_TTL_MS: int(3000, 0, 15_000),
+  DATA_MAX_CONCURRENT: int(4, 2, 16),
+  DATA_RETRIES: int(2, 0, 5),
+  DATA_TIMEOUT_MS: int(10_000, 1000, 60_000),
+  DATA_MAX_PRICE_AGE_MS: int(90_000, 5000, 300_000),
+  DATA_MAX_CANDLE_AGE_MS: int(600_000, 300_000, 1_800_000),
+  DATA_DEX_RPS: num(1, 0.05, 1),
+  DATA_GECKO_RPS: num(8 / 60, 0.01, 0.5),
+  DATA_RAYDIUM_RPS: num(1, 0.05, 5),
+  DATA_HISTORY_ENABLED: bool(true),
+  DATA_RETENTION_DAYS: int(7, 1, 365),
+  DATA_HISTORY_MAX_MB: int(128, 8, 4096),
+  DATA_MAX_PRICE_DIFFERENCE_PCT: num(20, 0, 100),
+  DATA_MAX_LIQUIDITY_DIFFERENCE_PCT: num(50, 0, 100),
+
   // Jupiter
   JUPITER_API_BASE: text('https://api.jup.ag/swap/v1'),
   JUPITER_API_KEY: optText,
   JUPITER_MAX_RPS: num(1, 0.1, 100),
   JUPITER_MAX_ACCOUNTS: int(40, 16, 64),
+  JUPITER_QUOTE_MAX_AGE_MS: int(15_000, 1000, 60_000),
   PRIORITY_LEVEL: oneOf(['medium', 'high', 'veryHigh'], 'high'),
   MAX_PRIORITY_FEE_LAMPORTS: int(300_000, 0, 50_000_000),
 
@@ -147,6 +168,7 @@ const EnvSchema = z.object({
 });
 
 export interface AppConfig {
+  data: DataSettings;
   mode: ExecMode;
   simulation: boolean;
   rpc: {
@@ -163,6 +185,7 @@ export interface AppConfig {
     maxAccounts: number;
     priorityLevel: 'medium' | 'high' | 'veryHigh';
     maxPriorityFeeLamports: number;
+    quoteMaxAgeMs?: number;
   };
   execution: {
     defaultSlippageBps: number;
@@ -279,6 +302,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   }
 
   return {
+    data: { cacheEnabled: e.DATA_CACHE_ENABLED, discoveryTtlMs: e.DATA_DISCOVERY_TTL_MS, analysisTtlMs: e.DATA_ANALYSIS_TTL_MS,
+      positionTtlMs: e.DATA_POSITION_TTL_MS, maxConcurrent: e.DATA_MAX_CONCURRENT, retries: e.DATA_RETRIES, timeoutMs: e.DATA_TIMEOUT_MS,
+      maxPriceAgeMs: e.DATA_MAX_PRICE_AGE_MS, maxCandleAgeMs: e.DATA_MAX_CANDLE_AGE_MS, dexRps: e.DATA_DEX_RPS,
+      geckoRps: e.DATA_GECKO_RPS, raydiumRps: e.DATA_RAYDIUM_RPS, persistHistory: e.DATA_HISTORY_ENABLED,
+      retentionDays: e.DATA_RETENTION_DAYS, historyMaxBytes: e.DATA_HISTORY_MAX_MB * 1024 * 1024,
+      maxPriceDifferencePct: e.DATA_MAX_PRICE_DIFFERENCE_PCT, maxLiquidityDifferencePct: e.DATA_MAX_LIQUIDITY_DIFFERENCE_PCT },
     mode: simulation ? 'SIMULATION' : 'LIVE',
     simulation,
     rpc: {
@@ -293,6 +322,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       apiKey: e.JUPITER_API_KEY,
       maxRps: e.JUPITER_MAX_RPS,
       maxAccounts: e.JUPITER_MAX_ACCOUNTS,
+      quoteMaxAgeMs: e.JUPITER_QUOTE_MAX_AGE_MS,
       priorityLevel: e.PRIORITY_LEVEL,
       maxPriorityFeeLamports: e.MAX_PRIORITY_FEE_LAMPORTS,
     },

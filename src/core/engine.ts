@@ -1,3 +1,5 @@
+import { requestScope } from '../data/core/request-scope';
+import type { DataRuntime } from '../data/core/data-runtime';
 import type { Strategy } from './types';
 import type { Portfolio } from './portfolio';
 import type { RiskManager } from './risk-manager';
@@ -6,10 +8,11 @@ import type { ConnectionManager } from '../rpc/connection-manager';
 import type { TradeExecutor } from '../execution/executor';
 import type { Logger } from '../utils/logger';
 import { errorMessage } from '../utils/errors';
-import { sleep, withTimeout } from '../utils/retry';
+import { sleep } from '../utils/retry';
 import { lamportsToSol } from '../utils/format';
 
 export interface EngineDeps {
+  data?: DataRuntime;
   portfolio: Portfolio;
   risk: RiskManager;
   journal: TradeJournal;
@@ -25,6 +28,7 @@ export interface EngineDeps {
 type TaskKind = 'scan' | 'manage';
 
 interface TaskState {
+  controller: AbortController | null;
   timer: NodeJS.Timeout | null;
   running: Promise<void> | null;
   consecutiveErrors: number;
@@ -92,7 +96,7 @@ export class Engine {
     const key = this.taskKey(s, kind);
     let st = this.tasks.get(key);
     if (!st) {
-      st = { timer: null, running: null, consecutiveErrors: 0, runs: 0, lastDurationMs: 0 };
+      st = { controller: null, timer: null, running: null, consecutiveErrors: 0, runs: 0, lastDurationMs: 0 };
       this.tasks.set(key, st);
     }
     const state = st;
@@ -108,9 +112,15 @@ export class Engine {
     const base = kind === 'scan' ? s.scanIntervalMs : s.manageIntervalMs;
     const started = Date.now();
     let next = base;
+    const controller = new AbortController(); st.controller = controller;
+    const deadline = setTimeout(() => {
+      controller.abort(new Error(`${s.name}.${kind} deadline exceeded`));
+      this.log.warn('Task deadline reached; waiting for cancellation before rescheduling', { strategy: s.name, kind });
+    }, this.d.tickTimeoutMs);
     try {
-      const work = kind === 'scan' ? s.scan() : s.manage();
-      await withTimeout(work, this.d.tickTimeoutMs, `${s.name}.${kind}`);
+      await requestScope.run({ category: kind === 'manage' ? 'position' : 'discovery', strategy: s.name, signal: controller.signal },
+        () => kind === 'scan' ? s.scan() : s.manage());
+      controller.signal.throwIfAborted();
       st.consecutiveErrors = 0;
     } catch (e) {
       st.consecutiveErrors++;
@@ -122,6 +132,7 @@ export class Engine {
         nextInMs: next,
       });
     } finally {
+      clearTimeout(deadline); st.controller = null;
       st.runs++;
       st.lastDurationMs = Date.now() - started;
       this.schedule(s, kind, Math.max(250, next - (kind === 'manage' ? 0 : Math.min(st.lastDurationMs, base / 2))));
@@ -135,7 +146,10 @@ export class Engine {
     const tasks = Object.fromEntries(
       [...this.tasks.entries()].map(([k, v]) => [k, { runs: v.runs, errs: v.consecutiveErrors, lastMs: v.lastDurationMs }]),
     );
+    const providers = this.d.data?.health.snapshot();
+    this.d.data?.record('provider-health', 'engine', { providers, droppedHistoryRecords: this.d.data.history?.dropped ?? 0 });
     this.log.info('♥ Heartbeat', {
+      providers,
       uptimeMin: Math.round((Date.now() - this.startedAt) / 60_000),
       rssMb: Math.round(mem.rss / 1_048_576),
       heapMb: Math.round(mem.heapUsed / 1_048_576),
@@ -167,6 +181,7 @@ export class Engine {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.d.rpc.stopHealthLoop();
     for (const st of this.tasks.values()) {
+      st.controller?.abort(new Error('Engine shutdown'));
       if (st.timer) clearTimeout(st.timer);
       st.timer = null;
     }
@@ -181,6 +196,7 @@ export class Engine {
     await this.d.journal.flush();
     await this.d.portfolio.flush();
     this.heartbeat();
+    await this.d.data?.flush();
     this.log.info('Engine gestoppt, Zustand gespeichert');
   }
 }

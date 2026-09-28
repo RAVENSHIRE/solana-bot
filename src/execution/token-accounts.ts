@@ -11,6 +11,9 @@ import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, createCloseAccountInstruction 
 import type { ConnectionManager } from '../rpc/connection-manager';
 import type { TransactionSender } from './tx-sender';
 import type { Logger } from '../utils/logger';
+import { z } from 'zod';
+import { address, parse, rawAmount, safeInteger } from '../data/core/data-validator';
+import { DataError } from '../data/core/data-types';
 import { errorMessage } from '../utils/errors';
 
 export interface OwnedTokenAccount {
@@ -23,27 +26,19 @@ export interface OwnedTokenAccount {
   closable: boolean;
 }
 
-interface ParsedTokenInfo {
-  mint?: string;
-  state?: string;
-  tokenAmount?: { amount?: string };
-  extensions?: Array<{ extension?: string; state?: { withheldAmount?: number | string } }>;
-}
-
-function parseAccount(item: { pubkey: PublicKey; account: AccountInfo<ParsedAccountData> }): OwnedTokenAccount | null {
-  const info = (item.account.data.parsed as { info?: ParsedTokenInfo } | undefined)?.info;
-  if (!info?.mint || info.tokenAmount?.amount === undefined) return null;
-  const amountRaw = BigInt(info.tokenAmount.amount);
-  const withheld = info.extensions?.find((e) => e.extension === 'transferFeeAmount')?.state?.withheldAmount;
-  const hasWithheld = withheld !== undefined && Number(withheld) > 0;
-  return {
-    pubkey: item.pubkey,
-    mint: info.mint,
-    programId: item.account.owner,
-    amountRaw,
-    lamports: item.account.lamports,
-    closable: amountRaw === 0n && info.state !== 'frozen' && !hasWithheld,
-  };
+const tokenAccountInfo = z.object({ mint: address, owner: address, state: z.enum(['initialized', 'frozen', 'uninitialized']),
+  closeAuthority: address.nullish(), tokenAmount: z.object({ amount: rawAmount }),
+  extensions: z.array(z.object({ extension: z.string(), state: z.object({ withheldAmount: rawAmount.optional() }).passthrough().optional() })).optional() });
+export function parseOwnedTokenAccount(item: { pubkey: PublicKey; account: AccountInfo<ParsedAccountData> }, owner: PublicKey, expectedMint?: string): OwnedTokenAccount {
+  if (!item.account.owner.equals(TOKEN_PROGRAM_ID) && !item.account.owner.equals(TOKEN_2022_PROGRAM_ID)) throw new DataError('on-chain-verification', 'solana-rpc', 'unexpected token account program');
+  const parsed = parse(z.object({ type: z.literal('account'), info: tokenAccountInfo }), item.account.data.parsed, 'solana-rpc');
+  const info = parsed.info;
+  if (info.owner !== owner.toBase58() || (expectedMint && info.mint !== expectedMint)) throw new DataError('on-chain-verification', 'solana-rpc', 'token account ownership or mint mismatch');
+  const withheld = info.extensions?.find(e => e.extension === 'transferFeeAmount');
+  const clearWithheld = !withheld || withheld.state?.withheldAmount === 0n;
+  return { pubkey: item.pubkey, mint: info.mint, programId: item.account.owner, amountRaw: info.tokenAmount.amount,
+    lamports: parse(safeInteger, item.account.lamports, 'solana-rpc'),
+    closable: info.tokenAmount.amount === 0n && info.state === 'initialized' && clearWithheld && (!info.closeAuthority || info.closeAuthority === owner.toBase58()) };
 }
 
 export async function listTokenAccounts(
@@ -55,7 +50,7 @@ export async function listTokenAccounts(
     const res = await rpc.execute('getParsedTokenAccountsByOwner(mint)', (c) =>
       c.getParsedTokenAccountsByOwner(owner, { mint: new PublicKey(mint) }),
     );
-    return res.value.map(parseAccount).filter((a): a is OwnedTokenAccount => a !== null);
+    return res.value.map(item => parseOwnedTokenAccount(item, owner, mint));
   }
   const results = await Promise.all(
     [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID].map((programId) =>
@@ -64,8 +59,7 @@ export async function listTokenAccounts(
   );
   return results
     .flatMap((r) => r.value)
-    .map(parseAccount)
-    .filter((a): a is OwnedTokenAccount => a !== null);
+    .map(item => parseOwnedTokenAccount(item, owner));
 }
 
 /** Schließt leere Token-Konten in Batches und holt die Rent zurück in die Wallet. */
