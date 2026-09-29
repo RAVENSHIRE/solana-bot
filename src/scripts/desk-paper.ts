@@ -34,14 +34,16 @@ async function main(): Promise<void> {
     if (process.argv.includes('--no-fair')) engine.setStrategy('FAIR', false);
     engine.start();
     if (process.argv.includes('--drill')) engine.drill = true;
-    for (let i = 0; i < scans; i++) {
-      await engine.pulse(); flushEvents();
-      // Between scans the positions keep their own (faster) exit cadence, exactly like the dashboard.
-      const until = Date.now() + (i < scans - 1 ? DESK.scanMs : 0);
-      while (Date.now() < until) { engine.tick(); await new Promise(r => setTimeout(r, 1000)); flushEvents(); }
-      await engine.settled(); flushEvents();
-    }
+    // Same host loop as the dashboard: positions keep their own (faster) exit cadence, also while a scan is running.
+    const ticker = setInterval(() => { engine.tick(); flushEvents(); }, 1000);
+    try {
+      for (let i = 0; i < scans; i++) {
+        await engine.pulse(); flushEvents();
+        if (i < scans - 1) await new Promise(r => setTimeout(r, DESK.scanMs));
+      }
+    } finally { clearInterval(ticker); }
     engine.stop('headless run finished');
+    await engine.settled(); flushEvents();
     const view = () => engine.status({ connected: true, address: owner.toBase58() });
     const probeMint = arg('probe-mint');
     if (probeMint) { await engine.probe(probeMint).catch(error => console.log(`PROBE rejected: ${(error as Error).message}`)); flushEvents(); }
