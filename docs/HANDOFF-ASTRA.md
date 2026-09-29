@@ -115,7 +115,28 @@ In both the SIF and the GM case, the original was earliest, had by far the most 
 - The scale ladder ($10 → $100 → $1K → $10K per entry) is advisory only (`scaleAdvice`).
 - Before raising sizes, gate them on the pool's depth: the next size needs about 50× the entry in liquidity for ≈ 2 % impact.
 
-## 6. Known loose ends
+## 6. Discovery: what was missed and what is fixed
+
+**Missed early: SI** `7Wh6rxVWUBFCNCWCz7nLaV7z3SDr2M6rFTjjWP6aE8p1` (pump.fun, graduated 33 s after launch).
+- The PumpSwap pool opened at 23:53:11. Market cap went $15K–$64K (to 23:56), $128K (23:57), then peaked at $447K (00:05).
+- The desk first saw it at 00:08, at ≈ $396K. CRASH entered and was stopped out at −15 %.
+- Why:
+  - New tokens came only from GeckoTerminal's new-pools page 1, the 20 newest pools on all of Solana. That page scrolls past a pool within about a minute.
+  - Scans took ~90 s waiting on GeckoTerminal's rate limit.
+
+**Fixed in `18f29ad`.**
+- `GraduationFeed` (`src/desk/migrations.ts`) reads every pump.fun graduation from the chain.
+  - Source: signatures of pump.fun's migration authority `39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg`, whose `MigrateV2` → `CreatePool` transactions contain the mint.
+  - Volume: ≈ 110 per hour.
+  - Graduations stay in discovery for 30 min and are assessed right after held tokens.
+- Discovery (12 s) and GeckoTerminal-bound evidence (20 s) have time budgets that cancel queued requests.
+- Verified on the real chain: scans of 24–36 s, 7 graduations in discovery, and a CRASH entry 15 s after a new graduation. Instant rugs (−99.6 % within 5 min) were correctly rejected.
+
+**Still not covered.**
+- Tokens from other launchpads (LetsBonk, Believe, Meteora DBC, Raydium LaunchLab, PONS…). Each needs its own on-chain feed.
+- The pre-graduation bonding-curve phase, which is not tradeable through the AMM path.
+
+## 7. Known loose ends
 
 - `DeskEngine.entryAllowance` (committed in `cbfa7fd`) is an unused optional cap on new entries per session. Use it or remove it.
 - The PowerShell console shows `·` and `—` garbled in logs. Cosmetic: the dashboard renders UTF-8.
