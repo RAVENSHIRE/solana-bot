@@ -82,14 +82,18 @@ export function gates(i: AnalysisInput): GateResult[] {
   const extensions = o?.safety ? o.safety.reasons.filter(r => !/Freeze-Authority|Mint-Authority/.test(r)) : null;
   return [
     gate('volume5m', '5m volume', m.volume5mUsd, (v: number) => v > g.minVolume5mUsd, usd(m.volume5mUsd), `> ${usd(g.minVolume5mUsd)}`),
-    gate('liquidity', 'Liquidity', m.liquidityUsd, (v: number) => v > g.minLiquidityUsd, usd(m.liquidityUsd), `> ${usd(g.minLiquidityUsd)}`),
+    // A bonding curve has no AMM pool: entries require migrated liquidity, so the gate fails with that reason, not UNKNOWN.
+    m.migration === 'BONDING_CURVE' && m.liquidityUsd === null
+      ? { key: 'liquidity', label: 'Liquidity', status: 'FAIL', actual: 'bonding curve — no AMM pool yet', required: `> ${usd(g.minLiquidityUsd)} in an AMM pool`, blocking: true }
+      : gate('liquidity', 'Liquidity', m.liquidityUsd, (v: number) => v > g.minLiquidityUsd, usd(m.liquidityUsd), `> ${usd(g.minLiquidityUsd)}`),
     gate('buySell', 'Buy/sell ratio (5m)', m.buySellRatio5m, (v: number) => v > g.minBuySellRatio, num(m.buySellRatio5m), `> ${g.minBuySellRatio}`),
     gate('mintAuthority', 'Mint authority revoked', o?.safety ? !o.safety.hasMintAuthority : null, (v: boolean) => v, o?.safety ? (o.safety.hasMintAuthority ? 'ACTIVE' : 'REVOKED') : 'UNKNOWN', 'REVOKED'),
     gate('freezeAuthority', 'Freeze authority revoked', o?.safety ? !o.safety.hasFreezeAuthority : null, (v: boolean) => v, o?.safety ? (o.safety.hasFreezeAuthority ? 'ACTIVE' : 'REVOKED') : 'UNKNOWN', 'REVOKED'),
     gate('contract', 'No dangerous token extensions', extensions ? extensions.length === 0 : null, (v: boolean) => v, extensions ? (extensions.join('; ') || 'none') : 'UNKNOWN', 'none'),
     gate('top10', 'Top-10 wallet concentration', m.top10WalletPct, (v: number) => v <= g.maxTop10WalletPct, pct(m.top10WalletPct), `≤ ${g.maxTop10WalletPct}%`),
     gate('largestWallet', 'Largest single wallet', m.largestWalletPct, (v: number) => v <= g.maxLargestWalletPct, pct(m.largestWalletPct), `≤ ${g.maxLargestWalletPct}%`),
-    gate('liquidityRatio', 'Liquidity vs market cap', liqRatio, (v: number) => v >= g.minLiquidityToMarketCap, pct(liqRatio === null ? null : liqRatio * 100), `≥ ${g.minLiquidityToMarketCap * 100}%`),
+    gate('liquidityRatio', 'Liquidity vs market cap', liqRatio, (v: number) => v >= g.minLiquidityToMarketCap, pct(liqRatio === null ? null : liqRatio * 100),
+      `≥ ${g.minLiquidityToMarketCap * 100}%`, m.migration !== 'BONDING_CURVE'),
     // Needs a previous observation; the first scan cannot fail it, and momentum confirmation already requires a second.
     gate('liquidityDrop', 'Liquidity change since last scan', liqDrop, (v: number) => v < g.maxLiquidityDropPct,
       liqDrop === null ? 'first observation' : `${liqDrop > 0 ? '-' : '+'}${Math.abs(liqDrop).toFixed(1)}%`, `drop < ${g.maxLiquidityDropPct}%`, liqDrop !== null),

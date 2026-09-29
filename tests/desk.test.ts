@@ -119,6 +119,9 @@ test('gates show actual vs required; ultra-early tokens are discovered, never au
   assert.equal(early.status, 'WATCHLIST'); assert.notEqual(early.classification, 'QUALIFIED');
   const fresh = analyze({ ...base, watch: { ...watch, momentumStreak: 0 }, metrics: pairMetrics(base.pair, NOW) });
   assert.equal(fresh.status, 'WAITING'); assert.match(fresh.reasons[0]!, /Momentum confirmed in 1\/2/);
+  const curvePair = pair({ dexId: 'pumpfun', liquidity: null, marketCap: 6_000 });
+  const curve = analyze({ ...base, tier: 'ULTRA_EARLY', pair: curvePair, metrics: pairMetrics(curvePair, NOW) });
+  assert.equal(curve.gates.find(g => g.key === 'liquidity')!.actual, 'bonding curve — no AMM pool yet');
   assert.equal(qualified.scores.map(s => s.key).join(), 'FUNDAMENTAL,SOCIAL,MARKET,ONCHAIN,RISK,MOMENTUM');
 });
 

@@ -455,9 +455,11 @@ export class DeskEngine {
   status(wallet: { connected: boolean; address: string | null }): DeskStatus {
     const d = this.d, ledger = this.currentLedger(), s = ledger?.state, solUsd = this.solUsd;
     const positions = s?.positions ?? [];
-    const value = positions.reduce((a, p) => a + (p.lastValueLamports ? BigInt(p.lastValueLamports) : 0n), 0n);
+    // A position without an executable valuation yet makes totals unknown, never silently $0.
+    const valued = positions.every(p => p.lastValueLamports !== null);
+    const value = valued ? positions.reduce((a, p) => a + BigInt(p.lastValueLamports!), 0n) : null;
     const rent = positions.reduce((a, p) => a + BigInt(p.rentLamports), 0n);
-    const unrealized = solUsd ? positions.reduce((a, p) => a + (p.lastValueLamports ? sol(BigInt(p.lastValueLamports)) * solUsd - p.costUsd : 0), 0) : null;
+    const unrealized = solUsd && valued ? positions.reduce((a, p) => a + sol(BigInt(p.lastValueLamports!)) * solUsd - p.costUsd, 0) : null;
     const native = this.walletView && this.walletView.owner === wallet.address ? this.walletView.native : null;
     const paper = s?.paperCashLamports != null ? BigInt(s.paperCashLamports) : null;
     const budget = d.mode === 'PAPER' ? paper : native;
@@ -472,9 +474,9 @@ export class DeskEngine {
         availableSol: native === null ? null : sol(native), reservedSol: sol(DESK.reserveLamports + rent),
         spendableUsd: spendable !== null && solUsd ? sol(spendable) * solUsd : null,
         paperCashUsd: paper !== null && solUsd ? sol(paper) * solUsd : null, openPositions: positions.length,
-        positionsValueUsd: solUsd ? sol(value) * solUsd : null, unrealizedPnlUsd: unrealized,
+        positionsValueUsd: solUsd && value !== null ? sol(value) * solUsd : null, unrealizedPnlUsd: unrealized,
         realizedPnlUsd: s?.realizedPnlUsd ?? 0, totalFeesUsd: s?.feesUsd ?? 0,
-        equityUsd: cash !== null && solUsd ? sol(cash + value + rent) * solUsd : null, lastWalletSync: this.walletView?.at ?? null,
+        equityUsd: cash !== null && solUsd && value !== null ? sol(cash + value + rent) * solUsd : null, lastWalletSync: this.walletView?.at ?? null,
       },
       message: this.message, halted: s?.halted ?? null, lastScanAt: this.lastScanAt, nextScanAt: this.nextScanAt, scanning: this.busy,
       events: this.events.list(250).reverse(),

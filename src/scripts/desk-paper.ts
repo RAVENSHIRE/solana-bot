@@ -50,7 +50,7 @@ async function main(): Promise<void> {
     console.log('\nCANDIDATES');
     for (const c of s.candidates.slice(0, 15)) console.log(`  ${(c.symbol ?? '?').padEnd(10)} ${c.tier.padEnd(11)} ${c.status.padEnd(9)} ${c.classification.padEnd(9)} cap ${usd(c.metrics.marketCapUsd).padEnd(10)} liq ${usd(c.metrics.liquidityUsd).padEnd(9)} 5m ${usd(c.metrics.volume5mUsd).padEnd(8)} b/s ${c.metrics.buySellRatio5m?.toFixed(2) ?? 'UNKNOWN'} · ${c.reasons[0] ?? ''}`);
     console.log('\nPRE-FLIGHT');
-    for (const p of s.preflights) console.log(`  ${p.side} ${p.symbol} via ${p.router} ${p.route} · in ${p.amountIn} · expected ${p.expectedOut} · min ${p.minimumOut} · impact ${p.priceImpactPct.toFixed(4)}% · ` +
+    for (const p of s.preflights) console.log(`  ${p.side} ${p.symbol ?? p.mint} via ${p.router} ${p.route} · in ${p.amountIn} · expected ${p.expectedOut} · min ${p.minimumOut} · impact ${p.priceImpactPct.toFixed(4)}% · ` +
       `slippage ${p.slippageBps} bps · priority ${p.priorityFeeLamports} · network ${p.networkFeeLamports} · rent ${p.accountRentLamports} · drag ${p.dragPct?.toFixed(2)}% · ` +
       `simulation ${p.simulation.status} (${p.simulation.detail}) · signature ${p.signature} · outcome ${p.outcome}`);
     if (!s.preflights.length) console.log('  none');
