@@ -39,6 +39,8 @@ export interface DeskGuardDeps {
   /** Position size the ledger holds for SELL orders. */
   heldRaw: bigint;
   stopped: () => boolean;
+  /** false only for TEST drill entries: the drag is still measured and reported, but does not block. */
+  enforceDrag?: boolean;
   onSigned: (signature: string) => Promise<void>;
   event: (stage: Stage, message: string, detail?: Record<string, string | number | boolean | null>) => void;
 }
@@ -61,6 +63,8 @@ export class DeskGuard implements ExecutionGuard {
   lastPreflight: Preflight | null = null;
   /** Set once a quote was authorized; a TEST fill is booked from exactly this order. */
   lastOrder: OrderRecord | null = null;
+  /** A quote was received and checked (even if a later gate blocked the order). */
+  quoted = false;
   constructor(private readonly d: DeskGuardDeps) {}
 
   assertActive(): void { if (this.d.stopped()) throw new DeskReject('STOP_REQUESTED'); }
@@ -111,6 +115,7 @@ export class DeskGuard implements ExecutionGuard {
     const route = JupiterClient.routeLabel(q), impactPct = JupiterClient.priceImpactPct(q);
     d.event('QUOTE', `${buy ? 'Buy' : 'Sell'} quote ${buy ? sol(req.amountRaw) : `${q.inAmount} raw`} → expected ${buy ? `${q.outAmount} raw` : sol(BigInt(q.outAmount))}, minimum ${buy ? q.otherAmountThreshold : sol(BigInt(q.otherAmountThreshold))}`,
       { provider: 'Jupiter', impactPct: Number(impactPct.toFixed(4)), slippageBps: q.slippageBps });
+    this.quoted = true;
     d.event('ROUTE', `Jupiter aggregator via ${route}`, { hops: q.routePlan.length, ammKeys: q.routePlan.map(s => s.swapInfo.ammKey).join(',') });
     const s = await this.snapshot();
     const inAmt = BigInt(q.inAmount), out = BigInt(q.outAmount), min = BigInt(q.otherAmountThreshold);
@@ -126,8 +131,10 @@ export class DeskGuard implements ExecutionGuard {
     const budget = notional * d.maxDragBps / 10_000n;
     const remainder = budget - slip - impact - routerFee - BASE_FEE_LAMPORTS;
     // The drag cap limits entries. An exit reduces risk: its cost is reported, never used to trap a position.
-    if (buy && remainder < 0n) throw new DeskReject('FEE_CAP', `slippage ${sol(slip)} + impact ${sol(impact)} + router ${sol(routerFee)} + base fee exceed ${Number(d.maxDragBps) / 100}% (${sol(budget)})`);
-    const maxPriority = !buy || remainder >= d.configuredPriorityCap ? d.configuredPriorityCap : remainder;
+    const capped = buy && d.enforceDrag !== false;
+    if (buy && remainder < 0n && !capped) d.event('PREFLIGHT', `DRILL: drag above ${Number(d.maxDragBps) / 100}% accepted in TEST (slippage ${sol(slip)} + impact ${sol(impact)} + router ${sol(routerFee)})`);
+    if (capped && remainder < 0n) throw new DeskReject('FEE_CAP', `slippage ${sol(slip)} + impact ${sol(impact)} + router ${sol(routerFee)} + base fee exceed ${Number(d.maxDragBps) / 100}% (${sol(budget)})`);
+    const maxPriority = !capped || remainder >= d.configuredPriorityCap ? d.configuredPriorityCap : remainder;
     const priority = await recentPriorityFee(d.rpc, maxPriority);
     const fee = BASE_FEE_LAMPORTS + priority;
     this.checkFunds(buy ? inAmt : 0n, fee, s);
@@ -155,7 +162,7 @@ export class DeskGuard implements ExecutionGuard {
     a.fee = BigInt(parse(safeInteger, feeResult.value, 'solana-rpc'));
     a.dragLamports = a.slip + a.impact + a.routerFee + a.fee;
     if (this.lastOrder) this.lastOrder.fee = a.fee;
-    if (buy && a.dragLamports * 10_000n > a.notional * d.maxDragBps) throw new DeskReject('FEE_CAP', `actual fee ${sol(a.fee)} raises drag above ${Number(d.maxDragBps) / 100}%`);
+    if (buy && d.enforceDrag !== false && a.dragLamports * 10_000n > a.notional * d.maxDragBps) throw new DeskReject('FEE_CAP', `actual fee ${sol(a.fee)} raises drag above ${Number(d.maxDragBps) / 100}%`);
     const s = await this.snapshot();
     this.checkFunds(buy ? req.amountRaw : 0n, a.fee, s);
     const sim = await d.rpc.execute('desk:simulate-unsigned', c => c.simulateTransaction(tx, { sigVerify: false, commitment: 'confirmed',

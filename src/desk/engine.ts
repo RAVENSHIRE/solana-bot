@@ -370,6 +370,7 @@ export class DeskEngine {
       tokenProgram, solUsd, slippageBps: d.capital.slippageBps, maxDragBps: DESK.maxDragBps, reserveLamports: DESK.reserveLamports,
       configuredPriorityCap: BigInt(d.cfg.jupiter.maxPriorityFeeLamports), baseEntryUsd: d.capital.baseEntryUsd,
       paperCashLamports: d.mode === 'PAPER' ? BigInt(ledger.state.paperCashLamports ?? '0') : null, heldRaw: t.heldRaw, stopped,
+      enforceDrag: !(t.drill && d.mode === 'PAPER'),
       onSigned: async signature => {
         ledger.state.pending = { side, mint: t.mint, at: Date.now(), signature };
         await ledger.save();
@@ -429,7 +430,8 @@ export class DeskEngine {
   private paperFill(side: 'BUY' | 'SELL', t: { mint: string; symbol: string | null; decimals: number; pairAddress: string; heldRaw: bigint; drill?: boolean },
     guard: DeskGuard, ledger: DeskLedger, solUsd: number, detail: string): void {
     const drill = t.drill || (side === 'SELL' && !!ledger.state.entries.filter(e => e.mint === t.mint && e.side === 'BUY').at(-1)?.note?.startsWith('DRILL'));
-    const note = drill ? `DRILL — strategy gates bypassed · ${detail}` : detail;
+    const drag = guard.lastPreflight?.dragPct;
+    const note = drill ? `DRILL — strategy gates bypassed${drag != null ? ` · drag ${drag.toFixed(2)}%` : ''} · ${detail}` : detail;
     const o = guard.lastOrder!, q = o.quote, ctx = { mint: t.mint, symbol: t.symbol };
     const fee = o.fee > 0n ? o.fee : BASE_FEE_LAMPORTS + o.priority;
     const buy = side === 'BUY';
@@ -476,7 +478,7 @@ export class DeskEngine {
     }
     s.pending = null;
     const where = guard.lastPreflight ? (guard.lastPreflight.signature === 'REJECTED' || guard.lastPreflight.signature === 'EXPIRED' ? 'at Phantom signature' : 'at pre-flight')
-      : guard.lastOrder ? 'after quote' : 'before quote';
+      : guard.quoted ? 'after quote' : 'before quote';
     this.event(cause instanceof DeskReject && cause.code === 'FEE_CAP' ? 'FILTERED' : 'FAILED', `${side} blocked ${where}: ${reason}`, ctx);
     if (cause instanceof SigningError) this.pause();
   }
