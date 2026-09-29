@@ -136,8 +136,12 @@ export interface DeskCapitalView {
 export interface DeskStatus {
   mode: DeskMode; label: string; scanner: boolean; execution: boolean;
   /** CONFIGURED: TEST is using WALLET_PUBLIC_KEY from .env because Phantom is not connected (address only, never a signer). */
-  wallet: { connected: boolean; address: string | null; source?: 'PHANTOM' | 'CONFIGURED' };
+  wallet: { connected: boolean; address: string | null; source?: 'PHANTOM' | 'CONFIGURED' | 'LOCAL_KEY' };
   drill: boolean;
+  /** LIVE only: PHANTOM (browser approval per order) or LOCAL_KEY (signed by WALLET_PRIVATE_KEY, unattended). */
+  signer: 'PHANTOM' | 'LOCAL_KEY' | null;
+  /** LIVE only: new entries this session may still open (null = no cap). */
+  entriesLeft: number | null;
   strategies: StrategyView[];
   capital: DeskCapitalView; message: string | null; halted: string | null;
   lastScanAt: number | null; nextScanAt: number | null; scanning: boolean;

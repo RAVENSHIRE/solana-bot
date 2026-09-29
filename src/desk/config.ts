@@ -140,6 +140,17 @@ export function deskCapital(env: NodeJS.ProcessEnv = process.env): DeskCapital {
   return { plannedStartingCapitalUsd: e.DESK_PLANNED_CAPITAL_USD, baseEntryUsd: e.DESK_BASE_ENTRY_USD, slippageBps: e.DESK_SLIPPAGE_BPS };
 }
 
+export type LiveSignerKind = 'PHANTOM' | 'LOCAL_KEY';
+/**
+ * How LIVE orders are signed. Default PHANTOM (browser approval). DESK_LIVE_SIGNER=local-key signs with
+ * WALLET_PRIVATE_KEY from .env, unattended; DESK_LIVE_MAX_ENTRIES caps new entries per LIVE session (exits never).
+ */
+export function liveSignerSettings(env: NodeJS.ProcessEnv): { signer: LiveSignerKind; maxEntries: number } {
+  const e = z.object({ DESK_LIVE_SIGNER: z.enum(['phantom', 'local-key']).default('phantom'),
+    DESK_LIVE_MAX_ENTRIES: z.coerce.number().int().min(1).max(1_000).default(10) }).parse(env);
+  return { signer: e.DESK_LIVE_SIGNER === 'local-key' ? 'LOCAL_KEY' : 'PHANTOM', maxEntries: e.DESK_LIVE_MAX_ENTRIES };
+}
+
 const pctSetting = (fallback: number, max = 1_000) => z.coerce.number().finite().positive().max(max).default(fallback);
 /**
  * Both strategies' settings. FAIR keeps the desk capital and the RS_* exit rules; CRASH reads CRASH_* keys.

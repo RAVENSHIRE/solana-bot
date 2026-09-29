@@ -18,7 +18,7 @@ import { BASE_FEE_LAMPORTS, SOL_MINT, TOKEN_ACCOUNT_RENT_LAMPORTS } from '../cor
 import type { Logger } from '../utils/logger';
 import { errorMessage } from '../utils/errors';
 import { atomicWriteFile } from '../utils/fs';
-import { DESK, STRATEGY_IDS, strategyProfiles, type DeskCapital, type StrategyProfile } from './config';
+import { DESK, STRATEGY_IDS, strategyProfiles, type DeskCapital, type LiveSignerKind, type StrategyProfile } from './config';
 import { EventLog } from './events';
 import { DeskLedger, type LedgerState } from './ledger';
 import { discover, pairMetrics, selectPair, tierFor, type Discovered } from './discovery';
@@ -43,6 +43,9 @@ export interface DeskDeps {
   website?: (url: string | null) => Promise<WebsiteCheck>;
   /** Strategy settings; defaults to strategyProfiles() of the desk capital and RS_* rules. */
   strategies?: Record<StrategyId, StrategyProfile>;
+  /** LIVE: who signs (default PHANTOM) and how many new entries one LIVE session may open. */
+  signerKind?: LiveSignerKind;
+  liveMaxEntries?: number;
 }
 
 interface Deep { at: number; onchain: OnchainEvidence; social: SocialEvidence }
@@ -169,10 +172,15 @@ export class DeskEngine {
     if (this.d.mode === 'LIVE' && !this.d.authorized()) throw new DeskReject('WALLET_SESSION_REQUIRED');
     if (this.books().some(b => b.ledger.state.halted || b.ledger.state.pending)) throw new DeskReject('TRANSACTION_RECONCILIATION_REQUIRED');
     this.scanner = true; this.execution = true; this.generation++; this.nextScanAt = Date.now(); this.notes.clear();
+    // Each LIVE session may open a limited number of new positions; exits are never capped.
+    if (this.d.mode === 'LIVE') this.entryAllowance = this.d.liveMaxEntries ?? null;
     const on = STRATEGY_IDS.filter(id => this.strategies[id].enabled).join(' + ') || 'none';
     this.event('SYSTEM', this.d.mode === 'PAPER' ? `TEST started: scanner ON, paper execution ENABLED (strategies: ${on}) — no signature will ever be requested`
-      : `LIVE session started: scanner ON, execution ENABLED (strategies: ${on}) — every order needs a Phantom signature`);
+      : `LIVE session started: scanner ON, execution ENABLED (strategies: ${on}) — ` + (this.localKey
+        ? `orders are signed automatically by the local key; at most ${this.entryAllowance ?? 'unlimited'} new entries this session`
+        : 'every order needs a Phantom signature'));
   }
+  private get localKey(): boolean { return this.d.mode === 'LIVE' && this.d.signerKind === 'LOCAL_KEY'; }
   stop(reason = 'stopped by user'): void {
     if (!this.scanner && !this.execution) return;
     this.scanner = false; this.execution = false; this.generation++; this.nextScanAt = null;
@@ -753,14 +761,14 @@ export class DeskEngine {
       onSigned: async signature => {
         ledger.state.pending = { side, mint: t.mint, at: Date.now(), signature };
         await ledger.save();
-        this.event('SUBMITTED', `Signed by Phantom; signature persisted before broadcast: ${signature}`, ctx);
+        this.event('SUBMITTED', `Signed by ${this.localKey ? 'the local key' : 'Phantom'}; signature persisted before broadcast: ${signature}`, ctx);
       },
       event: (stage, message, detail) => this.event(stage, message, { ...ctx, detail: { ...detail, strategy: t.strategy } }) });
     const signer: TransactionSigner = d.mode === 'PAPER' ? paperSigner(wallet.owner) : {
       publicKey: wallet.owner,
       signTransaction: async (tx, context) => {
         guard.signatureState('AWAITING_PHANTOM');
-        this.event('AWAITING_SIGNATURE', 'AWAITING PHANTOM SIGNATURE — review the transaction in Phantom', ctx);
+        this.event('AWAITING_SIGNATURE', this.localKey ? 'Signing with the local key (pre-flight passed)' : 'AWAITING PHANTOM SIGNATURE — review the transaction in Phantom', ctx);
         try { const signed = await wallet.signer!.signTransaction(tx, context); guard.signatureState('SIGNED'); return signed; }
         catch (error) {
           const code = error instanceof SigningError ? error.code : 'SIGNATURE_FAILED';
@@ -884,6 +892,8 @@ export class DeskEngine {
     const unrealized = solUsd && valued ? positions.reduce((a, p) => a + sol(BigInt(p.lastValueLamports!)) * solUsd - p.costUsd, 0) : null;
     const configured = !wallet.connected && d.mode === 'PAPER' && this.walletView ? this.walletView.owner : null;
     if (configured) wallet = { connected: false, address: configured, source: 'CONFIGURED' };
+    // LIVE with the local key: the wallet is the key's address, whatever the browser has connected.
+    if (this.localKey) wallet = { connected: true, address: this.walletView?.owner ?? this.d.wallet()?.owner.toBase58() ?? null, source: 'LOCAL_KEY' };
     const native = this.walletView && this.walletView.owner === wallet.address ? this.walletView.native : null;
     // TEST cash is the sum of the strategy sleeves; LIVE strategies share the wallet.
     const sleeves = books.map(b => b.ledger.state.paperCashLamports).filter((x): x is string => x !== null);
@@ -895,7 +905,8 @@ export class DeskEngine {
     const rows = books.flatMap(b => [...(d.mode === 'PAPER' ? this.cycles.get(b.id) ?? [] : []).flatMap(c => c.entries), ...b.ledger.state.entries].slice(-100).reverse()
       .map(e => ({ ...e, strategy: b.id }))).sort((a, b) => b.at - a.at).slice(0, 100);
     return {
-      mode: d.mode, label: LABEL[d.mode], scanner: this.scanner, execution: this.execution, drill: this.drill, wallet,
+      mode: d.mode, label: this.localKey ? `${LABEL.LIVE} · SIGNED BY THE LOCAL KEY` : LABEL[d.mode], scanner: this.scanner, execution: this.execution, drill: this.drill, wallet,
+      signer: d.mode === 'LIVE' ? (this.localKey ? 'LOCAL_KEY' : 'PHANTOM') : null, entriesLeft: d.mode === 'LIVE' ? this.entryAllowance : null,
       strategies: STRATEGY_IDS.map(id => this.strategyView(id)),
       capital: {
         plannedStartingCapitalUsd: d.capital.plannedStartingCapitalUsd, baseEntryUsd: d.capital.baseEntryUsd, reserveSol: sol(DESK.reserveLamports),

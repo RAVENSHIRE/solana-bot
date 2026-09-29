@@ -31,13 +31,15 @@ export class TradingService {
     this.timer = setInterval(() => {
       if (this.closed || !this.desk) return;
       const live = this.desk.engines.LIVE;
-      // A lost browser session ends the LIVE session; it is never resumed automatically.
-      if (live.scanner && !this.authorized()) { live.stop('Phantom session ended or browser closed'); this.broker.cancel(); }
+      // With Phantom, a lost browser session ends LIVE (never resumed automatically). The local key does not need one.
+      if (live.scanner && !this.localKey() && !this.authorized()) { live.stop('Phantom session ended or browser closed'); this.broker.cancel(); }
       for (const engine of Object.values(this.desk.engines)) engine.tick();
     }, 1000);
     this.timer.unref();
   }
   private authorized = () => this.broker.connection().connected && Date.now() - this.heartbeat < 12_000;
+  /** LIVE signs with WALLET_PRIVATE_KEY (DESK_LIVE_SIGNER=local-key): no Phantom session is involved. */
+  private localKey = () => this.desk?.liveSigner === 'LOCAL_KEY';
   private wallet = (mode: DeskMode): DeskWallet | null => {
     const c = this.broker.connection();
     if (!c.connected || !c.address || !this.sessionId) return null;
@@ -106,13 +108,14 @@ export class TradingService {
         this.mode = 'PAPER'; paper.start(); return;
       case 'stop-test': paper.stop(); return;
       case 'start-live':
-        requireSession();
+        // Still same-origin and capability-checked; the local key only removes the need for a Phantom session.
+        if (!this.localKey()) requireSession();
         if (paper.scanner) throw new DeskReject('STOP_TEST_FIRST');
         this.mode = 'LIVE'; live.start(); return;
       case 'stop-live': live.stop(); this.broker.cancel(); return;
       // Pause stops new entries only; a pending request may be an exit, which must still be signable.
       case 'pause': handle.engines[this.mode].pause(); return;
-      case 'resume': if (this.mode === 'LIVE') requireSession(); handle.engines[this.mode].resume(); return;
+      case 'resume': if (this.mode === 'LIVE' && !this.localKey()) requireSession(); handle.engines[this.mode].resume(); return;
       case 'drill-on': case 'drill-off':
         // Drill entries exist only in TEST; LIVE never bypasses a strategy gate.
         if (this.mode !== 'PAPER') throw new DeskReject('DRILL_TEST_ONLY');
@@ -146,7 +149,7 @@ export class TradingService {
         if (sid && (!this.validCapability(supplied) || typeof sid !== 'string')) throw new DeskReject('CAPABILITY_REQUIRED');
         if (typeof sid === 'string') {
           // A late heartbeat ends LIVE; renewing the session afterwards never resumes it.
-          if (!this.authorized() && this.desk?.engines.LIVE.scanner) { this.desk.engines.LIVE.stop('Phantom session heartbeat lost'); this.broker.cancel(); }
+          if (!this.localKey() && !this.authorized() && this.desk?.engines.LIVE.scanner) { this.desk.engines.LIVE.stop('Phantom session heartbeat lost'); this.broker.cancel(); }
           this.broker.heartbeat(sid); this.heartbeat = Date.now();
         }
         await this.ensureDesk().catch(() => null);
@@ -164,7 +167,7 @@ export class TradingService {
         if (typeof body.address !== 'string') throw new DeskReject('INVALID_ADDRESS');
         const previous = this.broker.connection().address;
         // A different wallet can never inherit a LIVE session or its pending signature.
-        if (previous !== body.address) this.desk?.engines.LIVE.stop('wallet changed');
+        if (previous !== body.address && !this.localKey()) this.desk?.engines.LIVE.stop('wallet changed');
         const session = this.broker.connect(body.address);
         this.sessionId = session.sessionId; this.heartbeat = Date.now();
         await this.ensureDesk().catch(() => null);
@@ -179,7 +182,7 @@ export class TradingService {
       this.broker.status(body.sessionId);
       this.heartbeat = Date.now();
       if (action === 'disconnect') {
-        this.desk?.engines.LIVE.stop('wallet disconnected');
+        if (!this.localKey()) this.desk?.engines.LIVE.stop('wallet disconnected');
         this.broker.disconnect(body.sessionId); this.sessionId = null;
       } else if (action === 'signed' || action === 'reject') {
         if (typeof body.requestId !== 'string') throw new DeskReject('REQUEST_REQUIRED');

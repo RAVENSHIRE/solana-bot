@@ -16,13 +16,15 @@ import { TransactionSender } from '../execution/tx-sender';
 import { DeskEngine, type DeskWallet } from './engine';
 import { DeskReject } from './guard';
 import { XClient } from './social';
-import { deskCapital, strategyProfiles, type DeskCapital } from './config';
+import { deskCapital, liveSignerSettings, strategyProfiles, type DeskCapital, type LiveSignerKind } from './config';
+import { localKeySigner } from './local-signer';
 import { PublicKey } from '@solana/web3.js';
 import type { DeskMode } from './types';
 
 /**
- * Provider and risk settings only. This allowlist never reads a local private key, so the desk
- * can only sign through Phantom; the main engine's simulation/live switch is never touched.
+ * Provider and risk settings only. This allowlist never reads the private key: LIVE signs through Phantom unless the
+ * owner opts in with DESK_LIVE_SIGNER=local-key, in which case localKeySigner reads it separately and only for LIVE.
+ * The main engine's simulation/live switch is never touched.
  */
 const ENV_KEYS = ['RPC_ENDPOINTS', 'RPC_MAX_RPS', 'RPC_TIMEOUT_MS', 'JUPITER_API_KEY', 'JUPITER_API_BASE', 'JUPITER_MAX_RPS', 'JUPITER_QUOTE_MAX_AGE_MS',
   'MAX_PRIORITY_FEE_LAMPORTS', 'PRIORITY_LEVEL', 'MAX_PRICE_IMPACT_PCT', 'TX_CONFIRM_TIMEOUT_MS', 'RS_TAKE_PROFIT_PCT', 'RS_STOP_LOSS_PCT',
@@ -30,7 +32,8 @@ const ENV_KEYS = ['RPC_ENDPOINTS', 'RPC_MAX_RPS', 'RPC_TIMEOUT_MS', 'JUPITER_API
   'DESK_PLANNED_CAPITAL_USD', 'DESK_BASE_ENTRY_USD', 'DESK_SLIPPAGE_BPS', 'X_BEARER_TOKEN', 'WALLET_PUBLIC_KEY',
   'CRASH_ENABLED', 'CRASH_CAPITAL_USD', 'CRASH_ENTRY_USD', 'CRASH_SLIPPAGE_BPS', 'CRASH_EXIT_SLIPPAGE_BPS', 'CRASH_MAX_DRAG_BPS', 'CRASH_MAX_POSITIONS',
   'CRASH_TAKE_PROFIT_PCT', 'CRASH_LOCK_PEAK_PCT', 'CRASH_GIVEBACK_PTS', 'CRASH_STOP_LOSS_PCT', 'CRASH_MAX_HOLD_MIN',
-  'CRASH_EXIT_MODE', 'CRASH_TRAIL_ACTIVATION_PCT', 'CRASH_TRAIL_STOP_PCT', 'CRASH_RIDE_MAX_HOLD_MIN', 'CRASH_REENTRY_MIN'];
+  'CRASH_EXIT_MODE', 'CRASH_TRAIL_ACTIVATION_PCT', 'CRASH_TRAIL_STOP_PCT', 'CRASH_RIDE_MAX_HOLD_MIN', 'CRASH_REENTRY_MIN',
+  'DESK_LIVE_SIGNER', 'DESK_LIVE_MAX_ENTRIES'];
 export async function deskEnvironment(repo: string): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = {};
   try {
@@ -44,7 +47,11 @@ export async function deskEnvironment(repo: string): Promise<NodeJS.ProcessEnv> 
   return { ...env, SIMULATION_MODE: 'true', PRE_SIMULATE_TX: 'true', CLOSE_EMPTY_TOKEN_ACCOUNTS: 'false' };
 }
 
-export interface DeskHandle { engines: Record<DeskMode, DeskEngine>; capital: DeskCapital; close: () => Promise<void> }
+export interface DeskHandle {
+  engines: Record<DeskMode, DeskEngine>; capital: DeskCapital; close: () => Promise<void>;
+  /** PHANTOM: every LIVE order is approved in the browser. LOCAL_KEY: signed by WALLET_PRIVATE_KEY, no browser needed. */
+  liveSigner?: LiveSignerKind;
+}
 export interface DeskContext { wallet: (mode: DeskMode) => DeskWallet | null; authorized: () => boolean }
 
 /** UI-independent desk: the dashboard and the headless runner build the same engines. */
@@ -53,6 +60,9 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
   if (!env.RPC_ENDPOINTS) throw new DeskReject('RPC_NOT_CONFIGURED');
   if (!env.JUPITER_API_KEY) throw new DeskReject('JUPITER_API_KEY_REQUIRED');
   const cfg = loadConfig(env, 'PHANTOM'), capital = deskCapital(env), strategies = strategyProfiles(env, capital, cfg.rs), logger = new Logger('Desk');
+  const live = liveSignerSettings(env);
+  // Opt-in only: the key is read here, for the LIVE engine, and never enters the environment or the TEST engine.
+  const localSigner = live.signer === 'LOCAL_KEY' ? await localKeySigner(o.envDir) : null;
   const rpc = new ConnectionManager(cfg.rpc.endpoints, { ...cfg.rpc, logger });
   if (await rpc.execute('desk:genesis', c => c.getGenesisHash()) !== '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d') throw new DeskReject('MAINNET_REQUIRED');
   const data = new DataRuntime(logger, cfg.data);
@@ -65,14 +75,19 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
       dir: o.dataDir, authorized: context.authorized, strategies };
     let configured: PublicKey | null = null;
     try { configured = env.WALLET_PUBLIC_KEY ? new PublicKey(env.WALLET_PUBLIC_KEY.trim()) : null; } catch { configured = null; }
+    // TEST only ever gets an address (never a signer).
+    const paperAddress = configured ?? localSigner?.publicKey ?? null;
     const sender = new TransactionSender(rpc, logger, { confirmTimeoutMs: cfg.execution.confirmTimeoutMs, pollIntervalMs: 1500, rebroadcastIntervalMs: 2000 });
     const engines = {
       // TEST needs only an address to build and simulate; without Phantom it uses the public key from .env, never a secret.
       PAPER: await DeskEngine.create({ ...shared, mode: 'PAPER', sender: null,
-        wallet: () => context.wallet('PAPER') ?? (configured ? { owner: configured, signer: null } : null) }),
-      LIVE: await DeskEngine.create({ ...shared, mode: 'LIVE', sender, wallet: () => context.wallet('LIVE') }),
+        wallet: () => context.wallet('PAPER') ?? (paperAddress ? { owner: paperAddress, signer: null } : null) }),
+      // LOCAL_KEY: signed in this process and independent of the browser session; PHANTOM: the browser session signs.
+      LIVE: await DeskEngine.create({ ...shared, mode: 'LIVE', sender, signerKind: live.signer, liveMaxEntries: live.maxEntries,
+        ...(localSigner ? { authorized: () => true, wallet: () => ({ owner: localSigner.publicKey, signer: localSigner }) }
+          : { wallet: () => context.wallet('LIVE') }) }),
     };
-    return { engines, capital, close: async () => {
+    return { engines, capital, liveSigner: live.signer, close: async () => {
       for (const e of Object.values(engines)) { e.stop('shutdown'); await e.settled(); await e.persist(); }
       await data.flush(); await lock.close(); await fs.unlink(lockPath);
     } };

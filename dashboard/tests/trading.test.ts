@@ -21,11 +21,12 @@ function engine(mode: DeskMode) {
     status: (wallet: { connected: boolean; address: string | null }) => ({ mode, scanner: e.scanner, execution: e.execution, wallet }) };
   return e;
 }
-function service() {
+function service(liveSigner: DeskHandle['liveSigner'] = 'PHANTOM') {
   const engines = { PAPER: engine('PAPER'), LIVE: engine('LIVE') };
   let wallets: Parameters<DeskFactory>[0] | null = null;
   const factory: DeskFactory = async context => { wallets = context;
-    return { engines: engines as unknown as Record<DeskMode, DeskEngine>, capital: { plannedStartingCapitalUsd: 5.45, baseEntryUsd: 2, slippageBps: 100 }, close: async () => {} } as DeskHandle; };
+    return { engines: engines as unknown as Record<DeskMode, DeskEngine>, capital: { plannedStartingCapitalUsd: 5.45, baseEntryUsd: 2, slippageBps: 100 }, liveSigner,
+      close: async () => {} } as DeskHandle; };
   return { trading: new TradingService(factory), engines, context: () => wallets! };
 }
 async function serve(trading: TradingService) {
@@ -78,6 +79,27 @@ test('desk API: same-origin capability, TEST without signing, LIVE only with a l
     assert.equal((await post('disconnect', { sessionId: s.sessionId }, headers)).status, 200);
     assert.equal(engines.LIVE.scanner, false, 'disconnecting Phantom stops LIVE');
     assert.equal((await post('desk', { action: 'resume', sessionId: s.sessionId }, headers)).status, 400);
+  } finally { await close(); }
+});
+
+test('LIVE with the local key starts without a Phantom session and is not stopped by a missing browser heartbeat', async (t) => {
+  const { trading, engines } = service('LOCAL_KEY');
+  const { base, post, close } = await serve(trading);
+  try {
+    const { capability } = await (await fetch(`${base}/api/trading/bootstrap`)).json();
+    const headers = { 'X-Local-Capability': capability };
+    assert.equal((await post('desk', { action: 'start-live' })).status, 403, 'still same-origin and capability-checked');
+    assert.equal((await post('desk', { action: 'start-live' }, headers)).status, 200);
+    assert.equal(engines.LIVE.scanner, true);
+    const realNow = Date.now;
+    const clock = t.mock.method(Date, 'now', () => realNow() + 60_000);
+    await new Promise(r => setTimeout(r, 1_100));
+    clock.mock.restore();
+    assert.equal(engines.LIVE.scanner, true, 'no browser heartbeat is required with the local key');
+    assert.equal((await post('desk', { action: 'pause' }, headers)).status, 200);
+    assert.equal((await post('desk', { action: 'resume' }, headers)).status, 200, 'resume needs no Phantom session');
+    assert.equal((await post('desk', { action: 'stop-live' }, headers)).status, 200);
+    assert.equal(engines.LIVE.scanner, false);
   } finally { await close(); }
 });
 

@@ -27,11 +27,13 @@ const pct = (v: number | null | undefined, d = 1) => v === null || v === undefin
 const usdOrUnknown = (v: number | null | undefined) => v === null || v === undefined ? 'UNKNOWN' : money(v);
 
 export function DeskPanel({ t }: { t: TradingSession }) {
-  const v = t.view, d = v?.desk ?? null, live = v?.mode === 'LIVE';
+  const v = t.view, d = v?.desk ?? null, live = v?.mode === 'LIVE', localKey = live && d?.signer === 'LOCAL_KEY';
   return <section className={`desk ${live ? 'desk-live' : 'desk-test'}`} aria-label="Trading desk">
     <div className={`env-banner ${live ? 'live' : 'test'}`} role="status">
-      <strong>{live ? 'LIVE — REAL FUNDS' : 'TEST / PAPER — NO REAL TRANSACTIONS'}</strong>
-      <span>{live ? 'Every order requires your Phantom signature.' : 'Same scanner, strategy, risk, quote, route and simulation as LIVE. No signature is ever requested.'}</span>
+      <strong>{live ? (localKey ? 'LIVE — REAL FUNDS · SIGNED AUTOMATICALLY BY THE LOCAL KEY' : 'LIVE — REAL FUNDS') : 'TEST / PAPER — NO REAL TRANSACTIONS'}</strong>
+      <span>{!live ? 'Same scanner, strategy, risk, quote, route and simulation as LIVE. No signature is ever requested.'
+        : localKey ? 'Orders are signed by WALLET_PRIVATE_KEY from .env without any approval, also when this tab is closed. STOP LIVE SESSION ends it.'
+        : 'Every order requires your Phantom signature.'}</span>
     </div>
     <Controls t={t} d={d} />
     {v?.deskError && <p className="trading-error" role="alert">Desk unavailable: {describe(v.deskError)}</p>}
@@ -60,7 +62,7 @@ export function DeskPanel({ t }: { t: TradingSession }) {
 }
 
 function Controls({ t, d }: { t: TradingSession; d: DeskStatus | null }) {
-  const v = t.view, live = v?.mode === 'LIVE', running = !!d?.scanner, busy = !!t.busy || !t.online;
+  const v = t.view, live = v?.mode === 'LIVE', running = !!d?.scanner, busy = !!t.busy || !t.online, localKey = live && d?.signer === 'LOCAL_KEY';
   const chip = (on: boolean, yes: string, no: string) => <span className={`chip ${on ? 'on' : 'off'}`}>{on ? yes : no}</span>;
   return <div className="desk-controls">
     <div className="mode-switch" role="radiogroup" aria-label="Environment">
@@ -70,8 +72,10 @@ function Controls({ t, d }: { t: TradingSession; d: DeskStatus | null }) {
     <div className="chips">
       {chip(running, 'SCANNER: ON', 'SCANNER: OFF')}
       {chip(!!d?.execution, 'ENTRIES: ON', running ? 'ENTRIES: PAUSED (exits keep running)' : 'ENTRIES: OFF')}
-      {t.connected ? chip(true, `WALLET: PHANTOM ${short(t.address)}`, '') : d?.wallet.source === 'CONFIGURED'
+      {localKey ? <span className="chip live">WALLET: LOCAL KEY {short(d?.wallet.address ?? null)} (signs automatically)</span>
+        : t.connected ? chip(true, `WALLET: PHANTOM ${short(t.address)}`, '') : d?.wallet.source === 'CONFIGURED'
         ? <span className="chip on">WALLET: .env ADDRESS {short(d.wallet.address)} (TEST, no signing)</span> : chip(false, '', 'WALLET: DISCONNECTED')}
+      {live && running && d?.entriesLeft !== null && d?.entriesLeft !== undefined && <span className="chip on">NEW ENTRIES LEFT: {d.entriesLeft}</span>}
       {!live && chip(!!d?.drill, 'DRILL: ON', 'DRILL: OFF')}
       {d?.scanning && <span className="chip on">SCANNING…</span>}
     </div>
@@ -86,18 +90,24 @@ function Controls({ t, d }: { t: TradingSession; d: DeskStatus | null }) {
         <button className="source-button" disabled={busy || running} title="Archive both TEST ledgers and restart every sleeve at its planned capital"
           onClick={() => { if (window.confirm('Archive both TEST ledgers (kept on disk) and restart every TEST sleeve at its planned capital? Open paper positions end with the archive.')) void t.desk('reset-test'); }}>RESET TEST</button>
       </> : <>
-        <button className="primary-action live" disabled={busy || running || !t.connected}
-          onClick={() => void (async () => { if (await t.desk('start-live') && !t.auto && !t.autoUnsupported) await t.enableAuto(); })()}>START LIVE SESSION</button>
+        <button className="primary-action live" disabled={busy || running || (!t.connected && !localKey)}
+          onClick={() => void (async () => {
+            if (localKey) {
+              if (window.confirm('Start LIVE with REAL FUNDS? Orders will be signed automatically by the local key from .env, without any approval.')) await t.desk('start-live');
+              return;
+            }
+            if (await t.desk('start-live') && !t.auto && !t.autoUnsupported) await t.enableAuto();
+          })()}>START LIVE SESSION</button>
         <button className="stop-action" disabled={busy || !running} onClick={() => void t.desk('stop-live')}>STOP LIVE SESSION</button>
       </>}
       <button className="source-button" disabled={busy || !running || !d?.execution} title="No new entries; open positions keep their exits"
         onClick={() => void t.desk('pause')}>PAUSE ENTRIES</button>
       <button className="source-button" disabled={busy || !running || !!d?.execution} onClick={() => void t.desk('resume')}>RESUME ENTRIES</button>
-      {live && t.connected && !t.auto && !t.autoUnsupported && <button className="source-button" disabled={busy} onClick={() => void t.enableAuto()}>Enable Auto-Confirm</button>}
-      {live && t.auto && <span className="chip on">Auto-Confirm granted in Phantom</span>}
-      {live && t.autoUnsupported && <span className="chip off">Auto-Confirm: not offered for this domain</span>}
+      {live && !localKey && t.connected && !t.auto && !t.autoUnsupported && <button className="source-button" disabled={busy} onClick={() => void t.enableAuto()}>Enable Auto-Confirm</button>}
+      {live && !localKey && t.auto && <span className="chip on">Auto-Confirm granted in Phantom</span>}
+      {live && !localKey && t.autoUnsupported && <span className="chip off">Auto-Confirm: not offered for this domain</span>}
     </div>
-    {live && running && !t.auto && <p className="trading-error" role="alert">
+    {live && running && !localKey && !t.auto && <p className="trading-error" role="alert">
       Auto-Confirm is OFF: every LIVE order waits at most 15 s for your approval in Phantom, and a missed approval pauses entries.
       {t.autoUnsupported ? ' Phantom offers Auto-Confirm only to domains it has approved, not to this local dashboard: approve each order in Phantom.'
         : <> Click <strong>Enable Auto-Confirm</strong> and accept the permission in Phantom once for this session.</>}</p>}

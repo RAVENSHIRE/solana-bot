@@ -16,7 +16,7 @@ import { SigningError, type TransactionSigner } from '../src/execution/transacti
 import { Logger, configureLogger } from '../src/utils/logger';
 import { acquireProcessLock } from '../src/utils/fs';
 import { SOL_MINT, USDC_MINT } from '../src/core/types';
-import { CRASH_DEFAULTS, DESK, deskCapital, strategyProfiles } from '../src/desk/config';
+import { CRASH_DEFAULTS, DESK, deskCapital, liveSignerSettings, strategyProfiles } from '../src/desk/config';
 import { pairMetrics, selectPair, tierFor, type Discovered } from '../src/desk/discovery';
 import { assessAuthenticity, checkWebsite, parseXLink, XClient, type WebsiteCheck } from '../src/desk/social';
 import { analyze } from '../src/desk/analysis';
@@ -25,6 +25,8 @@ import { DeskEngine } from '../src/desk/engine';
 import { crashCheck, exitReason, scaleAdvice, strategyStats } from '../src/desk/strategies';
 import { replayExit, sizedReturn } from '../src/desk/replay';
 import { GraduationFeed } from '../src/desk/migrations';
+import { localKeySigner } from '../src/desk/local-signer';
+import bs58 from 'bs58';
 import type { DeskEvent, LedgerEntry } from '../src/desk/types';
 
 // Synthetic, deterministic fixtures only. No request leaves the process and nothing is signed or submitted.
@@ -672,5 +674,51 @@ test('strategy and drill toggles survive a restart; LIVE keeps CRASH off until t
     const liveAgain = await DeskEngine.create({ ...shared, mode: 'LIVE', dir, sender: null, wallet: () => ({ owner, signer: null }) });
     assert.equal(liveAgain.strategies.CRASH.enabled, true, "the owner's explicit choice is kept across restarts");
     assert.equal(liveAgain.strategies.FAIR.enabled, true, 'TEST toggles never leak into LIVE');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('local-key signer: opt-in only, reads the key from .env, checks it against the public key and never reveals it', async () => {
+  assert.deepEqual(liveSignerSettings({}), { signer: 'PHANTOM', maxEntries: 10 });
+  assert.deepEqual(liveSignerSettings({ DESK_LIVE_SIGNER: 'local-key', DESK_LIVE_MAX_ENTRIES: '4' }), { signer: 'LOCAL_KEY', maxEntries: 4 });
+  assert.throws(() => liveSignerSettings({ DESK_LIVE_SIGNER: 'yes' }));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-key-'));
+  try {
+    const kp = Keypair.fromSeed(new Uint8Array(32).fill(7)), secret = bs58.encode(kp.secretKey);
+    await fs.writeFile(path.join(dir, '.env'), `WALLET_PRIVATE_KEY=${secret}\nWALLET_PUBLIC_KEY=${kp.publicKey.toBase58()}\n`);
+    const signer = await localKeySigner(dir);
+    assert.equal(signer.publicKey.toBase58(), owner.toBase58());
+    const tx = new VersionedTransaction(new TransactionMessage({ payerKey: owner, recentBlockhash: SystemProgram.programId.toBase58(), instructions: [] }).compileToV0Message());
+    const signed = await signer.signTransaction(tx, { expiresAt: Date.now() + 10_000 });
+    assert.ok(signed.signatures[0]!.some(b => b !== 0), 'signed');
+    assert.ok(!JSON.stringify(signer).includes(secret), 'the secret is not reachable from the signer object');
+    await fs.writeFile(path.join(dir, '.env'), `WALLET_PRIVATE_KEY=${secret}\nWALLET_PUBLIC_KEY=${key(9).toBase58()}\n`);
+    const mismatch = await localKeySigner(dir).then(() => null, (e: Error) => e);
+    assert.match(mismatch!.message, /LOCAL_KEY_MISMATCH/); assert.ok(!mismatch!.message.includes(secret), 'errors never contain the key');
+    await fs.writeFile(path.join(dir, '.env'), 'WALLET_PRIVATE_KEY=not-a-key\n');
+    await assert.rejects(localKeySigner(dir), /LOCAL_KEY_INVALID/);
+    await fs.writeFile(path.join(dir, '.env'), 'WALLET_PUBLIC_KEY=x\n');
+    await assert.rejects(localKeySigner(dir), /LOCAL_KEY_MISSING/);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('LIVE with the local key signs without any approval, persists the signature before broadcast, halts on an unknown outcome, and caps entries', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-live-key-')), { w, shared } = world(YOUNG_PUMP, 'insider');
+  try {
+    const kp = Keypair.fromSeed(new Uint8Array(32).fill(7));
+    const signer: TransactionSigner = { publicKey: kp.publicKey, signTransaction: async tx => { w.signRequests++; tx.sign([kp]); return tx; } };
+    const sender = { sendAndConfirm: async () => { w.sends++; throw new Error('RPC unreachable'); } };
+    const engine = await DeskEngine.create({ ...shared, mode: 'LIVE', dir, sender: sender as never, signerKind: 'LOCAL_KEY', liveMaxEntries: 2,
+      authorized: () => true, wallet: () => ({ owner: kp.publicKey, signer }) });
+    engine.setStrategy('CRASH', true); engine.start();
+    let view = engine.status({ connected: false, address: null });
+    assert.equal(view.signer, 'LOCAL_KEY'); assert.equal(view.entriesLeft, 2); assert.equal(view.wallet.source, 'LOCAL_KEY');
+    assert.match(view.label, /SIGNED BY THE LOCAL KEY/);
+    await engine.pulse();
+    view = engine.status({ connected: false, address: null });
+    assert.equal(w.signRequests, 1, 'signed locally, no browser involved'); assert.equal(w.sends, 1);
+    assert.ok(engine.events.list().some(e => /^Signed by the local key; signature persisted before broadcast: \w+/.test(e.message)));
+    assert.equal(view.halted, 'TRANSACTION_RECONCILIATION_REQUIRED', 'a signed order whose outcome is unknown halts; nothing is retried');
+    assert.equal(view.scanner, false); assert.equal(view.ledger[0]!.status, 'UNKNOWN');
+    assert.throws(() => engine.start(), /TRANSACTION_RECONCILIATION_REQUIRED/);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });

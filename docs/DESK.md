@@ -47,10 +47,25 @@ Native reserve (0.003 SOL) and max drag (1.5 %) are the project's existing micro
 ### Going LIVE (Phantom)
 
 1. Pull, restart the dashboard, open it in the browser with the Phantom extension and **Connect Phantom**.
-2. Switch to **LIVE**, then **START LIVE SESSION** and **Enable Auto-Confirm** in Phantom.
+2. Switch to **LIVE**, then **START LIVE SESSION** and **Enable Auto-Confirm** in Phantom. Phantom offers Auto-Confirm only to domains it has approved ("No supported networks found for this domain" on a local dashboard); then every order needs your approval within 15 s.
 3. Switch CRASH on (and FAIR off if you only want CRASH); both choices are saved.
 4. Keep the PC awake and the browser running. The dashboard polls from a Web Worker, so a hidden or minimized tab keeps the session and Auto-Confirm alive; closing the tab or the browser ends LIVE (by design).
 5. Budget: the 0.003 SOL reserve and ≈ 0.002 SOL account rent per new token come out of the wallet before entries.
+
+### Going LIVE with the local key (unattended, opt-in)
+
+Add to `.env` (the key is already there as `WALLET_PRIVATE_KEY`):
+
+```
+DESK_LIVE_SIGNER=local-key
+DESK_LIVE_MAX_ENTRIES=10      # new positions per LIVE session; exits are never capped
+```
+
+- Restart the dashboard. LIVE then shows **SIGNED AUTOMATICALLY BY THE LOCAL KEY**, and START LIVE SESSION needs no Phantom connection.
+- Every order is signed in the local dashboard process, with no approval. The session keeps running when the browser tab is closed; STOP LIVE SESSION (or stopping the dashboard) ends it.
+- The key is read only by `src/desk/local-signer.ts`, only for the LIVE engine. It must match `WALLET_PUBLIC_KEY` when that is set, and it is never logged, displayed or put in the desk environment. TEST never receives a signer.
+- All other rails are unchanged: the 0.003 SOL reserve, the max drag per strategy, unsigned RPC simulation and pre-flight before signing, the signature saved before broadcast, and a halt (never a retry) when an outcome is unknown.
+- CRASH is still off in LIVE until you switch it on (the choice is saved). Remove `DESK_LIVE_SIGNER` to go back to Phantom approvals.
 
 ### Scale-up ladder ($10 → $100 → $1K → $10K per entry)
 
