@@ -13,7 +13,7 @@ import type { DeskMode } from '../../src/desk/types';
 function engine(mode: DeskMode) {
   const e = { mode, scanner: false, execution: false, busy: false, nextScanAt: null as number | null, pulses: 0, resets: 0,
     strategies: { FAIR: { enabled: true }, CRASH: { enabled: mode === 'PAPER' } } as Record<string, { enabled: boolean }>,
-    setStrategy(id: string, enabled: boolean) { e.strategies[id]!.enabled = enabled; },
+    setStrategy(id: string, enabled: boolean) { e.strategies[id]!.enabled = enabled; }, drill: false, setDrill(on: boolean) { e.drill = on; },
     resetTest: async () => { if (e.scanner) throw new DeskReject('STOP_TEST_FIRST'); e.resets++; return []; },
     start() { e.scanner = true; e.execution = true; }, stop() { e.scanner = false; e.execution = false; },
     pause() { e.execution = false; }, resume() { if (!e.scanner) throw new DeskReject('SCANNER_OFF'); e.execution = true; },

@@ -28,7 +28,8 @@ Native reserve (0.003 SOL) and max drag (1.5 %) are the project's existing micro
 | --- | --- | --- |
 | Idea | Fair-launch trending tokens, every hard gate, momentum in two consecutive scans | Young pools pumping right now; 1–4 minute trades targeting +40–100 % |
 | Entry | QUALIFIED status (below) | One scan: pool ≤ 60 min, 5m price +10 % to +200 %, 5m volume ≥ $20K, buy/sell ≥ 1.3, ≥ 40 buys, AMM liquidity ≥ $10K and ≥ 3 % of market cap, mint + freeze authority revoked, no dangerous extensions, top-10 ≤ 50 % and largest wallet ≤ 15 % when known, liquidity not dropping. Launch fairness is shown but **not required** |
-| Exits | `RS_*` rules: stop loss, take profit, trailing stop, max hold | Take profit +100 % (= $2 unrealized on a $2 entry) · profit lock: once +40 % was reached, exit 15 points below the peak · stop loss −15 % · time stop 4 min |
+| Exits | `RS_*` rules: stop loss, take profit, trailing stop, max hold | `CRASH_EXIT_MODE=quick` (default): take profit +100 % (= $2 unrealized on a $2 entry) · profit lock: once +40 % was reached, exit 15 points below the peak · stop loss −15 % · time stop 4 min. `CRASH_EXIT_MODE=ride`: no take profit · trailing stop 35 % from the peak once +50 % was reached · stop loss −15 % · time stop 60 min |
+| Re-entry after an exit | 30 min | `CRASH_REENTRY_MIN` (10 min) — a fresh signal only |
 | Checked | every 5 s | every 2 s |
 | Entry size / TEST sleeve | `DESK_BASE_ENTRY_USD` / `DESK_PLANNED_CAPITAL_USD` ($2 / $5.45) | `CRASH_ENTRY_USD` / `CRASH_CAPITAL_USD` ($2 / $10) |
 | Slippage / max drag | `DESK_SLIPPAGE_BPS` (1 %) / 1.5 % | entries `CRASH_SLIPPAGE_BPS` (2.5 %), exits `CRASH_EXIT_SLIPPAGE_BPS` (10 %) / `CRASH_MAX_DRAG_BPS` (5 %) |
@@ -38,8 +39,18 @@ Native reserve (0.003 SOL) and max drag (1.5 %) are the project's existing micro
 - A token is held by at most one strategy. Several entries can happen in one scan, up to each strategy's free slots; a candidate the guard blocks (e.g. max drag) is skipped for 5 minutes and the next one is tried.
 - Early warnings (liquidity −30 % since entry, pump.fun creator selling) apply to both. Position checks run beside the discovery scan, so a slow scan never delays an exit. CRASH entries happen before the rate-limited launch-history checks.
 - Strategy cards show entry, sleeve, positions, realized/unrealized PnL, trades, win rate, average return and hold, profit factor and max drawdown (drill trades excluded), plus toggles. Disabling a strategy stops new entries; open positions keep their exits.
-- **LIVE starts every session with CRASH off.** Turning it on is an explicit click. CRASH trades need fast approvals: use Phantom Auto-Confirm. A rug can still happen inside one block — the exits limit, not remove, that risk.
-- Other CRASH settings in `.env`: `CRASH_ENABLED`, `CRASH_TAKE_PROFIT_PCT`, `CRASH_LOCK_PEAK_PCT`, `CRASH_GIVEBACK_PTS`, `CRASH_STOP_LOSS_PCT`, `CRASH_MAX_HOLD_MIN`.
+- **CRASH is off in LIVE until you switch it on.** That click is saved in `data-desk/settings-LIVE.json`, as are all strategy and drill toggles per mode, so a restart never changes what the desk trades. CRASH trades need fast approvals: use Phantom Auto-Confirm. A rug can still happen inside one block — the exits limit, not remove, that risk.
+- **PAUSE ENTRIES** stops new positions only. Open positions keep their stop loss, take profit, trailing and time stops (in LIVE each exit still needs its Phantom signature). STOP ends everything.
+- QUICK vs RIDE on the tokens seen so far (minute candles, losses assumed first): SI's second leg from $312K — QUICK +45 %, RIDE +303 %; GM from $16K — QUICK +100 %, RIDE +37 %. Neither wins every time; `desk-replay` compares both on every closed trade.
+- Other CRASH settings in `.env`: `CRASH_ENABLED`, `CRASH_TAKE_PROFIT_PCT`, `CRASH_LOCK_PEAK_PCT`, `CRASH_GIVEBACK_PTS`, `CRASH_STOP_LOSS_PCT`, `CRASH_MAX_HOLD_MIN`, `CRASH_TRAIL_ACTIVATION_PCT`, `CRASH_TRAIL_STOP_PCT`, `CRASH_RIDE_MAX_HOLD_MIN`.
+
+### Going LIVE (Phantom)
+
+1. Pull, restart the dashboard, open it in the browser with the Phantom extension and **Connect Phantom**.
+2. Switch to **LIVE**, then **START LIVE SESSION** and **Enable Auto-Confirm** in Phantom.
+3. Switch CRASH on (and FAIR off if you only want CRASH); both choices are saved.
+4. Keep the PC awake and the browser running. The dashboard polls from a Web Worker, so a hidden or minimized tab keeps the session and Auto-Confirm alive; closing the tab or the browser ends LIVE (by design).
+5. Budget: the 0.003 SOL reserve and ≈ 0.002 SOL account rent per new token come out of the wallet before entries.
 
 ### Scale-up ladder ($10 → $100 → $1K → $10K per entry)
 

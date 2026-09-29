@@ -3,6 +3,7 @@ import { VersionedTransaction } from '@solana/web3.js';
 import { phantomProvider, type PhantomListener } from './phantom';
 import type { DeskMode, DeskStatus } from '../../src/desk/types';
 import type { BrowserSDK } from '@phantom/browser-sdk';
+import type { PollConfig, PollResult } from './poll-worker';
 
 export interface TradingView {
   session: { address: string; expiresAt: number } | null;
@@ -47,23 +48,28 @@ export function useTradingSession() {
     return () => { provider?.removeListener('accountChanged', changed); provider?.removeListener('disconnect', disconnected); };
   }, [invalidate, session]);
   useEffect(() => {
-    let active = true, timer: ReturnType<typeof setTimeout> | undefined, controller: AbortController;
-    const poll = async () => {
-      controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 15000);
-      try {
-        const token = session ? await getCapability() : null;
-        const r = await fetch('/api/trading', { cache: 'no-store', signal: controller.signal,
-          headers: session ? { 'X-Local-Capability': token!, 'X-Wallet-Session': session.id } : undefined });
-        const body = await r.json();
-        if (!r.ok) {
-          if (active && session && ['WALLET_SESSION_MISMATCH', 'WALLET_SESSION_EXPIRED'].includes(body.message)) invalidate('Session expired. Reconnect Phantom.');
-          throw new Error(body.message ?? 'Trading status unavailable');
-        }
-        if (active) { setView(body); setOnline(true); if (session && (!body.session || body.session.expiresAt <= Date.now())) invalidate('Session expired. Reconnect Phantom.'); }
-      } catch (e) { if (active) { setOnline(false); setError(message(e)); } }
-      finally { clearTimeout(timeout); if (active) timer = setTimeout(() => void poll(), session ? 1500 : 2500); }
+    // Polling (and with it the LIVE heartbeat) runs in a worker: hidden tabs throttle page timers to about once a minute.
+    let active = true;
+    const worker = new Worker(new URL('./poll-worker.ts', import.meta.url), { type: 'module' });
+    const configure = async () => {
+      const capability = session ? await getCapability() : null;
+      if (active) worker.postMessage({ sessionId: session?.id ?? null, capability, intervalMs: session ? 1500 : 2500 } satisfies PollConfig);
     };
-    void poll(); return () => { active = false; controller?.abort(); clearTimeout(timer); };
+    worker.onmessage = (e: MessageEvent<PollResult>) => {
+      if (!active) return;
+      const r = e.data;
+      if (r.ok) {
+        const body = r.body as TradingView;
+        setView(body); setOnline(true);
+        if (session && (!body.session || body.session.expiresAt <= Date.now())) invalidate('Session expired. Reconnect Phantom.');
+        return;
+      }
+      if (session && ['WALLET_SESSION_MISMATCH', 'WALLET_SESSION_EXPIRED'].includes(r.message)) invalidate('Session expired. Reconnect Phantom.');
+      if (r.status === 403) { cap.current = null; void configure().catch(e2 => setError(message(e2))); }
+      setOnline(false); setError(r.message);
+    };
+    void configure().catch(e => { if (active) { setOnline(false); setError(message(e)); } });
+    return () => { active = false; worker.terminate(); };
   }, [session, revision, getCapability, invalidate]);
   const connect = async () => {
     if (!phantomProvider()?.isPhantom) { setError('Open localhost in the browser with your Phantom extension.'); return; }
@@ -81,12 +87,12 @@ export function useTradingSession() {
     } catch (e) { setError(message(e)); } finally { setBusy(null); }
   };
   const desk = async (action: DeskAction, extra: Record<string, unknown> = {}) => {
-    // Local cancellation stops auto-signing even if the request itself fails.
-    if (action === 'pause' || action === 'stop-live' || action === 'stop-test') { autoRef.current = false; setAuto(false); generation.current++; }
+    // Stopping ends auto-signing even if the request itself fails. Pause only stops entries: exits must stay signable.
+    if (action === 'stop-live' || action === 'stop-test') { autoRef.current = false; setAuto(false); generation.current++; }
     setBusy(action); setError(null);
     try { await post('desk', { action, ...extra, ...(sessionRef.current ? { sessionId: sessionRef.current.id } : {}) }); setRevision(v => v + 1); }
     catch (e) { setError(message(e)); }
-    finally { setBusy(null); if (action === 'pause' || action === 'stop-live') void sdk.current?.disableAutoConfirm().catch(() => {}); }
+    finally { setBusy(null); if (action === 'stop-live') void sdk.current?.disableAutoConfirm().catch(() => {}); }
   };
   const enableAuto = async () => {
     if (!sdk.current || !sessionRef.current) return; setBusy('auto'); setError(null);

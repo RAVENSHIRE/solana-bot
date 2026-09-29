@@ -36,6 +36,7 @@
     "micro:live": "node --import tsx src/micro/runtime.ts --live",
     "test:micro": "node --import tsx --test tests/micro.test.ts",
     "desk:paper": "node --import tsx src/scripts/desk-paper.ts",
+    "desk:replay": "node --import tsx src/scripts/desk-replay.ts",
     "test:desk": "node --import tsx --test tests/desk.test.ts"
   },
   "dependencies": {

@@ -618,3 +618,59 @@ test('every pump.fun graduation is discovered from the chain, even when no listi
     assert.deepEqual(feed.map(g => g.mint), [GRAD], 'failed txs, non-migrations and the new LP mint are ignored');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
+
+test('RIDE mode has no take profit and trails the move; CRASH may re-enter after its own shorter cooldown', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-ride-')), { w, shared } = world(YOUNG_PUMP, 'insider');
+  try {
+    const strategies = strategyProfiles({ CRASH_EXIT_MODE: 'ride' }, deskCapital({}), shared.cfg.rs);
+    assert.equal(strategies.CRASH.exits.takeProfitPct, Infinity); assert.deepEqual(strategies.CRASH.exits.trailing, { activationPct: 50, stopPct: 35 });
+    assert.equal(strategies.CRASH.reentryCooldownMs, 10 * 60_000); assert.equal(strategies.FAIR.reentryCooldownMs, DESK.reentryCooldownMs);
+    const engine = await DeskEngine.create({ ...shared, strategies, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    const check = async () => { (engine as unknown as { lastPositionCheckAt: Record<string, number> }).lastPositionCheckAt.CRASH = 0; engine.tick(); await engine.settled(); };
+    engine.start(); await engine.pulse();
+    w.priceFactor = 2.5; await check();
+    w.priceFactor = 5; await check();
+    assert.equal(engine.status({ connected: false, address: null }).positions.length, 1, '+400% is held: no take profit in RIDE');
+    w.priceFactor = 3.4; await check();
+    assert.equal(engine.status({ connected: false, address: null }).positions.length, 1, '−32% from the peak is inside the 35% trail');
+    w.priceFactor = 3; await check();
+    const view = engine.status({ connected: false, address: null });
+    assert.equal(view.positions.length, 0);
+    assert.ok(engine.events.list().some(e => /CRASH · exit signal: TRAILING_STOP -40\.00% from peak/.test(e.message)));
+    assert.ok(view.ledger[0]!.netPnlUsd! > 3.9, 'rode a 5× peak out at 3×');
+    assert.match(view.strategies.find(s => s.id === 'CRASH')!.exitRules.join(' | '), /Exit mode RIDE \| No take profit/);
+    w.priceFactor = 1; await engine.pulse();
+    assert.match(engine.status({ connected: false, address: null }).candidates.find(c => c.mint === MINT)!.entryNotes!.CRASH!, /^re-entry cooldown until \d\d:\d\d$/);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('pausing stops entries only: an open position still takes its exit', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-pause-')), { w, shared } = world(YOUNG_PUMP, 'insider');
+  try {
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    engine.start(); await engine.pulse();
+    engine.pause();
+    w.priceFactor = 2.05;
+    (engine as unknown as { lastPositionCheckAt: Record<string, number> }).lastPositionCheckAt.CRASH = 0; engine.tick(); await engine.settled();
+    const view = engine.status({ connected: false, address: null });
+    assert.equal(view.execution, false); assert.equal(view.positions.length, 0, 'the take profit executed while entries were paused');
+    assert.ok(engine.events.list().some(e => /Entries PAUSED/.test(e.message)));
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('strategy and drill toggles survive a restart; LIVE keeps CRASH off until the owner switches it on', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-settings-')), { shared } = world();
+  try {
+    const paper = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    paper.setStrategy('FAIR', false); paper.setDrill(true); await paper.settled();
+    const again = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    assert.equal(again.strategies.FAIR.enabled, false); assert.equal(again.drill, true);
+    const live = await DeskEngine.create({ ...shared, mode: 'LIVE', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    assert.equal(live.strategies.CRASH.enabled, false, 'never on by default with real funds');
+    assert.throws(() => live.setDrill(true), /DRILL_TEST_ONLY/);
+    live.setStrategy('CRASH', true); await live.settled();
+    const liveAgain = await DeskEngine.create({ ...shared, mode: 'LIVE', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    assert.equal(liveAgain.strategies.CRASH.enabled, true, "the owner's explicit choice is kept across restarts");
+    assert.equal(liveAgain.strategies.FAIR.enabled, true, 'TEST toggles never leak into LIVE');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});

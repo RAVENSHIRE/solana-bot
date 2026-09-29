@@ -7,7 +7,7 @@ Branch `claude/session-title-unavailable-wennx2` (PR RAVENSHIRE/solana-bot#1). T
 1. **A live system.** Once deployed, the owner cannot manually override parameters. Configuration must come from versioned files / `.env`, be validated at start, and survive restarts. Nothing may depend on a manual click (today: RESET TEST, strategy toggles and the drill are in-memory UI actions).
 2. **Store, reset and re-enter trades continuously and simultaneously, without supervision.**
    - Done in `f2438e0`: a dry TEST sleeve with nothing open is archived as a cycle and re-funded automatically. Stats, PnL, the ledger view and cooldowns continue across cycles and restarts.
-   - Still open: strategy on/off flags and the drill are in memory only, and the 30-minute re-entry cooldown is fixed.
+   - Done after Astra stopped (the previous Claude session took this list over): strategy on/off flags and the drill are saved per mode (`settings-<MODE>.json`), and re-entry cooldowns are per strategy (`CRASH_REENTRY_MIN`, default 10 min).
 3. **Originals over clones.** The owner's finding:
    - The bot traded "SIF — Super Intelligence Face" `F4sTBdunw23aCMuTMJE7scem1VWwcoptL6iwaGeZt3Fe`, but the actual meme is SIF on PONS, `DhVcpV6UdtMKATyQm8E6CvpJmy91HdPibe9s7uzkwYuN`.
    - Likewise, Solana GM `4Kou9tGyJ83cvLjzHU1Vs2W1e31gTytGDBNxvQcigFpS` is a clone of Green Morning on BSC `0x13920fe6467e9e3c852b8d365a036c995f0f7777`.
@@ -56,11 +56,16 @@ The $10K buy alone would have moved the price ≈ 78 %. Scaling is a liquidity q
 ## 5. Proposed work, in order
 
 **P0 — unattended operation (no manual steps)**
-1. Runtime settings as versioned config (strategy flags, drill off in deployment, sleeves, cooldowns), validated at start. The UI either writes through to that config or is read-only in deployment mode.
+1. Runtime settings: **partly done.** `.env` keys are validated at start, and dashboard toggles write through to `data-desk/settings-<MODE>.json`, so restarts keep them. Still open: a read-only deployment mode for the UI.
 2. Sleeve lifecycle without RESET: done for TEST (`cycleSleeve` in `engine.ts`).
-3. Re-entry policy:
-   - Configurable cooldown per strategy.
-   - Allow a re-entry into the same token only on a fresh signal, never immediately after a stop-loss.
+3. Re-entry policy: **done.**
+   - Cooldown per strategy: FAIR 30 min, CRASH `CRASH_REENTRY_MIN` (10).
+   - Re-entry only on a fresh signal (it must pass the entry checks again).
+   - Still open: a longer cooldown specifically after a stop-loss.
+3a. Also done:
+   - CRASH exit mode RIDE (`CRASH_EXIT_MODE=ride`): no take profit, trailing stop 35 % after +50 %, 60 min.
+   - PAUSE stops entries only; exits keep running and stay signable (Auto-Confirm is no longer switched off by pause).
+   - The dashboard polls from a Web Worker, so a hidden tab keeps the LIVE heartbeat and Auto-Confirm alive.
 4. Restart safety:
    - On start, manage exits before discovery.
    - Reconcile open LIVE positions and any `pending` / `halted` state against on-chain balances.

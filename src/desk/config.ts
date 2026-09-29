@@ -86,6 +86,13 @@ export const CRASH_DEFAULTS = Object.freeze({
   givebackPts: 15,
   stopLossPct: 15,
   maxHoldMin: 4,
+  /** QUICK takes the fixed profit; RIDE has no take profit and trails the move (the SI / GM runs went 8–20×). */
+  exitMode: 'quick' as 'quick' | 'ride',
+  rideTrailActivationPct: 50,
+  rideTrailStopPct: 35,
+  rideMaxHoldMin: 60,
+  /** A fresh signal may re-enter a token this soon after an exit (SI dipped to $95K after a stop-out, then ran 20×). */
+  reentryMin: 10,
 });
 
 export const CRASH_ENTRY = Object.freeze({
@@ -116,6 +123,10 @@ export interface StrategyProfile {
   /** TEST sleeve; LIVE always spends from the connected wallet. */
   capitalUsd: number; entryUsd: number; slippageBps: number; exitSlippageBps: number; maxDragBps: bigint;
   maxOpenPositions: number; positionCheckMs: number; exits: ExitRules;
+  /** CRASH exit preset; FAIR uses the RS_* rules. */
+  exitMode: 'quick' | 'ride' | 'rules';
+  /** A token is not re-entered by this strategy sooner than this after an exit. */
+  reentryCooldownMs: number;
 }
 export const STRATEGY_IDS: readonly StrategyId[] = ['FAIR', 'CRASH'];
 
@@ -146,21 +157,30 @@ export function strategyProfiles(env: NodeJS.ProcessEnv, capital: DeskCapital,
     CRASH_MAX_POSITIONS: z.coerce.number().int().min(1).max(10).default(c.maxOpenPositions),
     CRASH_TAKE_PROFIT_PCT: pctSetting(c.takeProfitPct), CRASH_LOCK_PEAK_PCT: pctSetting(c.lockPeakPct), CRASH_GIVEBACK_PTS: pctSetting(c.givebackPts),
     CRASH_STOP_LOSS_PCT: pctSetting(c.stopLossPct, 100), CRASH_MAX_HOLD_MIN: pctSetting(c.maxHoldMin, 240),
+    CRASH_EXIT_MODE: z.enum(['quick', 'ride']).default(c.exitMode),
+    CRASH_TRAIL_ACTIVATION_PCT: pctSetting(c.rideTrailActivationPct), CRASH_TRAIL_STOP_PCT: pctSetting(c.rideTrailStopPct, 95),
+    CRASH_RIDE_MAX_HOLD_MIN: pctSetting(c.rideMaxHoldMin, 1_440),
+    CRASH_REENTRY_MIN: z.coerce.number().finite().min(0).max(1_440).default(c.reentryMin),
   }).parse(env);
+  const ride = e.CRASH_EXIT_MODE === 'ride';
   if (e.CRASH_SLIPPAGE_BPS >= e.CRASH_MAX_DRAG_BPS) throw new Error('CRASH_SLIPPAGE_BPS must be below CRASH_MAX_DRAG_BPS');
   if (e.CRASH_ENTRY_USD > e.CRASH_CAPITAL_USD) throw new Error('CRASH_ENTRY_USD exceeds CRASH_CAPITAL_USD');
   if (e.CRASH_EXIT_SLIPPAGE_BPS < e.CRASH_SLIPPAGE_BPS) throw new Error('CRASH_EXIT_SLIPPAGE_BPS must be at least CRASH_SLIPPAGE_BPS');
   return {
     FAIR: { id: 'FAIR', label: 'FAIR LAUNCH', summary: 'Fair-launch trending tokens: every hard gate plus momentum in two consecutive scans', enabled: true,
       capitalUsd: capital.plannedStartingCapitalUsd, entryUsd: capital.baseEntryUsd, slippageBps: capital.slippageBps, exitSlippageBps: capital.slippageBps, maxDragBps: DESK.maxDragBps,
-      maxOpenPositions: DESK.maxOpenPositions, positionCheckMs: DESK.exits.positionCheckMs,
+      maxOpenPositions: DESK.maxOpenPositions, positionCheckMs: DESK.exits.positionCheckMs, exitMode: 'rules', reentryCooldownMs: DESK.reentryCooldownMs,
       exits: { takeProfitPct: rs.takeProfitPct, stopLossPct: rs.stopLossPct, maxHoldMin: rs.maxHoldMin,
         trailing: rs.trailingStopPct > 0 ? { activationPct: rs.trailingActivationPct, stopPct: rs.trailingStopPct } : null, giveback: null } },
     CRASH: { id: 'CRASH', label: 'CRASH', summary: 'Young pools pumping now: entered in one scan, exited within minutes — launch fairness not required, safety gates are',
       enabled: e.CRASH_ENABLED === 'true', capitalUsd: e.CRASH_CAPITAL_USD, entryUsd: e.CRASH_ENTRY_USD, slippageBps: e.CRASH_SLIPPAGE_BPS,
       exitSlippageBps: e.CRASH_EXIT_SLIPPAGE_BPS,
       maxDragBps: BigInt(e.CRASH_MAX_DRAG_BPS), maxOpenPositions: e.CRASH_MAX_POSITIONS, positionCheckMs: c.positionCheckMs,
-      exits: { takeProfitPct: e.CRASH_TAKE_PROFIT_PCT, stopLossPct: e.CRASH_STOP_LOSS_PCT, maxHoldMin: e.CRASH_MAX_HOLD_MIN, trailing: null,
-        giveback: { lockPeakPct: e.CRASH_LOCK_PEAK_PCT, points: e.CRASH_GIVEBACK_PTS } } },
+      exitMode: e.CRASH_EXIT_MODE, reentryCooldownMs: e.CRASH_REENTRY_MIN * 60_000,
+      exits: ride
+        ? { takeProfitPct: Number.POSITIVE_INFINITY, stopLossPct: e.CRASH_STOP_LOSS_PCT, maxHoldMin: e.CRASH_RIDE_MAX_HOLD_MIN,
+          trailing: { activationPct: e.CRASH_TRAIL_ACTIVATION_PCT, stopPct: e.CRASH_TRAIL_STOP_PCT }, giveback: null }
+        : { takeProfitPct: e.CRASH_TAKE_PROFIT_PCT, stopLossPct: e.CRASH_STOP_LOSS_PCT, maxHoldMin: e.CRASH_MAX_HOLD_MIN, trailing: null,
+          giveback: { lockPeakPct: e.CRASH_LOCK_PEAK_PCT, points: e.CRASH_GIVEBACK_PTS } } },
   };
 }

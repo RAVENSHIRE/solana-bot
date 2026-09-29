@@ -74,10 +74,13 @@ function tradesFromLedger(entries: LedgerEntry[]): Trade[] {
 }
 
 async function main(): Promise<void> {
-  const crash = strategyProfiles(process.env, deskCapital(process.env), { takeProfitPct: 30, stopLossPct: 12, trailingActivationPct: 15, trailingStopPct: 8, maxHoldMin: 60 }).CRASH.exits;
+  const rs = { takeProfitPct: 30, stopLossPct: 12, trailingActivationPct: 15, trailingStopPct: 8, maxHoldMin: 60 };
+  const crash = strategyProfiles({ ...process.env, CRASH_EXIT_MODE: 'quick' }, deskCapital(process.env), rs).CRASH.exits;
+  const ride = strategyProfiles({ ...process.env, CRASH_EXIT_MODE: 'ride' }, deskCapital(process.env), rs).CRASH.exits;
   const runner: ExitRules = { takeProfitPct: Infinity, stopLossPct: crash.stopLossPct, maxHoldMin: horizonMs / 60_000, trailing: { activationPct: 40, stopPct: 40 }, giveback: null };
   const variants: Array<{ name: string; legs: ExitRules[] }> = [
-    { name: `CRASH now (TP +${crash.takeProfitPct}%, lock ${crash.giveback?.points} pts after +${crash.giveback?.lockPeakPct}%, SL -${crash.stopLossPct}%, ${crash.maxHoldMin} min)`, legs: [crash] },
+    { name: `CRASH QUICK (TP +${crash.takeProfitPct}%, lock ${crash.giveback?.points} pts after +${crash.giveback?.lockPeakPct}%, SL -${crash.stopLossPct}%, ${crash.maxHoldMin} min)`, legs: [crash] },
+    { name: `CRASH RIDE (no TP, trail ${ride.trailing?.stopPct}% after +${ride.trailing?.activationPct}%, SL -${ride.stopLossPct}%, ${ride.maxHoldMin} min)`, legs: [ride] },
     { name: 'No take profit, same lock/stop/time', legs: [{ ...crash, takeProfitPct: Infinity }] },
     { name: `Runner: 50% at TP, 50% trails 40% from peak (≤ ${horizonMs / 60_000} min)`, legs: [crash, runner] },
     { name: `Hold to +${horizonMs / 60_000} min (hindsight reference)`, legs: [{ takeProfitPct: Infinity, stopLossPct: 100, maxHoldMin: horizonMs / 60_000, trailing: null, giveback: null }] },

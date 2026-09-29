@@ -69,10 +69,12 @@ export function exitReason(r: ExitRules, x: { pnlPct: number; peakPct: number; f
 export function exitRuleText(p: StrategyProfile): string[] {
   const r = p.exits, target = p.entryUsd * r.takeProfitPct / 100;
   return [
-    `Take profit at +${r.takeProfitPct}% (${usd(target)} unrealized on a ${usd(p.entryUsd)} entry)`,
+    ...(p.exitMode !== 'rules' ? [`Exit mode ${p.exitMode.toUpperCase()}`] : []),
+    Number.isFinite(r.takeProfitPct) ? `Take profit at +${r.takeProfitPct}% (${usd(target)} unrealized on a ${usd(p.entryUsd)} entry)`
+      : 'No take profit: the trailing stop rides the move',
     ...(r.giveback ? [`Profit lock: once +${r.giveback.lockPeakPct}% was reached, exit ${r.giveback.points} points below the peak`] : []),
     ...(r.trailing ? [`Trailing stop ${r.trailing.stopPct}% from the peak after +${r.trailing.activationPct}%`] : []),
-    `Stop loss at -${r.stopLossPct}%`, `Time stop after ${r.maxHoldMin} min`,
+    `Stop loss at -${r.stopLossPct}%`, `Time stop after ${r.maxHoldMin} min`, `Re-entry after an exit: ${p.reentryCooldownMs / 60_000} min`,
     'Early warnings: pool liquidity -30% since entry, or the pump.fun creator selling',
     `Checked every ${p.positionCheckMs / 1000} s with an executable Jupiter quote`,
   ];

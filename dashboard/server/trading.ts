@@ -110,13 +110,13 @@ export class TradingService {
         if (paper.scanner) throw new DeskReject('STOP_TEST_FIRST');
         this.mode = 'LIVE'; live.start(); return;
       case 'stop-live': live.stop(); this.broker.cancel(); return;
-      case 'pause': handle.engines[this.mode].pause(); if (this.mode === 'LIVE') this.broker.cancel(); return;
+      // Pause stops new entries only; a pending request may be an exit, which must still be signable.
+      case 'pause': handle.engines[this.mode].pause(); return;
       case 'resume': if (this.mode === 'LIVE') requireSession(); handle.engines[this.mode].resume(); return;
       case 'drill-on': case 'drill-off':
         // Drill entries exist only in TEST; LIVE never bypasses a strategy gate.
         if (this.mode !== 'PAPER') throw new DeskReject('DRILL_TEST_ONLY');
-        paper.drill = action === 'drill-on'; paper.events.add('SYSTEM', `TEST drill ${paper.drill ? 'ON: paper entries may bypass strategy gates (safety gates and guard still apply)' : 'OFF'}`);
-        return;
+        paper.setDrill(action === 'drill-on'); return;
       case 'probe':
         // Never available in LIVE: a probe must not be able to produce a signature request.
         if (this.mode !== 'PAPER' || typeof body.mint !== 'string') throw new DeskReject('PROBE_TEST_ONLY');

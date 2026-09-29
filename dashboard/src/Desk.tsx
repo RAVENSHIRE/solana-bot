@@ -68,7 +68,7 @@ function Controls({ t, d }: { t: TradingSession; d: DeskStatus | null }) {
     </div>
     <div className="chips">
       {chip(running, 'SCANNER: ON', 'SCANNER: OFF')}
-      {chip(!!d?.execution, 'EXECUTION: ENABLED', 'EXECUTION: DISABLED')}
+      {chip(!!d?.execution, 'ENTRIES: ON', running ? 'ENTRIES: PAUSED (exits keep running)' : 'ENTRIES: OFF')}
       {t.connected ? chip(true, `WALLET: PHANTOM ${short(t.address)}`, '') : d?.wallet.source === 'CONFIGURED'
         ? <span className="chip on">WALLET: .env ADDRESS {short(d.wallet.address)} (TEST, no signing)</span> : chip(false, '', 'WALLET: DISCONNECTED')}
       {!live && chip(!!d?.drill, 'DRILL: ON', 'DRILL: OFF')}
@@ -88,8 +88,9 @@ function Controls({ t, d }: { t: TradingSession; d: DeskStatus | null }) {
         <button className="primary-action live" disabled={busy || running || !t.connected} onClick={() => void t.desk('start-live')}>START LIVE SESSION</button>
         <button className="stop-action" disabled={busy || !running} onClick={() => void t.desk('stop-live')}>STOP LIVE SESSION</button>
       </>}
-      <button className="source-button" disabled={busy || !running || !d?.execution} onClick={() => void t.desk('pause')}>PAUSE EXECUTION</button>
-      <button className="source-button" disabled={busy || !running || !!d?.execution} onClick={() => void t.desk('resume')}>RESUME EXECUTION</button>
+      <button className="source-button" disabled={busy || !running || !d?.execution} title="No new entries; open positions keep their exits"
+        onClick={() => void t.desk('pause')}>PAUSE ENTRIES</button>
+      <button className="source-button" disabled={busy || !running || !!d?.execution} onClick={() => void t.desk('resume')}>RESUME ENTRIES</button>
       {live && t.connected && !t.auto && <button className="source-button" disabled={busy} onClick={() => void t.enableAuto()}>Enable Auto-Confirm</button>}
       {live && t.auto && <span className="chip on">Auto-Confirm granted in Phantom</span>}
     </div>

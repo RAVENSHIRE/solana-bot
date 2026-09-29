@@ -17,6 +17,7 @@ import { exactNumber } from '../data/core/data-validator';
 import { BASE_FEE_LAMPORTS, SOL_MINT, TOKEN_ACCOUNT_RENT_LAMPORTS } from '../core/types';
 import type { Logger } from '../utils/logger';
 import { errorMessage } from '../utils/errors';
+import { atomicWriteFile } from '../utils/fs';
 import { DESK, STRATEGY_IDS, strategyProfiles, type DeskCapital, type StrategyProfile } from './config';
 import { EventLog } from './events';
 import { DeskLedger, type LedgerState } from './ledger';
@@ -82,6 +83,7 @@ export class DeskEngine {
   private orders: Promise<unknown> = Promise.resolve();
   /** The latest fast position check including its save, so settled() covers it. */
   private background: Promise<unknown> = Promise.resolve();
+  private settingsWrite: Promise<void> = Promise.resolve();
   message: string | null = null;
   lastScanAt: number | null = null;
   nextScanAt: number | null = null;
@@ -107,13 +109,14 @@ export class DeskEngine {
     this.graduations = new GraduationFeed(d.rpc);
     const base = d.strategies ?? strategyProfiles({}, d.capital, d.cfg.rs);
     this.strategies = { FAIR: { ...base.FAIR, exits: { ...base.FAIR.exits } }, CRASH: { ...base.CRASH, exits: { ...base.CRASH.exits } } };
-    // Real money: CRASH is switched on explicitly in each LIVE session, never by default.
+    // Real money: CRASH is off in LIVE until the owner switches it on; that choice is then saved (settings-LIVE.json).
     if (d.mode === 'LIVE') this.strategies.CRASH.enabled = false;
   }
 
   static async create(d: DeskDeps): Promise<DeskEngine> {
     const engine = new DeskEngine(d);
     await engine.events.load();
+    await engine.loadSettings();
     if (d.mode === 'PAPER') for (const id of STRATEGY_IDS) { await engine.ledgerFor(id, null); await engine.loadCycles(id); }
     return engine;
   }
@@ -175,18 +178,41 @@ export class DeskEngine {
     this.scanner = false; this.execution = false; this.generation++; this.nextScanAt = null;
     this.event('SYSTEM', `${this.d.mode === 'PAPER' ? 'TEST' : 'LIVE session'} stopped (${reason}); telemetry and ledgers kept`);
   }
-  pause(): void { if (this.execution) { this.execution = false; this.event('SYSTEM', 'Execution PAUSED: scanner keeps running, no new orders'); } }
+  /** Pausing stops new entries only: exits reduce risk, so open positions keep their stop loss, take profit and time stop. */
+  pause(): void { if (this.execution) { this.execution = false; this.event('SYSTEM', 'Entries PAUSED: no new positions; exits of open positions keep running'); } }
   resume(): void {
     if (!this.scanner) throw new DeskReject('SCANNER_OFF');
     if (this.d.mode === 'LIVE' && !this.d.authorized()) throw new DeskReject('WALLET_SESSION_REQUIRED');
-    if (!this.execution) { this.execution = true; this.event('SYSTEM', 'Execution RESUMED'); }
+    if (!this.execution) { this.execution = true; this.event('SYSTEM', 'Entries RESUMED'); }
   }
-  /** Disabling a strategy stops its new entries; its open positions keep their exits. */
+  /** Disabling a strategy stops its new entries; its open positions keep their exits. The choice survives restarts. */
   setStrategy(id: StrategyId, enabled: boolean): void {
     const p = this.strategies[id];
     if (p.enabled === enabled) return;
     p.enabled = enabled;
     this.event('SYSTEM', `${p.label} strategy ${enabled ? 'ENABLED' : 'DISABLED — no new entries; open positions keep their exits'}`, { detail: { strategy: id } });
+    this.settingsWrite = this.settingsWrite.then(() => this.saveSettings());
+  }
+  /** TEST only; survives restarts. */
+  setDrill(on: boolean): void {
+    if (this.d.mode !== 'PAPER') throw new DeskReject('DRILL_TEST_ONLY');
+    if (this.drill === on) return;
+    this.drill = on;
+    this.event('SYSTEM', `TEST drill ${on ? 'ON: paper entries may bypass strategy gates (safety gates and guard still apply)' : 'OFF'}`);
+    this.settingsWrite = this.settingsWrite.then(() => this.saveSettings());
+  }
+
+  /** Toggles made in the dashboard are stored per mode, so a restart never silently changes what the desk trades. */
+  private settingsFile(): string { return path.join(this.d.dir, `settings-${this.d.mode}.json`); }
+  private async loadSettings(): Promise<void> {
+    let saved: { strategies?: Partial<Record<StrategyId, unknown>>; drill?: unknown };
+    try { saved = JSON.parse(await fs.readFile(this.settingsFile(), 'utf8')); } catch { return; }
+    for (const id of STRATEGY_IDS) if (typeof saved.strategies?.[id] === 'boolean') this.strategies[id].enabled = saved.strategies[id] as boolean;
+    if (this.d.mode === 'PAPER' && typeof saved.drill === 'boolean') this.drill = saved.drill;
+  }
+  private async saveSettings(): Promise<void> {
+    const body = { strategies: Object.fromEntries(STRATEGY_IDS.map(id => [id, this.strategies[id].enabled])), drill: this.drill, updatedAt: new Date().toISOString() };
+    await atomicWriteFile(this.settingsFile(), JSON.stringify(body, null, 2) + '\n').catch(error => this.event('FAILED', `Saving settings failed: ${errorMessage(error)}`));
   }
 
   /**
@@ -280,7 +306,7 @@ export class DeskEngine {
 
   async settled(): Promise<void> {
     while (this.work || this.positionWork) { await this.work?.catch(() => undefined); await this.positionWork?.catch(() => undefined); }
-    await this.orders; await this.background;
+    await this.orders; await this.background; await this.settingsWrite;
   }
   async persist(): Promise<void> {
     await this.events.flush();
@@ -565,7 +591,7 @@ export class DeskEngine {
         }
         continue;
       }
-      if (!this.execution) { this.event('WAITING', `${id} · exit signal ${reason}, but execution is paused`, ctx); continue; }
+      // Exits run even while entries are paused: a paused desk must never leave a position without its stops.
       this.event('EXIT', `${id} · exit signal: ${reason}`, ctx);
       await this.execute('SELL', { strategy: id, mint: p.mint, symbol: p.symbol, decimals: p.decimals, pairAddress: p.pairAddress, heldRaw: BigInt(p.qtyRaw) }, ledger, stopped);
     }
@@ -595,12 +621,12 @@ export class DeskEngine {
     // Exits in completed TEST cycles count too: a re-funded sleeve never forgets a cooldown.
     const history = [...(this.d.mode === 'PAPER' ? this.cycles.get(id) ?? [] : []).flatMap(c => c.entries), ...s.entries];
     const lastExit = (mint: string) => history.filter(e => e.mint === mint && e.side === 'SELL').at(-1)?.at ?? null;
-    const recentExit = (mint: string) => { const at = lastExit(mint); return at !== null && now - at < DESK.reentryCooldownMs; };
+    const recentExit = (mint: string) => { const at = lastExit(mint); return at !== null && now - at < p.reentryCooldownMs; };
     const pool: Candidate[] = [];
     for (const c of list) {
       const holder = this.heldBy(c.mint), exit = lastExit(c.mint), skip = this.entrySkips.get(`${id}:${c.mint}`);
       if (holder) { if (holder !== id) note(c.mint, `held by ${holder}`); continue; }
-      if (exit !== null && now - exit < DESK.reentryCooldownMs) { note(c.mint, `re-entry cooldown until ${hhmm(exit + DESK.reentryCooldownMs)}`); continue; }
+      if (exit !== null && now - exit < p.reentryCooldownMs) { note(c.mint, `re-entry cooldown until ${hhmm(exit + p.reentryCooldownMs)}`); continue; }
       if (skip) { note(c.mint, `${skip.code} at ${hhmm(skip.at)}; retry after ${hhmm(skip.at + DESK.entrySkipMs)}`); continue; }
       pool.push(c);
     }
