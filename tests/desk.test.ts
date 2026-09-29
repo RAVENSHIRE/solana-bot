@@ -722,3 +722,16 @@ test('LIVE with the local key signs without any approval, persists the signature
     assert.throws(() => engine.start(), /TRANSACTION_RECONCILIATION_REQUIRED/);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
+
+test('the wallet balance is read while the scanner is off, so the dashboard shows it before a session starts', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-idle-')), { w, shared } = world();
+  try {
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    assert.equal(engine.status({ connected: false, address: null }).capital.walletSol, null);
+    engine.tick(); await engine.settled();
+    const c = engine.status({ connected: false, address: null }).capital;
+    assert.equal(c.walletSol, w.native / 1e9); assert.equal(c.solUsd, 100); assert.ok(c.lastWalletSync);
+    engine.tick(); await engine.settled();
+    assert.equal(engine.events.list().filter(e => e.stage === 'SCANNING').length, 0, 'no scan, no order: a balance read only');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});

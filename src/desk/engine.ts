@@ -87,6 +87,8 @@ export class DeskEngine {
   /** The latest fast position check including its save, so settled() covers it. */
   private background: Promise<unknown> = Promise.resolve();
   private settingsWrite: Promise<void> = Promise.resolve();
+  private idleSync: Promise<void> | null = null;
+  private lastIdleSyncAt = 0;
   message: string | null = null;
   lastScanAt: number | null = null;
   nextScanAt: number | null = null;
@@ -301,7 +303,7 @@ export class DeskEngine {
   }
   /** Called every second by the host: a full scan when due, and position checks at each strategy's own cadence. */
   tick(): void {
-    if (!this.scanner) return;
+    if (!this.scanner) { this.idleWalletSync(); return; }
     if (!this.work && (this.nextScanAt ?? 0) <= Date.now()) void this.pulse();
     if (this.positionWork) return;
     const now = Date.now();
@@ -312,9 +314,19 @@ export class DeskEngine {
       .then(() => this.persist()).catch(error => this.event('FAILED', `Saving desk state failed: ${errorMessage(error)}`));
   }
 
+  /**
+   * While the scanner is off, the wallet balance and SOL price are still refreshed every 15 s, so the dashboard shows
+   * the actual wallet before a session starts. Read-only: one balance call and one price request.
+   */
+  private idleWalletSync(): void {
+    if (this.work || this.idleSync || Date.now() - this.lastIdleSyncAt < 15_000 || !this.d.wallet()) return;
+    this.lastIdleSyncAt = Date.now();
+    this.idleSync = this.syncWallet(true).finally(() => { this.idleSync = null; });
+  }
+
   async settled(): Promise<void> {
     while (this.work || this.positionWork) { await this.work?.catch(() => undefined); await this.positionWork?.catch(() => undefined); }
-    await this.orders; await this.background; await this.settingsWrite;
+    await this.orders; await this.background; await this.settingsWrite; await this.idleSync;
   }
   async persist(): Promise<void> {
     await this.events.flush();
@@ -371,20 +383,21 @@ export class DeskEngine {
     return [...new Set([...this.books().flatMap(b => b.ledger.state.positions.map(p => p.mint)), ...keep])];
   }
 
-  private async syncWallet(): Promise<void> {
-    const d = this.d;
+  /** `quiet` (idle refresh): a repeated identical failure is logged once, not every 15 s. */
+  private async syncWallet(quiet = false): Promise<void> {
+    const d = this.d, fail = (key: string, message: string) => quiet ? this.note(key, 'FAILED', message) : this.event('FAILED', message);
     try {
       const pairs = await d.dex.getPairsForTokens([SOL_MINT]);
       const p = selectPair(pairs, SOL_MINT, Date.now());
       if (p?.priceUsd) this.solUsd = p.priceUsd;
-    } catch (error) { this.event('FAILED', `SOL price unavailable: ${errorMessage(error)}`); }
+    } catch (error) { fail('sol-price', `SOL price unavailable: ${errorMessage(error)}`); }
     const wallet = d.wallet();
     if (!wallet) { this.walletView = null; return; }
     try {
       const native = await d.rpc.execute('desk:wallet-sync', c => c.getBalance(wallet.owner, 'confirmed'));
       this.walletView = { owner: wallet.owner.toBase58(), native: BigInt(native), at: Date.now() };
       if (d.mode === 'LIVE') for (const id of STRATEGY_IDS) await this.ledgerFor(id, this.walletView.owner);
-    } catch (error) { this.event('FAILED', `Wallet sync failed: ${errorMessage(error)}`); }
+    } catch (error) { fail('wallet-sync', `Wallet sync failed: ${errorMessage(error)}`); }
   }
 
   // ------------------------------------------------------------------ discovery → evidence → gates

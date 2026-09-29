@@ -119,8 +119,10 @@ function Capital({ d }: { d: DeskStatus }) {
   const c = d.capital, test = d.mode === 'PAPER';
   const row = (label: string, value: string, note?: string) => <div><span>{label}</span><strong>{value}</strong>{note && <small>{note}</small>}</div>;
   return <div className="capital">
-    <section><h3>Phantom wallet <em>actual</em></h3>
-      {row('Actual SOL', c.walletSol === null ? '--' : `${numeric(c.walletSol, 6)} SOL`, d.wallet.connected ? short(d.wallet.address) : d.wallet.source === 'CONFIGURED' ? `${short(d.wallet.address)} · from .env (read-only)` : 'Connect Phantom')}
+    <section><h3>{d.wallet.source === 'LOCAL_KEY' ? 'Wallet · local key' : 'Phantom wallet'} <em>actual</em></h3>
+      {row('Actual SOL', c.walletSol === null ? (d.wallet.address ? 'reading…' : '--') : `${numeric(c.walletSol, 6)} SOL`,
+        d.wallet.source === 'LOCAL_KEY' ? `${short(d.wallet.address)} · signs with WALLET_PRIVATE_KEY` : d.wallet.connected ? short(d.wallet.address)
+          : d.wallet.source === 'CONFIGURED' ? `${short(d.wallet.address)} · from .env (read-only)` : 'Connect Phantom')}
       {row('Actual USD value', money(c.walletUsd), c.solUsd ? `SOL ${money(c.solUsd)}` : undefined)}
       {row('Last wallet sync', ago(c.lastWalletSync))}
     </section>
