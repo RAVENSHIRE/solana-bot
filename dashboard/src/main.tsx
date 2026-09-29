@@ -5,7 +5,7 @@ import type { BotState } from "../shared/state";
 import { Chart, Sparkline } from "./Chart";
 import { useBotState } from "./use-state";
 import { WalletPanel } from "./WalletPanel";
-import { TradingPanel } from "./TradingPanel";
+import { DeskPanel } from './Desk';
 import { useTradingSession } from "./use-trading";
 import {
   duration,
@@ -456,8 +456,8 @@ function App() {
           <header className="page-header">
             <div className="page-heading">
               <Icon name="arrow" size={19} />
-              <h1>{workspace==='wallet'?'Solana trading desk':meta?.bot_name || "Memecoin dashboard"}</h1>
-              {workspace==='wallet'?<p>Phantom wallet · local execution</p>:<p>
+              <h1>{workspace==='wallet'?'Solana trading desk':'Simulation / backtest'}</h1>
+              {workspace==='wallet'?<p>Phantom wallet · TEST and LIVE share one pipeline</p>:<p>
                 {meta?.network || "--"} <span>·</span>{" "}
                 {present(meta?.decision_cadence_seconds)
                   ? `${runtime ? "scan" : "a decision"} every ${numeric(meta.decision_cadence_seconds, 1)} seconds`
@@ -467,7 +467,7 @@ function App() {
             <div className="header-actions">
               <span className="mode">
                 <Icon name="activity" size={16} />
-                {workspace==='wallet'?(trading.online?(trading.status?.active?'LIVE SESSION':'DISARMED'):'OFFLINE'):meta?.mode || "--"}
+                {workspace==='wallet'?(!trading.online?'OFFLINE':trading.view?.mode==='LIVE'?`LIVE${trading.view.desk?.scanner?' · RUNNING':''}`:`TEST${trading.view?.desk?.scanner?' · RUNNING':''}`):`SIMULATION / BACKTEST · ${meta?.mode || "--"}`}
               </span>
               <button
                 className="source-button"
@@ -479,15 +479,15 @@ function App() {
             </div>
           </header>
           <nav className="workspace-tabs" aria-label="Dashboard workspace">
-            <button aria-pressed={workspace==='wallet'} onClick={()=>setWorkspace('wallet')}>Wallet & live session</button>
-            <button aria-pressed={workspace==='market'} onClick={()=>setWorkspace('market')}>Market & simulation</button>
+            <button aria-pressed={workspace==='wallet'} onClick={()=>setWorkspace('wallet')}>Trading desk · TEST / LIVE</button>
+            <button aria-pressed={workspace==='market'} onClick={()=>setWorkspace('market')}>Simulation / backtest</button>
           </nav>
-          <div hidden={workspace!=='wallet'} className="wallet-workspace">
-            <TradingPanel session={trading}/>
+          <div hidden={workspace!=='wallet'} className="desk-workspace">
+            <DeskPanel t={trading}/>
             <WalletPanel address={trading.address} connected={trading.connected}/>
           </div>
           <div hidden={workspace!=='market'}>
-          <p className="section-caption">Recorded bot telemetry · independent of the Phantom session above</p>
+          <p className="sim-banner" role="note"><strong>SIMULATION / BACKTEST</strong> Recorded telemetry of the separate strategy engine. Its equity, trades and PnL are never mixed with TEST or LIVE.</p>
           <section className="metric-grid" aria-label="Performance metrics">
             {cards.map((card) => (
               <article className="metric" key={card.label}>

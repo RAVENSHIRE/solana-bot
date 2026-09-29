@@ -29,13 +29,15 @@ export class MicroMarket {
     // Budget temporary wrapping/routing account capital independently of permanent ATA fees.
     return {...prices,unsupportedHoldings,native,usdc:raw,ataExists:!!token,ataRent:token?0n:rent,tempRent:rent*2n,at:Date.now()};
   }
-  async priorityCap(maximum:bigint):Promise<bigint> {
-    if(maximum<0n) throw new MicroReject('NO_PRIORITY_FEE_BUDGET');
-    const rows=await this.rpc.execute('micro:priority',c=>c.getRecentPrioritizationFees());
-    const values=rows.map(r=>parse(safeInteger,r.prioritizationFee,'solana-rpc')).sort((a,b)=>a-b);
-    if(!values.length) throw new MicroReject('PRIORITY_FEE_DATA_MISSING');
-    const units=BigInt(ESTIMATED_SWAP_COMPUTE_UNITS);
-    const n=(BigInt(values[Math.min(values.length-1,Math.floor(values.length*.75))]!)*units+999999n)/1000000n;
-    return n<maximum?n:maximum;
-  }
+  priorityCap(maximum:bigint):Promise<bigint> {return recentPriorityFee(this.rpc,maximum);}
+}
+/** 75th percentile of recent prioritization fees for an estimated swap, bounded by the remaining budget. */
+export async function recentPriorityFee(rpc:ConnectionManager,maximum:bigint):Promise<bigint> {
+  if(maximum<0n) throw new MicroReject('NO_PRIORITY_FEE_BUDGET');
+  const rows=await rpc.execute('micro:priority',c=>c.getRecentPrioritizationFees());
+  const values=rows.map(r=>parse(safeInteger,r.prioritizationFee,'solana-rpc')).sort((a,b)=>a-b);
+  if(!values.length) throw new MicroReject('PRIORITY_FEE_DATA_MISSING');
+  const units=BigInt(ESTIMATED_SWAP_COMPUTE_UNITS);
+  const n=(BigInt(values[Math.min(values.length-1,Math.floor(values.length*.75))]!)*units+999999n)/1000000n;
+  return n<maximum?n:maximum;
 }

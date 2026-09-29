@@ -7,7 +7,8 @@ import { DashboardStore } from "./dashboard-store";
 import { adaptTelemetry } from "./telemetry-adapter";
 import type { StreamSnapshot } from "../shared/state";
 import { createWalletReader } from "./wallet";
-import { TradingService, engineFactory } from './trading';
+import { TradingService, deskFactory, tradingEnvironment } from './trading';
+import { deskCapital } from '../../src/desk/config';
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const port = Number(process.env.DASHBOARD_PORT || 3000);
@@ -27,8 +28,10 @@ const store =
         new StateStore(telemetryPath, 250, adaptTelemetry),
       );
 await store.start();
-const walletReader = await createWalletReader(path.resolve(root, '..')).catch(() => null);
-const trading = new TradingService(engineFactory(path.resolve(root, '..')));
+const repo = path.resolve(root, '..');
+const planned = await tradingEnvironment(repo).then(env => deskCapital(env).plannedStartingCapitalUsd).catch(() => null);
+const walletReader = await createWalletReader(repo, planned).catch(() => null);
+const trading = new TradingService(deskFactory(repo));
 const dev = process.argv.includes("--dev");
 const vite = dev
   ? await (

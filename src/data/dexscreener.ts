@@ -9,11 +9,17 @@ const changes = z.object({ m5: decimal.nullish(), h1: decimal.nullish(), h6: dec
 const volumes = z.object({ m5: optionalNumber, h1: optionalNumber, h6: optionalNumber, h24: optionalNumber });
 const token = z.object({ address, symbol: z.string().optional(), name: z.string().optional() });
 const transactions = z.object({ buys: safeInteger, sells: safeInteger });
+const link = z.object({ url: z.string().url().max(500), type: z.string().max(40).optional(), label: z.string().max(80).optional() });
+const listingSchema = z.object({ chainId: z.string(), tokenAddress: z.string(), description: z.string().max(2000).nullish().catch(null),
+  links: z.array(link).max(20).nullish().catch(null), totalAmount: z.number().finite().nonnegative().nullish().catch(null) });
+export interface DexListing { mint: string; description: string | null; links: Array<{ url: string; type: string | null; label: string | null }>; boostAmount: number | null }
 const pairSchema = z.object({ chainId: z.literal('solana'), dexId: z.string().min(1), pairAddress: address,
   baseToken: token, quoteToken: token, priceUsd: optionalNumber, liquidity: z.object({ usd: optionalNumber }).nullish(),
   marketCap: optionalNumber, fdv: optionalNumber, pairCreatedAt: timestamp.nullish(),
   priceChange: changes.nullish(), volume: volumes.nullish(),
-  txns: z.object({ m5: transactions.optional(), h1: transactions.optional(), h6: transactions.optional(), h24: transactions.optional() }).nullish() });
+  txns: z.object({ m5: transactions.optional(), h1: transactions.optional(), h6: transactions.optional(), h24: transactions.optional() }).nullish(),
+  // Project links are optional context: a malformed entry must never reject the market data itself.
+  info: z.object({ websites: z.array(link).max(10).optional(), socials: z.array(link).max(10).optional() }).nullish().catch(null) });
 export type DexPair = z.infer<typeof pairSchema> & { meta: Observation };
 export function normalizeDexPairs(raw: unknown, at: number): DexPair[] {
   return parse(z.array(z.unknown()), raw, 'dexscreener').filter(p => (p as { chainId?: unknown } | null)?.chainId === 'solana').map(p => {
@@ -36,6 +42,19 @@ export class DexScreenerClient {
     return this.data.read('dexscreener', route, 'discovery', () => this.http.get(route), raw => {
       const rows = parse(z.array(z.object({ chainId: z.string(), tokenAddress: z.string() })), raw, 'dexscreener');
       return [...new Set(rows.filter(r => r.chainId === 'solana').map(r => parse(address, r.tokenAddress, 'dexscreener')))];
+    });
+  }
+  /** Listing rows with their project description, links and boost amount (for the desk's evidence model). */
+  listingDetails(route: '/token-boosts/latest/v1' | '/token-boosts/top/v1' | '/token-profiles/latest/v1'): Promise<DexListing[]> {
+    return this.data.read('dexscreener', `details:${route}`, 'discovery', () => this.http.get(route), raw => {
+      const rows = parse(z.array(z.unknown()), raw, 'dexscreener').map(r => listingSchema.safeParse(r)).flatMap(r => r.success ? [r.data] : []);
+      const out = new Map<string, DexListing>();
+      for (const r of rows) {
+        if (r.chainId !== 'solana' || !address.safeParse(r.tokenAddress).success || out.has(r.tokenAddress)) continue;
+        out.set(r.tokenAddress, { mint: r.tokenAddress, description: r.description ?? null, boostAmount: r.totalAmount ?? null,
+          links: (r.links ?? []).map(l => ({ url: l.url, type: l.type ?? null, label: l.label ?? null })) });
+      }
+      return [...out.values()];
     });
   }
   getLatestBoostedTokens(): Promise<string[]> { return this.listings('/token-boosts/latest/v1'); }

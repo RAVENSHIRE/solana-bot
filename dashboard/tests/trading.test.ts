@@ -1,118 +1,93 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { Keypair } from '@solana/web3.js';
-import { TradingService, tradingEnvironment, engineFactory } from '../server/trading';
-import { SessionEngine } from '../../src/micro/session-engine';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { Keypair } from '@solana/web3.js';
+import { TradingService, tradingEnvironment, deskFactory, type DeskFactory, type DeskHandle } from '../server/trading';
+import { DeskReject } from '../../src/desk/guard';
+import type { DeskEngine } from '../../src/desk/engine';
+import type { DeskMode } from '../../src/desk/types';
 
-test('trading API requires same-origin capability and session; status never exposes private signing requests',async(t)=>{
-  let executions=0;
-  const trading=new TradingService(async(signer,authorized,cancelSignature)=>({engine:new SessionEngine({address:signer.publicKey.toBase58(),
-    snapshot:async()=>{throw new Error('synthetic RPC unavailable');},persist:async()=>{},authorized,cancelSignature,
-    execute:async()=>{executions++;throw new Error('must not run');}}),close:async()=>{}}));
-  const server=http.createServer((req,res)=>{void trading.handleRequest(req,res);});
-  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
-  const base=`http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`;
-  const post=(action:string,body:object,extra:Record<string,string>={})=>fetch(`${base}/api/trading/${action}`,{method:'POST',
-    headers:{'Content-Type':'application/json',Origin:base,...extra},body:JSON.stringify(body)});
+// Minimal engine double: records control calls; the real pipeline is covered by tests/desk.test.ts.
+function engine(mode: DeskMode) {
+  const e = { mode, scanner: false, execution: false, busy: false, nextScanAt: null as number | null, pulses: 0,
+    start() { e.scanner = true; e.execution = true; }, stop() { e.scanner = false; e.execution = false; },
+    pause() { e.execution = false; }, resume() { if (!e.scanner) throw new DeskReject('SCANNER_OFF'); e.execution = true; },
+    pulse: async () => { e.pulses++; }, settled: async () => {}, persist: async () => {},
+    status: (wallet: { connected: boolean; address: string | null }) => ({ mode, scanner: e.scanner, execution: e.execution, wallet }) };
+  return e;
+}
+function service() {
+  const engines = { PAPER: engine('PAPER'), LIVE: engine('LIVE') };
+  let wallets: Parameters<DeskFactory>[0] | null = null;
+  const factory: DeskFactory = async context => { wallets = context;
+    return { engines: engines as unknown as Record<DeskMode, DeskEngine>, capital: { plannedStartingCapitalUsd: 5.45, baseEntryUsd: 2, slippageBps: 100 }, close: async () => {} } as DeskHandle; };
+  return { trading: new TradingService(factory), engines, context: () => wallets! };
+}
+async function serve(trading: TradingService) {
+  const server = http.createServer((req, res) => { void trading.handleRequest(req, res); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`;
+  const post = (action: string, body: object, extra: Record<string, string> = {}) => fetch(`${base}/api/trading/${action}`, { method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base, ...extra }, body: JSON.stringify(body) });
+  return { base, post, close: async () => { await trading.close(); server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())); } };
+}
+
+test('desk API: same-origin capability, TEST without signing, LIVE only with a live Phantom session, never both at once', async (t) => {
+  const { trading, engines, context } = service();
+  const { base, post, close } = await serve(trading);
   try {
-    const address=Keypair.fromSeed(new Uint8Array(32).fill(64)).publicKey.toBase58();
-    assert.equal((await post('connect',{address})).status,403);
-    const {capability}=await (await fetch(`${base}/api/trading/bootstrap`)).json();
-    const headers={'X-Local-Capability':capability};
-    assert.equal((await post('connect',{address},{...headers,Origin:'https://evil.example'})).status,403);
-    const response=await post('connect',{address},headers);assert.equal(response.status,200);const s=await response.json();
-    assert.equal((await post('arm',{sessionId:'wrong'},headers)).status,400);
-    const publicStatus=await (await fetch(`${base}/api/trading`)).json();assert.equal(publicStatus.session,null);assert.equal(publicStatus.pending,null);
-    assert.equal((await fetch(`${base}/api/trading`,{headers:{'X-Wallet-Session':s.sessionId}})).status,403);
-    const own=await (await fetch(`${base}/api/trading`,{headers:{...headers,'X-Wallet-Session':s.sessionId}})).json();
-    assert.equal(own.active,false);assert.equal(own.session.address,address);assert.equal(own.profile.budgetUsd,10);
-    assert.equal((await post('arm',{sessionId:s.sessionId},headers)).status,200);
-    const realNow=Date.now;
-    const clock=t.mock.method(Date,'now',()=>realNow()+13000);
-    const resumed=await (await fetch(`${base}/api/trading`,{headers:{...headers,'X-Wallet-Session':s.sessionId}})).json();
-    assert.equal(resumed.active,false,'a late heartbeat must disarm, never resume execution');
+    const address = Keypair.fromSeed(new Uint8Array(32).fill(64)).publicKey.toBase58();
+    assert.equal((await post('desk', { action: 'start-test' })).status, 403, 'capability required');
+    const { capability } = await (await fetch(`${base}/api/trading/bootstrap`)).json();
+    const headers = { 'X-Local-Capability': capability };
+    assert.equal((await post('desk', { action: 'start-test' }, { ...headers, Origin: 'https://evil.example' })).status, 403);
+    assert.equal((await post('desk', { action: 'start-test' }, headers)).status, 200);
+    assert.equal(engines.PAPER.scanner, true); assert.equal(context().wallet('PAPER'), null, 'TEST without Phantom has no wallet, and never a signer');
+    assert.equal((await (await post('desk', { action: 'select-mode', mode: 'LIVE' }, headers)).json()).message, 'STOP_CURRENT_MODE_FIRST');
+    assert.equal((await (await post('desk', { action: 'start-live' }, headers)).json()).message, 'SESSION_REQUIRED');
+    const s = await (await post('connect', { address }, headers)).json();
+    assert.equal(context().wallet('PAPER')!.signer, null, 'TEST gets the address for simulation only');
+    assert.ok(context().wallet('LIVE')!.signer, 'LIVE signs through the Phantom broker');
+    assert.equal((await (await post('desk', { action: 'start-live', sessionId: s.sessionId }, headers)).json()).message, 'STOP_TEST_FIRST');
+    assert.equal((await post('desk', { action: 'stop-test' }, headers)).status, 200);
+    assert.equal((await post('desk', { action: 'start-live', sessionId: s.sessionId }, headers)).status, 200);
+    assert.equal(engines.LIVE.scanner, true);
+    const publicView = await (await fetch(`${base}/api/trading`)).json();
+    assert.equal(publicView.session, null); assert.equal(publicView.pending, null); assert.equal(publicView.mode, 'LIVE');
+    assert.equal((await fetch(`${base}/api/trading`, { headers: { 'X-Wallet-Session': s.sessionId } })).status, 403);
+    const realNow = Date.now;
+    const clock = t.mock.method(Date, 'now', () => realNow() + 13_000);
+    await fetch(`${base}/api/trading`, { headers: { ...headers, 'X-Wallet-Session': s.sessionId } });
     clock.mock.restore();
-    assert.equal((await post('stop',{sessionId:s.sessionId},headers)).status,200);
-    assert.equal(executions,0);
-    assert.equal((await post('disconnect',{sessionId:s.sessionId},headers)).status,200);
-    assert.equal((await post('arm',{sessionId:s.sessionId},headers)).status,400);
-  }finally{await trading.close();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
-});
-test('Phantom service selects provider settings without loading the local private key',async()=>{
-  const dir=await fs.mkdtemp(path.join(process.cwd(),'.trading-test-'));
-  try {
-    await fs.writeFile(path.join(dir,'.env'),'RPC_ENDPOINTS=https://fixture.invalid\nJUPITER_API_KEY=fixture-key\nWALLET_PRIVATE_KEY=never-load-this-test-value\nSIMULATION_MODE=false\n');
-    const env=await tradingEnvironment(dir);assert.equal(env.WALLET_PRIVATE_KEY,undefined);assert.equal(env.SIMULATION_MODE,'true');
-    assert.ok(env.RPC_ENDPOINTS);assert.ok(env.JUPITER_API_KEY);
-  }finally{await fs.rm(dir,{recursive:true,force:true});}
+    assert.equal(engines.LIVE.scanner, false, 'a late heartbeat ends LIVE and never resumes it');
+    assert.equal((await post('desk', { action: 'start-live', sessionId: s.sessionId }, headers)).status, 200);
+    assert.equal((await post('desk', { action: 'pause', sessionId: s.sessionId }, headers)).status, 200);
+    assert.equal(engines.LIVE.execution, false); assert.equal(engines.LIVE.scanner, true, 'pause keeps scanning');
+    assert.equal((await post('disconnect', { sessionId: s.sessionId }, headers)).status, 200);
+    assert.equal(engines.LIVE.scanner, false, 'disconnecting Phantom stops LIVE');
+    assert.equal((await post('desk', { action: 'resume', sessionId: s.sessionId }, headers)).status, 400);
+  } finally { await close(); }
 });
 
-test('the shared LIVE ledger has one lock across wallets and refuses legacy instance locks',async()=>{
-  const dir=await fs.mkdtemp(path.join(process.cwd(),'.trading-test-'));
-  const signer=(seed:number)=>({publicKey:Keypair.fromSeed(new Uint8Array(32).fill(seed)).publicKey,signTransaction:async()=>{throw new Error('Never sign in this test');}});
-  const factory=engineFactory(dir);let first:Awaited<ReturnType<typeof factory>>|undefined;
+test('desk settings come from an allowlist that never loads the local private key', async () => {
+  const dir = await fs.mkdtemp(path.join(process.cwd(), '.trading-test-'));
   try {
-    await fs.writeFile(path.join(dir,'.env'),'RPC_ENDPOINTS=https://fixture.invalid\nJUPITER_API_KEY=fixture-key\n');
-    first=await factory(signer(62),()=>false,()=>{});
-    await assert.rejects(factory(signer(63),()=>false,()=>{}),/INSTANCE_LOCK/);
-    await first.close();first=undefined;
-    const second=await factory(signer(63),()=>false,()=>{});await second.close();
-    await fs.writeFile(path.join(dir,'data-micro',`micro-${signer(62).publicKey.toBase58()}-LIVE.lock`),'fixture-old-instance');
-    await assert.rejects(factory(signer(63),()=>false,()=>{}),/LEGACY_INSTANCE_LOCK/);
-  }finally{await first?.close();await fs.rm(dir,{recursive:true,force:true});}
+    await fs.writeFile(path.join(dir, '.env'), 'RPC_ENDPOINTS=https://fixture.invalid\nJUPITER_API_KEY=fixture-key\nWALLET_PRIVATE_KEY=never-load-this-test-value\n' +
+      'SIMULATION_MODE=false\nDESK_PLANNED_CAPITAL_USD=5.45\nRS_STOP_LOSS_PCT=12\n');
+    const env = await tradingEnvironment(dir);
+    assert.equal(env.WALLET_PRIVATE_KEY, undefined); assert.equal(env.SIMULATION_MODE, 'true');
+    assert.equal(env.DESK_PLANNED_CAPITAL_USD, '5.45'); assert.equal(env.RS_STOP_LOSS_PCT, '12');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-test('a lock left by a crashed process is recovered; a live or unreadable owner still blocks',async()=>{
-  const dir=await fs.mkdtemp(path.join(process.cwd(),'.trading-test-'));
-  const signer={publicKey:Keypair.fromSeed(new Uint8Array(32).fill(65)).publicKey,signTransaction:async()=>{throw new Error('Never sign in this test');}};
-  const factory=engineFactory(dir),lockPath=path.join(dir,'data-micro','micro-LIVE.lock');
+test('a desk that cannot start reports why instead of pretending to scan', async () => {
+  const dir = await fs.mkdtemp(path.join(process.cwd(), '.trading-test-'));
+  const trading = new TradingService(deskFactory(dir));
+  const { base, close } = await serve(trading);
   try {
-    await fs.writeFile(path.join(dir,'.env'),'RPC_ENDPOINTS=https://fixture.invalid\nJUPITER_API_KEY=fixture-key\n');
-    await fs.mkdir(path.dirname(lockPath));
-    const child=spawn(process.execPath,['-e','']);await new Promise(r=>child.once('exit',r));
-    await fs.writeFile(lockPath,String(child.pid));
-    const recovered=await factory(signer,()=>false,()=>{});
-    assert.equal(await fs.readFile(lockPath,'utf8'),String(process.pid));
-    await recovered.close();
-    const sleeper=spawn(process.execPath,['-e','setTimeout(()=>{},60000)']);
-    try {
-      await fs.writeFile(lockPath,String(sleeper.pid));
-      await assert.rejects(factory(signer,()=>false,()=>{}),/INSTANCE_LOCK/);
-    } finally {sleeper.kill();}
-    await fs.writeFile(lockPath,'');
-    await assert.rejects(factory(signer,()=>false,()=>{}),/INSTANCE_LOCK/);
-  }finally{await fs.rm(dir,{recursive:true,force:true});}
-});
-
-test('wallet replacement cannot restart an old scan and shutdown drains a delayed new factory',async()=>{
-  let oldScans=0,calls=0,newCloses=0;
-  let oldClosing!:()=>void,releaseOld!:()=>void,newStarting!:()=>void,releaseNew!:()=>void;
-  const oldStarted=new Promise<void>(r=>oldClosing=r),newStarted=new Promise<void>(r=>newStarting=r);
-  const oldDone=new Promise<void>(r=>releaseOld=r),newDone=new Promise<void>(r=>releaseNew=r);
-  const service=new TradingService(async(signer,authorized,cancelSignature)=>{
-    const index=++calls;
-    if(index===2){newStarting();await newDone;}
-    const engine=new SessionEngine({address:signer.publicKey.toBase58(),authorized,cancelSignature,persist:async()=>{},
-      snapshot:async()=>{if(index===1)oldScans++;throw new Error('Synthetic no RPC');},execute:async()=>{throw new Error('Never execute');}});
-    return {engine,close:async()=>{engine.stop();if(index===1){oldClosing();await oldDone;}else newCloses++;}};
-  });
-  const server=http.createServer((req,res)=>{void service.handleRequest(req,res);});
-  await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
-  const base=`http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`;
-  try {
-    const {capability}=await (await fetch(`${base}/api/trading/bootstrap`)).json();
-    const connect=()=>fetch(`${base}/api/trading/connect`,{method:'POST',headers:{Origin:base,'Content-Type':'application/json','X-Local-Capability':capability},
-      body:JSON.stringify({address:Keypair.fromSeed(new Uint8Array(32).fill(71)).publicKey.toBase58()})});
-    assert.equal((await connect()).status,200);
-    const replacement=connect();await oldStarted;
-    const before=oldScans;await new Promise(r=>setTimeout(r,1150));assert.equal(oldScans,before);assert.equal(calls,1);
-    releaseOld();await newStarted;
-    const shutdown=service.close();releaseNew();await shutdown;
-    assert.equal((await replacement).status,400);assert.equal(newCloses,1);
-    assert.equal((await connect()).status,400);
-  }finally{releaseOld();releaseNew();await service.close();server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));}
+    const view = await (await fetch(`${base}/api/trading`)).json();
+    assert.equal(view.desk, null); assert.equal(view.deskError, 'RPC_NOT_CONFIGURED');
+  } finally { await close(); await fs.rm(dir, { recursive: true, force: true }); }
 });

@@ -34,7 +34,9 @@
     "micro:check": "node --import tsx src/micro/runtime.ts --check",
     "micro:sim": "node --import tsx src/micro/runtime.ts --simulation",
     "micro:live": "node --import tsx src/micro/runtime.ts --live",
-    "test:micro": "node --import tsx --test tests/micro.test.ts"
+    "test:micro": "node --import tsx --test tests/micro.test.ts",
+    "desk:paper": "node --import tsx src/scripts/desk-paper.ts",
+    "test:desk": "node --import tsx --test tests/desk.test.ts"
   },
   "dependencies": {
     "@solana/spl-token": "^0.4.9",
