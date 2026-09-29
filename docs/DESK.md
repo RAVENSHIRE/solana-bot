@@ -34,6 +34,11 @@ Native reserve (0.003 SOL) and max drag (1.5 %) are the project's existing micro
 - **Evidence**: OBSERVED / DERIVED / INFERRED; missing data is shown as UNKNOWN or UNVERIFIED, never filled in.
 - **Exits**: `RS_TAKE_PROFIT_PCT`, `RS_STOP_LOSS_PCT`, trailing stop and `RS_MAX_HOLD_MIN`, valued with an executable Jupiter quote. The max-drag cap applies to entries only.
 
+## TEST without Phantom and the TEST drill
+
+- If Phantom is not connected, TEST uses `WALLET_PUBLIC_KEY` from `.env` to build and simulate orders. It is only an address: the private key is never read and nothing is signed. LIVE always requires Phantom.
+- **TEST drill** (button next to STOP TEST, or `desk:paper --drill`): when nothing qualifies, the desk opens a paper position in the best trending candidate whose safety gates pass (mint/freeze authority revoked, no dangerous extensions, AMM liquidity > $10K). Volume, buy-pressure, concentration and momentum gates are bypassed; the execution guard (reserve, max drag, simulation) is not. Drill fills are marked `DRILL` in the ledger. The drill verifies the mechanics (position → exit → PnL); it says nothing about the strategy's edge.
+
 ## X account data
 
 Without X API access every X metric stays UNVERIFIED. To enable it, put your own bearer token in `.env` as `X_BEARER_TOKEN`; it is read by the local server only. An X account older than the project is flagged (`SOCIAL AGE MISMATCH`), never rewarded.
