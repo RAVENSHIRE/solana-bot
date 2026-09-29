@@ -80,6 +80,8 @@ export class DeskEngine {
   private creatorChecks = new Map<string, number>();
   private holdLog = new Map<string, { pct: number; at: number }>();
   private lastPositionCheckAt: Record<StrategyId, number> = { FAIR: 0, CRASH: 0 };
+  /** Mints the owner asked to sell now (EXIT NOW); kept until the position is gone, so a failed sell is retried. */
+  private manualExits = new Set<string>();
   /** Position checks run beside the discovery scan, so a slow scan never delays an exit. */
   private positionWork: Promise<void> | null = null;
   /** One order at a time across both strategies (paper cash, wallet balance and Phantom requests stay consistent). */
@@ -202,6 +204,27 @@ export class DeskEngine {
     p.enabled = enabled;
     this.event('SYSTEM', `${p.label} strategy ${enabled ? 'ENABLED' : 'DISABLED — no new entries; open positions keep their exits'}`, { detail: { strategy: id } });
     this.settingsWrite = this.settingsWrite.then(() => this.saveSettings());
+  }
+  /**
+   * EXIT NOW: sells the whole position through the normal SELL path (same guard, exit slippage and signer). While the
+   * desk runs, the position loop sells on its next tick and retries until the position is gone; with the desk stopped,
+   * one attempt runs now and the button can be pressed again.
+   */
+  requestExit(mint: string): void {
+    const id = this.heldBy(mint), ledger = id ? this.ledgerOf(id) : null, p = ledger?.position(mint);
+    if (!id || !ledger || !p) throw new DeskReject('POSITION_NOT_FOUND');
+    if (this.d.mode === 'LIVE' && !this.d.authorized()) throw new DeskReject('WALLET_SESSION_REQUIRED');
+    if (ledger.state.halted || ledger.state.pending) throw new DeskReject('TRANSACTION_RECONCILIATION_REQUIRED');
+    if (this.manualExits.has(mint)) return;
+    this.manualExits.add(mint);
+    this.event('EXIT', `${id} · EXIT NOW requested from the dashboard: selling the whole position`, { mint, symbol: p.symbol, detail: { strategy: id } });
+    if (this.scanner) { this.lastPositionCheckAt[id] = 0; return; }
+    const stopped = () => this.d.mode === 'LIVE' && !this.d.authorized();
+    this.background = this.background
+      .then(() => this.checkPositions([id], stopped, true))
+      .catch(error => this.event('FAILED', `EXIT NOW failed: ${errorMessage(error)}`))
+      .finally(() => this.manualExits.delete(mint))
+      .then(() => this.persist()).catch(error => this.event('FAILED', `Saving desk state failed: ${errorMessage(error)}`));
   }
   /** TEST only; survives restarts. */
   setDrill(on: boolean): void {
@@ -538,14 +561,15 @@ export class DeskEngine {
   // ------------------------------------------------------------------ positions & exits
 
   /** Exclusive: the fast loop and a scan never value or exit the same positions at the same time. */
-  private async checkPositions(ids: readonly StrategyId[], stopped: () => boolean): Promise<void> {
+  private async checkPositions(ids: readonly StrategyId[], stopped: () => boolean, manualOnly = false): Promise<void> {
     while (this.positionWork) await this.positionWork.catch(() => undefined);
     const work = (async () => {
+      for (const mint of this.manualExits) if (!this.heldBy(mint)) this.manualExits.delete(mint);
       for (const id of ids) {
         if (stopped()) return;
         const ledger = this.ledgerOf(id);
         this.lastPositionCheckAt[id] = Date.now();
-        if (ledger?.state.positions.length) await this.managePositions(id, ledger, stopped);
+        if (ledger?.state.positions.length) await this.managePositions(id, ledger, stopped, manualOnly);
       }
     })();
     const tracked: Promise<void> = work.finally(() => { if (this.positionWork === tracked) this.positionWork = null; });
@@ -580,13 +604,14 @@ export class DeskEngine {
     return null;
   }
 
-  private async managePositions(id: StrategyId, ledger: DeskLedger, stopped: () => boolean): Promise<void> {
-    const profile = this.strategies[id], positions = [...ledger.state.positions];
+  private async managePositions(id: StrategyId, ledger: DeskLedger, stopped: () => boolean, manualOnly = false): Promise<void> {
+    const profile = this.strategies[id], positions = ledger.state.positions.filter(p => !manualOnly || this.manualExits.has(p.mint));
     const liquidity = await this.poolLiquidity(positions.filter(p => p.entryLiquidityUsd).map(p => p.mint));
     for (const p of positions) {
       if (stopped()) return;
       const ctx = { mint: p.mint, symbol: p.symbol, detail: { strategy: id } };
-      const warning = await this.earlyWarning(p, liquidity);
+      const manual = this.manualExits.has(p.mint);
+      const warning = manual ? 'EXIT NOW (manual)' : await this.earlyWarning(p, liquidity);
       let value: bigint;
       try {
         const q = await requestScope.run({ category: 'position' }, () => this.d.jupiter.quote({ inputMint: p.mint, outputMint: SOL_MINT, amountRaw: BigInt(p.qtyRaw), slippageBps: profile.slippageBps }));
@@ -867,7 +892,7 @@ export class DeskEngine {
   private failed(side: 'BUY' | 'SELL', t: ExecTarget, guard: DeskGuard, ledger: DeskLedger, error: unknown, solUsd: number): void {
     const ctx = { mint: t.mint, symbol: t.symbol }, s = ledger.state;
     const swap = error instanceof SwapError ? error : null, cause = swap?.cause ?? error;
-    const reason = cause instanceof DeskReject ? cause.message : cause instanceof SigningError ? `Phantom: ${cause.code}` : errorMessage(error);
+    const reason = cause instanceof DeskReject ? cause.message : cause instanceof SigningError ? `${this.localKey ? 'Local key' : 'Phantom'}: ${cause.code}` : errorMessage(error);
     const signature = s.pending?.signature ?? swap?.signature ?? null;
     if (guard.lastPreflight) guard.lastPreflight.outcome = guard.lastPreflight.signature === 'SIGNED' ? 'FAILED' : 'BLOCKED';
     if (this.d.mode === 'LIVE' && signature) {
@@ -887,7 +912,7 @@ export class DeskEngine {
       return;
     }
     s.pending = null;
-    const where = guard.lastPreflight ? (guard.lastPreflight.signature === 'REJECTED' || guard.lastPreflight.signature === 'EXPIRED' ? 'at Phantom signature' : 'at pre-flight')
+    const where = guard.lastPreflight ? (guard.lastPreflight.signature === 'REJECTED' || guard.lastPreflight.signature === 'EXPIRED' ? (this.localKey ? 'at signing' : 'at Phantom signature') : 'at pre-flight')
       : guard.quoted ? 'after quote' : 'before quote';
     this.event(cause instanceof DeskReject && cause.code === 'FEE_CAP' ? 'FILTERED' : 'FAILED', `${t.strategy} · ${side} blocked ${where}: ${reason}`, { ...ctx, detail: { strategy: t.strategy } });
     if (cause instanceof SigningError) this.pause();
@@ -897,7 +922,7 @@ export class DeskEngine {
 
   status(wallet: DeskStatus['wallet']): DeskStatus {
     const d = this.d, books = this.books(), solUsd = this.solUsd;
-    const positions: DeskPosition[] = books.flatMap(b => b.ledger.state.positions.map(p => ({ ...p, strategy: b.id })));
+    const positions: DeskPosition[] = books.flatMap(b => b.ledger.state.positions.map(p => ({ ...p, strategy: b.id, exitRequested: this.manualExits.has(p.mint) })));
     // A position without an executable valuation yet makes totals unknown, never silently $0.
     const valued = positions.every(p => p.lastValueLamports !== null);
     const value = valued ? positions.reduce((a, p) => a + BigInt(p.lastValueLamports!), 0n) : null;

@@ -90,6 +90,8 @@ export interface DeskPosition {
   entryLiquidityUsd?: number | null; creator?: string | null; creatorPctAtEntry?: number | null;
   /** Status view only: the strategy whose ledger holds the position. */
   strategy?: StrategyId;
+  /** Status view only: EXIT NOW was requested and the sell is being attempted. */
+  exitRequested?: boolean;
 }
 
 export interface LedgerEntry {

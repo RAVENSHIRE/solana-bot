@@ -17,6 +17,7 @@ const EXPLAIN: Record<string, string> = {
   RPC_NOT_CONFIGURED: 'Set RPC_ENDPOINTS in the local .env.', JUPITER_API_KEY_REQUIRED: 'Set JUPITER_API_KEY in the local .env (never in the browser).',
   INSTANCE_LOCK: 'Another dashboard process owns data-desk. Close it first.', SCANNER_OFF: 'Start the scanner first.',
   RESET_TEST_ONLY: 'Reset is only available in TEST.', INVALID_STRATEGY: 'Unknown strategy.',
+  POSITION_NOT_FOUND: 'That position is no longer open in the desk ledger (already sold, or held outside the desk: sell it in your wallet).',
   AUTO_CONFIRM_UNAVAILABLE_FOR_DOMAIN: 'Phantom does not offer Auto-Confirm for this domain (only for domains it has approved). LIVE orders need your approval in Phantom within 15 s.',
 };
 const describe = (code: string | null) => code ? EXPLAIN[code] ?? code.replaceAll('_', ' ') : null;
@@ -33,7 +34,7 @@ export function DeskPanel({ t }: { t: TradingSession }) {
       <strong>{live ? (localKey ? 'LIVE — REAL FUNDS · SIGNED AUTOMATICALLY BY THE LOCAL KEY' : 'LIVE — REAL FUNDS') : 'TEST / PAPER — NO REAL TRANSACTIONS'}</strong>
       <span>{!live ? 'Same scanner, strategy, risk, quote, route and simulation as LIVE. No signature is ever requested.'
         : localKey ? 'Orders are signed by WALLET_PRIVATE_KEY from .env without any approval, also when this tab is closed. STOP LIVE SESSION ends it.'
-        : 'Every order requires your Phantom signature.'}</span>
+        : 'Signer: PHANTOM. Every order, including exits, needs your approval in Phantom within 15 s. For unattended trading add DESK_LIVE_SIGNER=local-key to .env in the repo root, save it, and restart the dashboard.'}</span>
     </div>
     <Controls t={t} d={d} />
     {v?.deskError && <p className="trading-error" role="alert">Desk unavailable: {describe(v.deskError)}</p>}
@@ -53,7 +54,11 @@ export function DeskPanel({ t }: { t: TradingSession }) {
         <PreflightCard p={d.preflights[0] ?? null} live={live} />
       </div>
       <Candidates list={d.candidates} probe={live ? null : mint => void t.desk('probe', { mint })} busy={!!t.busy} />
-      <Positions d={d} />
+      <Positions d={d} busy={!!t.busy || !t.online} exit={p => {
+        const how = !live ? 'This is a TEST position: the sale is paper only.' : localKey ? 'The local key signs the sale immediately (REAL FUNDS).'
+          : 'Phantom will ask you to approve the sale within 15 s (REAL FUNDS).';
+        if (window.confirm(`EXIT NOW: sell the whole ${p.symbol ?? p.mint} position at the current Jupiter quote (exit slippage applies)? ${how}`)) void t.desk('exit', { mint: p.mint });
+      }} />
       <Ledger d={d} />
       <PathAudit d={d} />
     </>}
@@ -276,17 +281,19 @@ function CandidateDetail({ c, probe, busy }: { c: Candidate; probe: ((mint: stri
   </div>;
 }
 
-function Positions({ d }: { d: DeskStatus }) {
+function Positions({ d, busy, exit }: { d: DeskStatus; busy: boolean; exit: (p: DeskStatus['positions'][number]) => void }) {
   const solUsd = d.capital.solUsd;
   return <section className="panel desk-card" aria-label="Open positions">
-    <div className="card-head"><h3>Open positions · {d.mode === 'PAPER' ? 'TEST' : 'LIVE'}</h3></div>
-    <div className="wallet-table"><table><thead><tr><th>Strategy</th><th>Token</th><th>Quantity (raw)</th><th>Entry price</th><th>Current price</th><th>Cost</th><th>Value</th><th>Unrealized</th><th>Route</th><th>Opened</th></tr></thead>
+    <div className="card-head"><h3>Open positions · {d.mode === 'PAPER' ? 'TEST' : 'LIVE'}</h3>
+      <small>Exits run by rule every few seconds while the desk runs. EXIT NOW sells a position immediately through the same guarded path.</small></div>
+    <div className="wallet-table"><table><thead><tr><th>Strategy</th><th>Token</th><th>Quantity (raw)</th><th>Entry price</th><th>Current price</th><th>Cost</th><th>Value</th><th>Unrealized</th><th>Route</th><th>Opened</th><th></th></tr></thead>
       <tbody>{d.positions.map(p => {
         const value = p.lastValueLamports && solUsd ? Number(p.lastValueLamports) / 1e9 * solUsd : null;
         return <tr key={p.id}><td>{p.strategy ?? 'FAIR'}</td><td title={p.mint}>{p.symbol ?? short(p.mint)}</td><td>{p.qtyRaw}</td><td>{p.entryPriceUsd?.toPrecision(6) ?? '--'}</td>
           <td>{p.lastPriceUsd?.toPrecision(6) ?? '--'}</td><td>{fine(p.costUsd)}</td><td>{fine(value)}</td><td>{fine(value === null ? null : value - p.costUsd)}</td>
-          <td>{p.route}</td><td>{ago(p.openedAt)}</td></tr>;
-      })}{!d.positions.length && <tr><td colSpan={10}>No open positions.</td></tr>}</tbody></table></div>
+          <td>{p.route}</td><td>{ago(p.openedAt)}</td>
+          <td><button className="stop-action" disabled={busy || !!p.exitRequested} onClick={() => exit(p)}>{p.exitRequested ? 'SELLING…' : 'EXIT NOW'}</button></td></tr>;
+      })}{!d.positions.length && <tr><td colSpan={11}>No open positions.</td></tr>}</tbody></table></div>
   </section>;
 }
 

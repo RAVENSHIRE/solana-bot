@@ -11,7 +11,7 @@ export interface TradingView {
   mode: DeskMode; desk: DeskStatus | null; deskError: string | null;
 }
 export type DeskAction = 'select-mode' | 'start-test' | 'stop-test' | 'start-live' | 'pause' | 'resume' | 'stop-live' | 'probe' | 'drill-on' | 'drill-off' |
-  'strategy' | 'reset-test';
+  'strategy' | 'reset-test' | 'exit';
 interface Session { id: string; address: string }
 const message = (error: unknown) => error instanceof Error ? error.message : 'Local service unavailable';
 

@@ -660,6 +660,30 @@ test('pausing stops entries only: an open position still takes its exit', async 
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
+test('EXIT NOW sells an open position at once, while the desk runs and after STOP; an unknown token is refused', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-exit-now-'));
+  try {
+    for (const afterStop of [false, true]) {
+      const { shared } = world(YOUNG_PUMP, 'insider'), sub = path.join(dir, String(afterStop));
+      await fs.mkdir(sub);
+      const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir: sub, sender: null, wallet: () => ({ owner, signer: null }) });
+      engine.start(); await engine.pulse();
+      let view = engine.status({ connected: false, address: null });
+      assert.equal(view.positions.length, 1); const mint = view.positions[0]!.mint;
+      if (afterStop) engine.stop();
+      assert.throws(() => engine.requestExit(key(9).toBase58()), /POSITION_NOT_FOUND/);
+      engine.requestExit(mint);
+      if (!afterStop) { assert.equal(engine.status({ connected: false, address: null }).positions[0]!.exitRequested, true); engine.tick(); }
+      await engine.settled();
+      view = engine.status({ connected: false, address: null });
+      assert.equal(view.positions.length, 0, `sold with no exit rule met (${afterStop ? 'desk stopped' : 'desk running'})`);
+      assert.equal(view.ledger[0]!.side, 'SELL');
+      assert.ok(engine.events.list().some(e => /CRASH · exit signal: EXIT NOW \(manual\)/.test(e.message)));
+      assert.throws(() => engine.requestExit(mint), /POSITION_NOT_FOUND/, 'nothing left to sell');
+    }
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
 test('strategy and drill toggles survive a restart; LIVE keeps CRASH off until the owner switches it on', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-settings-')), { shared } = world();
   try {

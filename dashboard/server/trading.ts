@@ -14,7 +14,7 @@ export type DeskFactory = (context: DeskContext) => Promise<DeskHandle>;
 export const deskFactory = (repo: string): DeskFactory => context => createDesk({ envDir: repo, dataDir: path.join(repo, 'data-desk') }, context);
 
 const DESK_ACTIONS = new Set(['select-mode', 'start-test', 'stop-test', 'start-live', 'pause', 'resume', 'stop-live', 'probe', 'drill-on', 'drill-off',
-  'strategy', 'reset-test']);
+  'strategy', 'reset-test', 'exit']);
 
 export class TradingService {
   readonly broker = new SigningBroker({ sessionTtlMs: 900_000 });
@@ -131,6 +131,11 @@ export class TradingService {
       case 'reset-test':
         if (this.mode !== 'PAPER') throw new DeskReject('RESET_TEST_ONLY');
         await paper.resetTest(); return;
+      case 'exit':
+        // EXIT NOW only reduces risk: it sells an open position through the normal guarded SELL path.
+        if (typeof body.mint !== 'string') throw new DeskReject('INVALID_MINT');
+        if (this.mode === 'LIVE' && !this.localKey()) requireSession();
+        handle.engines[this.mode].requestExit(body.mint); return;
     }
   }
 

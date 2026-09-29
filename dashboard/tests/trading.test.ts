@@ -14,6 +14,7 @@ function engine(mode: DeskMode) {
   const e = { mode, scanner: false, execution: false, busy: false, nextScanAt: null as number | null, pulses: 0, resets: 0,
     strategies: { FAIR: { enabled: true }, CRASH: { enabled: mode === 'PAPER' } } as Record<string, { enabled: boolean }>,
     setStrategy(id: string, enabled: boolean) { e.strategies[id]!.enabled = enabled; }, drill: false, setDrill(on: boolean) { e.drill = on; },
+    exits: [] as string[], requestExit(mint: string) { e.exits.push(mint); },
     resetTest: async () => { if (e.scanner) throw new DeskReject('STOP_TEST_FIRST'); e.resets++; return []; },
     start() { e.scanner = true; e.execution = true; }, stop() { e.scanner = false; e.execution = false; },
     pause() { e.execution = false; }, resume() { if (!e.scanner) throw new DeskReject('SCANNER_OFF'); e.execution = true; },
@@ -56,6 +57,8 @@ test('desk API: same-origin capability, TEST without signing, LIVE only with a l
     assert.equal((await (await post('desk', { action: 'strategy', strategy: 'FAIR', enabled: 'yes' }, headers)).json()).message, 'INVALID_STRATEGY');
     assert.equal((await (await post('desk', { action: 'select-mode', mode: 'LIVE' }, headers)).json()).message, 'STOP_CURRENT_MODE_FIRST');
     assert.equal((await (await post('desk', { action: 'start-live' }, headers)).json()).message, 'SESSION_REQUIRED');
+    assert.equal((await post('desk', { action: 'exit', mint: 'MintA' }, headers)).status, 200, 'EXIT NOW in TEST sells on paper');
+    assert.deepEqual(engines.PAPER.exits, ['MintA']);
     const s = await (await post('connect', { address }, headers)).json();
     assert.equal(context().wallet('PAPER')!.signer, null, 'TEST gets the address for simulation only');
     assert.ok(context().wallet('LIVE')!.signer, 'LIVE signs through the Phantom broker');
@@ -98,6 +101,9 @@ test('LIVE with the local key starts without a Phantom session and is not stoppe
     assert.equal(engines.LIVE.scanner, true, 'no browser heartbeat is required with the local key');
     assert.equal((await post('desk', { action: 'pause' }, headers)).status, 200);
     assert.equal((await post('desk', { action: 'resume' }, headers)).status, 200, 'resume needs no Phantom session');
+    assert.equal((await post('desk', { action: 'exit', mint: 'MintA' }, headers)).status, 200, 'EXIT NOW needs no Phantom session');
+    assert.deepEqual(engines.LIVE.exits, ['MintA']);
+    assert.equal((await (await post('desk', { action: 'exit' }, headers)).json()).message, 'INVALID_MINT');
     assert.equal((await post('desk', { action: 'stop-live' }, headers)).status, 200);
     assert.equal(engines.LIVE.scanner, false);
   } finally { await close(); }

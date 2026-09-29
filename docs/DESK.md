@@ -66,6 +66,11 @@ DESK_LIVE_MAX_ENTRIES=10      # new positions per LIVE session; exits are never 
 - The key is read only by `src/desk/local-signer.ts`, only for the LIVE engine. It must match `WALLET_PUBLIC_KEY` when that is set, and it is never logged, displayed or put in the desk environment. TEST never receives a signer.
 - All other rails are unchanged: the 0.003 SOL reserve, the max drag per strategy, unsigned RPC simulation and pre-flight before signing, the signature saved before broadcast, and a halt (never a retry) when an outcome is unknown.
 - CRASH is still off in LIVE until you switch it on (the choice is saved). Remove `DESK_LIVE_SIGNER` to go back to Phantom approvals.
+- **Still asked to approve in Phantom?** Then the desk did not see the setting. The LIVE start line in the telemetry says `every order needs a Phantom signature` instead of `signed automatically by the local key`. Check that the line is in `.env` in the repo root (the same file as `RPC_ENDPOINTS`), that the file is saved, and restart the dashboard.
+
+### EXIT NOW
+
+Every open position has an **EXIT NOW** button in *Open positions*. It sells the whole position through the normal SELL path: the same guard, the strategy's exit slippage, and the same signer (the local key signs at once; with Phantom you approve within 15 s). While the desk runs, the position loop sells on its next tick and retries until the position is gone. With the desk stopped, one attempt runs immediately, and you can press the button again. A token bought outside the desk is not in its ledger; sell it in your wallet.
 
 ### Scale-up ladder ($10 → $100 → $1K → $10K per entry)
 
