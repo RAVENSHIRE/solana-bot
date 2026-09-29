@@ -3,6 +3,7 @@ import type { GeckoPool, GeckoTerminalClient } from '../data/geckoterminal';
 import { PRICE_QUOTE_MINTS, SOL_MINT, USDC_MINT, USDT_MINT } from '../core/types';
 import { errorMessage } from '../utils/errors';
 import { DESK } from './config';
+import type { Graduation } from './migrations';
 import type { CandidateMetrics, Migration, Tier } from './types';
 
 export interface Discovered {
@@ -14,8 +15,12 @@ export interface DiscoveryResult { tokens: Map<string, Discovered>; sources: Rec
 const QUOTE_SYMBOLS: Record<string, string> = { [SOL_MINT]: 'SOL', [USDC_MINT]: 'USDC', [USDT_MINT]: 'USDT' };
 const isQuote = (mint: string): boolean => PRICE_QUOTE_MINTS.has(mint);
 
-/** Two-tier universe: trending / migrated tokens and freshly launched bonding-curve tokens, plus the current watchlist. */
-export async function discover(dex: DexScreenerClient, gecko: GeckoTerminalClient, watchlist: string[]): Promise<DiscoveryResult> {
+/**
+ * Two-tier universe: trending / migrated tokens and freshly launched bonding-curve tokens, every pump.fun graduation
+ * of the last 30 minutes read from the chain, plus the current watchlist.
+ */
+export async function discover(dex: DexScreenerClient, gecko: GeckoTerminalClient, watchlist: string[],
+  graduations?: () => Promise<Graduation[]>): Promise<DiscoveryResult> {
   const tokens = new Map<string, Discovered>();
   const sources: Record<string, string> = {};
   const add = (mint: string, source: string, extra: Partial<Discovered> = {}) => {
@@ -36,6 +41,7 @@ export async function discover(dex: DexScreenerClient, gecko: GeckoTerminalClien
       .forEach(p => add(p.baseTokenMint, 'gecko-trending', { geckoPool: p })))],
     ['GeckoTerminal new pools', gecko.getNewPools(1).then(pools => pools.filter(p => isQuote(p.quoteTokenMint))
       .forEach(p => add(p.baseTokenMint, p.dex === 'pump-fun' ? 'new-launch' : 'new-pool', { geckoPool: p })))],
+    ...(graduations ? [['Pump.fun graduations (on-chain)', graduations().then(rows => rows.forEach(g => add(g.mint, 'graduated')))] as [string, Promise<void>]] : []),
   ];
   const settled = await Promise.allSettled(jobs.map(([, job]) => job));
   settled.forEach((r, i) => { sources[jobs[i]![0]] = r.status === 'fulfilled' ? 'OK' : `UNAVAILABLE: ${errorMessage(r.reason)}`; });

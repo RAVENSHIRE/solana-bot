@@ -24,6 +24,7 @@ import { DeskLedger } from '../src/desk/ledger';
 import { DeskEngine } from '../src/desk/engine';
 import { crashCheck, exitReason, scaleAdvice, strategyStats } from '../src/desk/strategies';
 import { replayExit, sizedReturn } from '../src/desk/replay';
+import { GraduationFeed } from '../src/desk/migrations';
 import type { DeskEvent, LedgerEntry } from '../src/desk/types';
 
 // Synthetic, deterministic fixtures only. No request leaves the process and nothing is signed or submitted.
@@ -164,10 +165,11 @@ test('process lock: a crashed owner is recovered; a live or unreadable owner sti
 
 // ---------------------------------------------------------------- full pipeline against a simulated network
 
-interface Token { mint: string; symbol: string; pool: string; curve: string; patch: Record<string, unknown>; launch: 'fair' | 'insider' }
+interface Token { mint: string; symbol: string; pool: string; curve: string; patch: Record<string, unknown>; launch: 'fair' | 'insider'; listed?: boolean }
 function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' = 'fair', more: Array<Omit<Token, 'curve'>> = []) {
   const tokens: Token[] = [{ mint: MINT, symbol: 'ABC', pool: POOL, curve: SOL_POOL, patch, launch }, ...more.map((t, i) => ({ ...t, curve: key(200 + i).toBase58() }))];
   const w = { priceFactor: 1, extraRent: 0, liquidity: 50_000, native: 45_000_000, sends: 0, signRequests: 0,
+    graduations: [] as Array<{ signature: string; mint: string; ok: boolean; migrate: boolean }>,
     last: null as null | { side: 'BUY' | 'SELL'; mint: string; inAmount: bigint; outAmount: bigint } };
   const holderMint = new Map<string, string>();
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -176,7 +178,7 @@ function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' =
   const fetcher: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     if (url.hostname === 'api.dexscreener.com') {
-      if (url.pathname.startsWith('/token-')) return json(tokens.map(t => ({ chainId: 'solana', tokenAddress: t.mint, description: 'Alpha does things', totalAmount: 100,
+      if (url.pathname.startsWith('/token-')) return json(tokens.filter(t => t.listed !== false).map(t => ({ chainId: 'solana', tokenAddress: t.mint, description: 'Alpha does things', totalAmount: 100,
         links: [{ type: 'twitter', url: 'https://x.com/alphaproj' }, { label: 'Website', url: 'https://alpha.example' }] })));
       const mints = url.pathname.split('/').pop()!.split(',');
       return json([...(mints.includes(SOL_MINT) ? [solPair] : []), ...tokens.filter(t => mints.includes(t.mint)).map(t => pairRaw({ pairCreatedAt: NOW - 2 * 86_400_000,
@@ -237,6 +239,12 @@ function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' =
     getRecentPrioritizationFees: async () => [{ slot: 1, prioritizationFee: 1000 }],
     getFeeForMessage: async () => ({ value: 5_300 }),
     getMultipleAccountsInfo: async () => [],
+    getSignaturesForAddress: async () => w.graduations.map(g => ({ signature: g.signature, blockTime: Math.floor(Date.now() / 1000) - 30, err: g.ok ? null : { InstructionError: [0, 'x'] } })),
+    getParsedTransaction: async (sig: string) => {
+      const g = w.graduations.find(x => x.signature === sig)!, lp = key(222).toBase58();
+      return { meta: { err: null, logMessages: g.migrate ? ['Program log: Instruction: MigrateV2', 'Program log: Instruction: CreatePool'] : ['Program log: Instruction: Buy'],
+        preTokenBalances: [{ mint: g.mint }, { mint: SOL_MINT }], postTokenBalances: [{ mint: g.mint }, { mint: SOL_MINT }, { mint: lp }] } };
+    },
     simulateTransaction: async (_tx: unknown, config?: { accounts?: unknown }) => {
       if (!config?.accounts) return { value: { err: null, logs: [] } };
       // The wallet never holds TEST tokens, so a paper exit cannot simulate — exactly like the real chain.
@@ -591,4 +599,22 @@ test('replay: pessimistic minute-candle exits and constant-product size impact',
   // $2 on a $12.8K reserve barely moves the price; $10K into the same pool loses even on a +110% move.
   assert.ok(Math.abs(sizedReturn(2, 1, 2.1, 12_800, 1) - 1.1) < 0.001);
   assert.ok(sizedReturn(10_000, 1, 2.1, 12_800, 1) < 0);
+});
+
+test('every pump.fun graduation is discovered from the chain, even when no listing or new-pool page shows it', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-grad-')), GRAD = tokenKey(120);
+  const { w, shared } = world({}, 'fair', [{ mint: GRAD, symbol: 'GRAD', pool: tokenKey(121), patch: YOUNG_PUMP, launch: 'insider', listed: false }]);
+  w.graduations = [{ signature: 'sig-grad', mint: GRAD, ok: true, migrate: true }, { signature: 'sig-failed', mint: tokenKey(122), ok: false, migrate: true },
+    { signature: 'sig-swap', mint: tokenKey(123), ok: true, migrate: false }];
+  try {
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    engine.start(); await engine.pulse();
+    const view = engine.status({ connected: false, address: null });
+    assert.equal(view.sources['Pump.fun graduations (on-chain)'], 'OK');
+    assert.deepEqual(view.positions.map(p => [p.strategy, p.symbol]), [['CRASH', 'GRAD']], 'CRASH entered the graduated token in the first scan');
+    const c = view.candidates.find(x => x.mint === GRAD)!;
+    assert.ok(c.sources.includes('graduated'));
+    const feed = await new GraduationFeed(shared.rpc as never).poll();
+    assert.deepEqual(feed.map(g => g.mint), [GRAD], 'failed txs, non-migrations and the new LP mint are ignored');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });

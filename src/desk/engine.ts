@@ -23,6 +23,7 @@ import { DeskLedger, type LedgerState } from './ledger';
 import { discover, pairMetrics, selectPair, tierFor, type Discovered } from './discovery';
 import { creatorHolding, gatherOnchain, type OnchainEvidence } from './onchain';
 import { launchCheck, type LaunchCheck } from './launch';
+import { GraduationFeed } from './migrations';
 import { assessAuthenticity, checkWebsite, parseXLink, type WebsiteCheck, type XClient } from './social';
 import { analyze, type SocialEvidence, type WatchState } from './analysis';
 import { DeskGuard, DeskReject, PaperExecution, paperSigner } from './guard';
@@ -69,6 +70,7 @@ export class DeskEngine {
   /** TEST: sleeves that ran dry and were re-funded; their trades still count in the strategy stats. */
   private cycles = new Map<StrategyId, LedgerState[]>();
   private currentScanAt = 0;
+  private readonly graduations: GraduationFeed;
   private lastCompletedScanAt = 0;
   private notes = new Map<string, string>();
   private creatorChecks = new Map<string, number>();
@@ -102,6 +104,7 @@ export class DeskEngine {
 
   private constructor(private readonly d: DeskDeps) {
     this.events = new EventLog(d.mode, path.join(d.dir, `events-${d.mode}.json`));
+    this.graduations = new GraduationFeed(d.rpc);
     const base = d.strategies ?? strategyProfiles({}, d.capital, d.cfg.rs);
     this.strategies = { FAIR: { ...base.FAIR, exits: { ...base.FAIR.exits } }, CRASH: { ...base.CRASH, exits: { ...base.CRASH.exits } } };
     // Real money: CRASH is switched on explicitly in each LIVE session, never by default.
@@ -304,7 +307,8 @@ export class DeskEngine {
     if (stopped()) return;
     for (const [k, at] of this.drillSkips) if (Date.now() - at > 15 * 60_000) this.drillSkips.delete(k);
     for (const [k, v] of this.entrySkips) if (Date.now() - v.at > DESK.entrySkipMs) this.entrySkips.delete(k);
-    const found = await discover(d.dex, d.gecko, this.watchlist());
+    const found = await requestScope.run({ category: 'discovery', signal: AbortSignal.timeout(DESK.discoveryBudgetMs) },
+      () => discover(d.dex, d.gecko, this.watchlist(), () => this.graduations.poll()));
     this.sources = found.sources;
     const staged = await this.stage(found.tokens);
     // CRASH is time-critical: safety evidence for pumping young pools first, entries right after, and only then
@@ -317,8 +321,7 @@ export class DeskEngine {
       if (ledger && signals.length) await this.maybeEnter('CRASH', ledger, signals, stopped);
     }
     if (stopped()) return;
-    await this.deepAnalyses(due.filter(s => !s.crashHint));
-    await this.launchChecks(staged.list, started);
+    await this.slowPath(staged.list, due.filter(s => !s.crashHint), started);
     const counts = this.finalize(staged.list, staged.filtered, started);
     this.lastCompletedScanAt = started;
     if (stopped()) return;
@@ -355,7 +358,7 @@ export class DeskEngine {
   private async stage(tokens: Map<string, Discovered>): Promise<{ list: Staged[]; filtered: number }> {
     // Held tokens and the watchlist first: they are appended last by discovery and must never be cut by the cap.
     const d = this.d, held = new Set(this.books().flatMap(b => b.ledger.state.positions.map(p => p.mint))), watched = new Set(this.watchlist());
-    const order = (m: string) => held.has(m) ? 0 : watched.has(m) ? 1 : 2;
+    const order = (m: string) => held.has(m) ? 0 : tokens.get(m)!.sources.includes('graduated') ? 1 : watched.has(m) ? 2 : 3;
     const mints = [...tokens.keys()].sort((a, b) => order(a) - order(b)).slice(0, DESK.maxStagedPerScan);
     const pairs = mints.length ? await d.dex.getPairsForTokens(mints) : [];
     const list: Staged[] = [];
@@ -387,16 +390,33 @@ export class DeskEngine {
     await Promise.all(list.map(s => this.deepAnalysis(s.found, s.pair, this.tradeable(s) && !s.crashHint).catch(error =>
       this.event('FAILED', `Evidence gathering failed: ${errorMessage(error)}`, { mint: s.found.mint, symbol: s.pair.baseToken.symbol ?? null }))));
   }
+  /**
+   * GeckoTerminal-bound evidence (FAIR's trade flow and launch history) within a time budget: when it runs out, queued
+   * requests are cancelled instead of piling up and delaying the next scan's discovery.
+   */
+  private async slowPath(list: Staged[], rest: Staged[], now: number): Promise<void> {
+    const budget = new AbortController(), timer = setTimeout(() => budget.abort(), DESK.slowPathBudgetMs);
+    try {
+      await requestScope.run({ category: 'analysis', signal: budget.signal }, async () => {
+        await this.deepAnalyses(rest);
+        if (!budget.signal.aborted) await this.launchChecks(list, now, budget.signal);
+      });
+    } finally { clearTimeout(timer); }
+  }
+
   /** Launch fairness for trending tokens (at most two per scan: GeckoTerminal is rate-limited); needs supply from the deep evidence. */
-  private async launchChecks(list: Staged[], now: number): Promise<void> {
+  private async launchChecks(list: Staged[], now: number, budget?: AbortSignal): Promise<void> {
     const d = this.d;
     const launchDue = list.filter(s => s.tier === 'TRENDING' && this.deep.get(s.found.mint)?.onchain.holders &&
       (!this.launches.has(s.found.mint) || (this.launches.get(s.found.mint)!.value === null && now - this.launches.get(s.found.mint)!.at > 600_000)))
       .sort((a, b) => (b.metrics.volume5mUsd ?? 0) - (a.metrics.volume5mUsd ?? 0)).slice(0, 2);
     for (const s of launchDue) {
+      if (budget?.aborted) return;
       const h = this.deep.get(s.found.mint)!.onchain.holders!;
       try { this.launches.set(s.found.mint, { at: now, value: await launchCheck(d.gecko, s.found.mint, exactNumber(h.supplyRaw) / 10 ** h.decimals) }); }
       catch (error) {
+        // Out of time budget: not a failure of the token's history; it is simply checked in a later scan.
+        if (budget?.aborted) return;
         this.launches.set(s.found.mint, { at: now, value: null });
         this.event('WATCHLIST', `Launch history unavailable: ${errorMessage(error).slice(0, 100)}`, { mint: s.found.mint, symbol: s.pair.baseToken.symbol ?? null });
       }

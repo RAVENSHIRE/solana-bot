@@ -21,8 +21,12 @@ export const DESK = Object.freeze({
   reentryCooldownMs: 30 * 60_000,
   /** Orders tried per strategy and scan; a candidate blocked by the guard is skipped for entrySkipMs. */
   maxEntryAttemptsPerScan: 4,
-  /** Tokens assessed per scan: held positions and the watchlist first, then fresh discoveries. */
+  /** Tokens assessed per scan: held positions, recent graduations and the watchlist first, then fresh discoveries. */
   maxStagedPerScan: 120,
+  /** Discovery requests (DexScreener, GeckoTerminal, chain) that take longer are cancelled for this scan. */
+  discoveryBudgetMs: 12_000,
+  /** GeckoTerminal-bound evidence (trade flow, launch history) per scan; unfinished requests are cancelled, never queued up. */
+  slowPathBudgetMs: 20_000,
   entrySkipMs: 5 * 60_000,
   /** Deep (RPC + social + trade-flow) analyses per scan; the rest keep their last evidence. */
   maxDeepAnalysesPerScan: 4,
