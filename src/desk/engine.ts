@@ -57,6 +57,8 @@ export class DeskEngine {
   execution = false;
   /** TEST only: allow FAIR drill entries when nothing qualifies. */
   drill = false;
+  /** Optional cap on new entries for this session (e.g. a first real-funds test); null = unlimited. Exits are never capped. */
+  entryAllowance: number | null = null;
   /** Both strategies run in parallel, each with its own ledger (and TEST sleeve). */
   readonly strategies: Record<StrategyId, StrategyProfile>;
   private drillSkips = new Map<string, number>();
@@ -84,6 +86,8 @@ export class DeskEngine {
   private launches = new Map<string, { at: number; value: LaunchCheck | null }>();
   private lastState = new Map<string, string>();
   private preflights: Preflight[] = [];
+  /** CRASH signal tape: every scan's market snapshot of pumping young pools, appended to tape-<MODE>.jsonl for replay. */
+  private tape: Array<Record<string, unknown>> = [];
   private sources: Record<string, string> = {};
   private work: Promise<void> | null = null;
   private generation = 0;
@@ -263,6 +267,12 @@ export class DeskEngine {
   }
   async persist(): Promise<void> {
     await this.events.flush();
+    if (this.tape.length) {
+      const rows = this.tape.splice(0), file = path.join(this.d.dir, `tape-${this.d.mode}.jsonl`);
+      const size = await fs.stat(file).then(st => st.size, () => 0);
+      if (size > 20 * 1024 * 1024) await fs.rename(file, `${file}.1`).catch(() => undefined);
+      await fs.appendFile(file, rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+    }
     for (const b of this.books()) await b.ledger.save();
   }
 
@@ -389,6 +399,13 @@ export class DeskEngine {
         lastPriceUsd: s.metrics.priceUsd, momentumStreak: candidate.momentumStreak });
       this.candidates.set(mint, candidate);
       if (candidate.crash?.signal) counts.crash++;
+      if (s.crashHint) {
+        const m = candidate.metrics;
+        this.tape.push({ at: now, mint, symbol: candidate.symbol, pool: candidate.pair.address, dex: candidate.pair.dex, priceUsd: m.priceUsd,
+          marketCapUsd: m.marketCapUsd, liquidityUsd: m.liquidityUsd, poolAgeMin: m.poolAgeMin, volume5mUsd: m.volume5mUsd, volume1hUsd: m.volume1hUsd,
+          buys5m: m.buys5m, sells5m: m.sells5m, priceChange5mPct: m.priceChange5mPct, priceChange1hPct: m.priceChange1hPct, top10WalletPct: m.top10WalletPct,
+          largestWalletPct: m.largestWalletPct, signal: candidate.crash?.signal ?? false, summary: candidate.crash?.summary ?? null, held: this.heldBy(mint) });
+      }
       if (candidate.status === 'QUALIFIED') counts.qualified++; else if (candidate.status === 'WAITING') counts.waiting++;
       else if (candidate.status === 'WATCHLIST') counts.watch++; else counts.filtered++;
       this.transition(mint, candidate.symbol, candidate.status, `${candidate.tier === 'ULTRA_EARLY' ? `[${candidate.classification}] ` : ''}${candidate.reasons.join('; ')}`);
@@ -529,7 +546,7 @@ export class DeskEngine {
    */
   private async maybeEnter(id: StrategyId, ledger: DeskLedger, list: Candidate[], stopped: () => boolean): Promise<void> {
     const p = this.strategies[id], s = ledger.state;
-    if (!p.enabled || !this.execution || stopped()) return;
+    if (!p.enabled || !this.execution || stopped() || this.entryAllowance === 0) return;
     if (s.halted || s.pending) { this.message = s.halted ?? 'TRANSACTION_RECONCILIATION_REQUIRED'; return; }
     const now = Date.now();
     const recentExit = (mint: string) => s.entries.some(e => e.mint === mint && e.side === 'SELL' && now - e.at < DESK.reentryCooldownMs);
@@ -544,7 +561,7 @@ export class DeskEngine {
     if (slots <= 0) { this.note(id, 'WAITING', `${id} · ${pool.length} candidate(s), but ${s.positions.length}/${p.maxOpenPositions} positions are open`); return; }
     let attempts = 0;
     for (const c of pool) {
-      if (slots <= 0 || attempts >= DESK.maxEntryAttemptsPerScan || stopped() || !this.execution || s.halted) break;
+      if (slots <= 0 || attempts >= DESK.maxEntryAttemptsPerScan || stopped() || !this.execution || s.halted || this.entryAllowance === 0) break;
       const short = this.sleeveShort(ledger, p);
       if (short) { this.note(id, 'WAITING', short); break; }
       if (c.onchain.decimals === null) { this.event('WAITING', `${id} · token decimals unknown; entry deferred`, { mint: c.mint, symbol: c.symbol }); continue; }
@@ -554,7 +571,11 @@ export class DeskEngine {
         { mint: c.mint, symbol: c.symbol, detail: { strategy: id } });
       const code = await this.execute('BUY', { strategy: id, mint: c.mint, symbol: c.symbol, decimals: c.onchain.decimals, pairAddress: c.pair.address, heldRaw: 0n,
         token2022: c.onchain.token2022 === true, entry: this.entryContext(c) }, ledger, stopped);
-      if (ledger.position(c.mint)) { slots--; continue; }
+      if (ledger.position(c.mint)) {
+        slots--;
+        if (this.entryAllowance !== null) { this.entryAllowance--; if (this.entryAllowance === 0) this.event('SYSTEM', 'Entry allowance used up: no new entries this session; exits continue'); }
+        continue;
+      }
       if (code && FUNDS_CODES.has(code)) break;
       if (code !== 'STOP_REQUESTED') this.entrySkips.set(`${id}:${c.mint}`, Date.now());
     }
@@ -567,6 +588,8 @@ export class DeskEngine {
    */
   private async drillEnter(ledger: DeskLedger, stopped: () => boolean, recentExit: (mint: string) => boolean): Promise<void> {
     if (ledger.state.positions.length >= this.strategies.FAIR.maxOpenPositions) return;
+    const short = this.sleeveShort(ledger, this.strategies.FAIR);
+    if (short) { this.note('FAIR', 'WAITING', `DRILL paused: ${short}`); return; }
     const safe = (c: Candidate) => ['mintAuthority', 'freezeAuthority', 'contract', 'liquidity', 'fairLaunch'].every(k => c.gates.find(g => g.key === k)?.status === 'PASS');
     const pool = [...this.candidates.values()].filter(c => c.tier === 'TRENDING' && c.onchain.decimals !== null && safe(c) &&
       !this.heldBy(c.mint) && !recentExit(c.mint) && !this.drillSkips.has(c.mint)).sort((a, b) => composite(b) - composite(a));
@@ -612,7 +635,7 @@ export class DeskEngine {
     }
     const amountRaw = side === 'BUY' ? BigInt(Math.floor(profile.entryUsd / solUsd * 1e9)) : t.heldRaw;
     const guard = new DeskGuard({ mode: d.mode, rpc: d.rpc, jupiter: d.jupiter, owner: wallet.owner, mint: t.mint, symbol: t.symbol, decimals: t.decimals,
-      tokenProgram, solUsd, slippageBps: profile.slippageBps, maxDragBps: profile.maxDragBps, reserveLamports: DESK.reserveLamports,
+      tokenProgram, solUsd, slippageBps: profile.slippageBps, exitSlippageBps: profile.exitSlippageBps, maxDragBps: profile.maxDragBps, reserveLamports: DESK.reserveLamports,
       configuredPriorityCap: BigInt(d.cfg.jupiter.maxPriorityFeeLamports), baseEntryUsd: profile.entryUsd,
       paperCashLamports: d.mode === 'PAPER' ? BigInt(ledger.state.paperCashLamports ?? '0') : null, heldRaw: t.heldRaw, stopped,
       enforceDrag: !(t.drill && d.mode === 'PAPER'),
@@ -640,7 +663,7 @@ export class DeskEngine {
     if (d.mode === 'LIVE') { ledger.state.pending = { side, mint: t.mint, at: Date.now(), signature: null }; await ledger.save(); }
     const record = (p: Preflight | null) => { if (p) { this.preflights.push(p); this.preflights = this.preflights.slice(-20); } };
     try {
-      const fill = await requestScope.run({ category: 'execution' }, () => executor.swap({ side, mint: t.mint, amountRaw, slippageBps: profile.slippageBps }));
+      const fill = await requestScope.run({ category: 'execution' }, () => executor.swap({ side, mint: t.mint, amountRaw, slippageBps: side === 'BUY' ? profile.slippageBps : profile.exitSlippageBps }));
       const order = guard.lastOrder!;
       const row = ledger.book({ side, mint: t.mint, symbol: t.symbol, decimals: t.decimals, pairAddress: t.pairAddress, inAmountRaw: fill.inAmountRaw,
         outAmountRaw: fill.outAmountRaw, solDeltaLamports: fill.solDeltaLamports, feeLamports: fill.feeLamports, rentLamports: fill.rentLamports,

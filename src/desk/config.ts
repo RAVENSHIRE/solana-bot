@@ -68,6 +68,8 @@ export const CRASH_DEFAULTS = Object.freeze({
   capitalUsd: 10,
   entryUsd: 2.0,
   slippageBps: 250,
+  /** Exits: a sell that fails while a pool dumps costs more than a wider fill. */
+  exitSlippageBps: 1_000,
   maxDragBps: 500,
   maxOpenPositions: 3,
   positionCheckMs: 2_000,
@@ -106,7 +108,7 @@ export interface ExitRules {
 export interface StrategyProfile {
   id: StrategyId; label: string; summary: string; enabled: boolean;
   /** TEST sleeve; LIVE always spends from the connected wallet. */
-  capitalUsd: number; entryUsd: number; slippageBps: number; maxDragBps: bigint;
+  capitalUsd: number; entryUsd: number; slippageBps: number; exitSlippageBps: number; maxDragBps: bigint;
   maxOpenPositions: number; positionCheckMs: number; exits: ExitRules;
 }
 export const STRATEGY_IDS: readonly StrategyId[] = ['FAIR', 'CRASH'];
@@ -133,6 +135,7 @@ export function strategyProfiles(env: NodeJS.ProcessEnv, capital: DeskCapital,
     CRASH_ENABLED: z.enum(['true', 'false']).default(c.enabled ? 'true' : 'false'),
     CRASH_CAPITAL_USD: money(c.capitalUsd), CRASH_ENTRY_USD: money(c.entryUsd),
     CRASH_SLIPPAGE_BPS: z.coerce.number().int().min(1).max(2_000).default(c.slippageBps),
+    CRASH_EXIT_SLIPPAGE_BPS: z.coerce.number().int().min(1).max(5_000).default(c.exitSlippageBps),
     CRASH_MAX_DRAG_BPS: z.coerce.number().int().min(50).max(2_500).default(c.maxDragBps),
     CRASH_MAX_POSITIONS: z.coerce.number().int().min(1).max(10).default(c.maxOpenPositions),
     CRASH_TAKE_PROFIT_PCT: pctSetting(c.takeProfitPct), CRASH_LOCK_PEAK_PCT: pctSetting(c.lockPeakPct), CRASH_GIVEBACK_PTS: pctSetting(c.givebackPts),
@@ -140,14 +143,16 @@ export function strategyProfiles(env: NodeJS.ProcessEnv, capital: DeskCapital,
   }).parse(env);
   if (e.CRASH_SLIPPAGE_BPS >= e.CRASH_MAX_DRAG_BPS) throw new Error('CRASH_SLIPPAGE_BPS must be below CRASH_MAX_DRAG_BPS');
   if (e.CRASH_ENTRY_USD > e.CRASH_CAPITAL_USD) throw new Error('CRASH_ENTRY_USD exceeds CRASH_CAPITAL_USD');
+  if (e.CRASH_EXIT_SLIPPAGE_BPS < e.CRASH_SLIPPAGE_BPS) throw new Error('CRASH_EXIT_SLIPPAGE_BPS must be at least CRASH_SLIPPAGE_BPS');
   return {
     FAIR: { id: 'FAIR', label: 'FAIR LAUNCH', summary: 'Fair-launch trending tokens: every hard gate plus momentum in two consecutive scans', enabled: true,
-      capitalUsd: capital.plannedStartingCapitalUsd, entryUsd: capital.baseEntryUsd, slippageBps: capital.slippageBps, maxDragBps: DESK.maxDragBps,
+      capitalUsd: capital.plannedStartingCapitalUsd, entryUsd: capital.baseEntryUsd, slippageBps: capital.slippageBps, exitSlippageBps: capital.slippageBps, maxDragBps: DESK.maxDragBps,
       maxOpenPositions: DESK.maxOpenPositions, positionCheckMs: DESK.exits.positionCheckMs,
       exits: { takeProfitPct: rs.takeProfitPct, stopLossPct: rs.stopLossPct, maxHoldMin: rs.maxHoldMin,
         trailing: rs.trailingStopPct > 0 ? { activationPct: rs.trailingActivationPct, stopPct: rs.trailingStopPct } : null, giveback: null } },
     CRASH: { id: 'CRASH', label: 'CRASH', summary: 'Young pools pumping now: entered in one scan, exited within minutes — launch fairness not required, safety gates are',
       enabled: e.CRASH_ENABLED === 'true', capitalUsd: e.CRASH_CAPITAL_USD, entryUsd: e.CRASH_ENTRY_USD, slippageBps: e.CRASH_SLIPPAGE_BPS,
+      exitSlippageBps: e.CRASH_EXIT_SLIPPAGE_BPS,
       maxDragBps: BigInt(e.CRASH_MAX_DRAG_BPS), maxOpenPositions: e.CRASH_MAX_POSITIONS, positionCheckMs: c.positionCheckMs,
       exits: { takeProfitPct: e.CRASH_TAKE_PROFIT_PCT, stopLossPct: e.CRASH_STOP_LOSS_PCT, maxHoldMin: e.CRASH_MAX_HOLD_MIN, trailing: null,
         giveback: { lockPeakPct: e.CRASH_LOCK_PEAK_PCT, points: e.CRASH_GIVEBACK_PTS } } },

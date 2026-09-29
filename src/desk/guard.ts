@@ -9,7 +9,6 @@ import type { TransactionSigner } from '../execution/transaction-signer';
 import { listTokenAccounts } from '../execution/token-accounts';
 import type { ConnectionManager } from '../rpc/connection-manager';
 import { exactNumber, parse, safeInteger } from '../data/core/data-validator';
-import { recentPriorityFee } from '../micro/market';
 import type { DeskMode, Preflight, SignatureState, Stage } from './types';
 
 /** Stops a TEST order exactly where a LIVE order would ask Phantom for a signature. */
@@ -34,6 +33,8 @@ export interface DeskGuardDeps {
   mode: DeskMode; rpc: ConnectionManager; jupiter: JupiterClient; owner: PublicKey; mint: string; symbol: string | null;
   decimals: number; tokenProgram: PublicKey; solUsd: number;
   slippageBps: number; maxDragBps: bigint; reserveLamports: bigint; configuredPriorityCap: bigint; baseEntryUsd: number;
+  /** Slippage tolerance allowed for exits (≥ slippageBps): a sell that fails in a dump is worse than a wider fill. */
+  exitSlippageBps?: number;
   /** TEST: remaining paper capital. LIVE: null (the wallet itself is the budget). */
   paperCashLamports: bigint | null;
   /** Position size the ledger holds for SELL orders. */
@@ -109,7 +110,8 @@ export class DeskGuard implements ExecutionGuard {
     const d = this.d, buy = req.side === 'BUY';
     if (req.mint !== d.mint || q.inputMint !== (buy ? SOL_MINT : d.mint) || q.outputMint !== (buy ? d.mint : SOL_MINT) || BigInt(q.inAmount) !== req.amountRaw)
       throw new DeskReject('PAIR_OR_AMOUNT_MISMATCH');
-    if (!Number.isInteger(req.slippageBps) || req.slippageBps > d.slippageBps || q.slippageBps !== req.slippageBps) throw new DeskReject('SLIPPAGE_ESCALATION_BLOCKED');
+    const allowed = buy ? d.slippageBps : Math.max(d.slippageBps, d.exitSlippageBps ?? d.slippageBps);
+    if (!Number.isInteger(req.slippageBps) || req.slippageBps > allowed || q.slippageBps !== req.slippageBps) throw new DeskReject('SLIPPAGE_ESCALATION_BLOCKED');
     d.jupiter.assertFresh(q);
     this.assertActive();
     const route = JupiterClient.routeLabel(q), impactPct = JupiterClient.priceImpactPct(q);
@@ -136,7 +138,10 @@ export class DeskGuard implements ExecutionGuard {
     if (buy && remainder < 0n && !capped) d.event('PREFLIGHT', `DRILL: drag above ${Number(d.maxDragBps) / 100}% accepted in TEST (slippage ${sol(slip)} + impact ${sol(impact)} + router ${sol(routerFee)})`);
     if (capped && remainder < 0n) throw new DeskReject('FEE_CAP', `slippage ${sol(slip)} + impact ${sol(impact)} + router ${sol(routerFee)} + base fee exceed ${Number(d.maxDragBps) / 100}% (${sol(budget)})`);
     const maxPriority = !capped || remainder >= d.configuredPriorityCap ? d.configuredPriorityCap : remainder;
-    const priority = await recentPriorityFee(d.rpc, maxPriority);
+    if (maxPriority < 0n) throw new DeskReject('NO_PRIORITY_FEE_BUDGET');
+    // The budget is the cap Jupiter's own priority estimate may use. (The RPC's recent per-slot minimums are
+    // mostly zero, which built transactions without any priority fee.) The actual fee is measured before signing.
+    const priority = maxPriority;
     const fee = BASE_FEE_LAMPORTS + priority;
     this.checkFunds(buy ? inAmt : 0n, fee, s, buy);
     this.authorized.set(req, { snapshot: s, priority, fee, notional, slip, impact, routerFee, dragLamports: slip + impact + routerFee + fee });

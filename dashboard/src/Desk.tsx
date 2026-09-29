@@ -187,7 +187,7 @@ function PreflightCard({ p, live }: { p: Preflight | null; live: boolean }) {
   const rows: Array<[string, string]> = [
     ['Token / CA', `${p.symbol ?? ''} ${p.mint}`], ['DEX / route', `${p.router} · ${p.route}`], ['Entry size', p.side === 'BUY' ? `${p.amountIn} (${money(p.entrySizeUsd)})` : p.amountIn],
     ['Expected output', p.expectedOut], ['Minimum output', p.minimumOut], ['Price impact', `${p.priceImpactPct.toFixed(4)}%`], ['Slippage', `${p.slippageBps} bps`],
-    ['Priority fee', sol(p.priorityFeeLamports)], ['Network fee', sol(p.networkFeeLamports)], ['Account rent (refundable)', sol(p.accountRentLamports)],
+    ['Priority fee cap', sol(p.priorityFeeLamports)], ['Network fee (incl. priority)', sol(p.networkFeeLamports)], ['Account rent (refundable)', sol(p.accountRentLamports)],
     ['Total drag', p.dragPct === null ? '--' : `${p.dragPct.toFixed(2)}%`], ['Simulation', `${p.simulation.status} — ${p.simulation.detail}`],
     ['Balance check', `${p.balanceCheck.ok ? 'PASSED' : 'FAILED'} — ${p.balanceCheck.detail}`], ['Risk status', p.riskStatus],
     ['Signature', p.signature === 'NOT_REQUESTED_TEST' ? 'NOT REQUESTED (TEST)' : p.signature.replaceAll('_', ' ')],

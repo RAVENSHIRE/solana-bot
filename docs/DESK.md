@@ -31,7 +31,7 @@ Native reserve (0.003 SOL) and max drag (1.5 %) are the project's existing micro
 | Exits | `RS_*` rules: stop loss, take profit, trailing stop, max hold | Take profit +100 % (= $2 unrealized on a $2 entry) · profit lock: once +40 % was reached, exit 15 points below the peak · stop loss −15 % · time stop 4 min |
 | Checked | every 5 s | every 2 s |
 | Entry size / TEST sleeve | `DESK_BASE_ENTRY_USD` / `DESK_PLANNED_CAPITAL_USD` ($2 / $5.45) | `CRASH_ENTRY_USD` / `CRASH_CAPITAL_USD` ($2 / $10) |
-| Slippage / max drag | `DESK_SLIPPAGE_BPS` (1 %) / 1.5 % | `CRASH_SLIPPAGE_BPS` (2.5 %) / `CRASH_MAX_DRAG_BPS` (5 %) |
+| Slippage / max drag | `DESK_SLIPPAGE_BPS` (1 %) / 1.5 % | entries `CRASH_SLIPPAGE_BPS` (2.5 %), exits `CRASH_EXIT_SLIPPAGE_BPS` (10 %) / `CRASH_MAX_DRAG_BPS` (5 %) |
 | Open positions | 2 | `CRASH_MAX_POSITIONS` (3) |
 
 - Each strategy has its own ledger and, in TEST, its own sleeve; LIVE strategies share the Phantom wallet and its reserve check.
@@ -44,6 +44,17 @@ Native reserve (0.003 SOL) and max drag (1.5 %) are the project's existing micro
 ### Scale-up ladder ($10 → $100 → $1K → $10K per entry)
 
 Advisory only — the desk never changes a size by itself. A strategy shows READY for the next rung after ≥ 20 closed trades with positive net PnL, profit factor ≥ 1.3 and a max drawdown within half its sleeve. Paper fills ignore latency and MEV, so confirm with LIVE fills before sizing up real money. The next size also needs pool liquidity of about 50× the entry (≈ 2 % impact); most sub-$1M meme pools cannot absorb $1K+ orders.
+
+### Signal tape and replay
+
+Every scan appends the market snapshot of each pumping young pool (price, market cap, liquidity, pool age, 5m volume, buys/sells, concentration, CRASH signal) to `data-desk/tape-<MODE>.jsonl`.
+
+```
+npx tsx src/scripts/desk-replay.ts --ledger data-desk/ledger-PAPER-CRASH.json [--sizes 2,10,100,1000,10000] [--horizon-min 30]
+npx tsx src/scripts/desk-replay.ts --mint <MINT> --entry-at <ISO|ms> --entry-price <USD>
+```
+
+The replay recomputes each trade from GeckoTerminal minute candles under several exit rules (current CRASH rules, no take profit, a 50 % runner, hold) and entry sizes, with a constant-product impact estimate from the pool's depth. Downloaded data is cached (`data-desk/replay-cache`), so reruns give the same numbers. Minute candles hide the order of moves inside a minute; the replay assumes losses first, so it can understate what the 2-second exit loop achieves.
 
 ### Reset TEST
 
@@ -83,6 +94,7 @@ Runs TEST on live data (both strategies; `--no-crash` / `--no-fair` to switch on
 ## Known limits
 
 - With $2 entries, the 1.5 % max drag (including 1 % slippage tolerance) blocks many meme-coin routes before a transaction is built; the reason is shown on the event. CRASH allows 5 % for exactly this reason.
+- Priority fee: each order authorizes a priority-fee budget (`MAX_PRIORITY_FEE_LAMPORTS`, within the drag cap for entries) and Jupiter's `PRIORITY_LEVEL` estimate picks the actual fee inside it; the fee actually charged is measured before signing.
 - `JUPITER_MAX_RPS` (default 1) limits how often positions can be valued; with several open positions each check takes that many seconds.
 - Empty token accounts are not closed automatically (closing needs its own Phantom signature), so their rent stays locked.
 - Token-account rent (≈ 0.0015–0.002 SOL per new token) stays locked after an exit until the account is closed; the desk reports it as reserved, not as a fee.

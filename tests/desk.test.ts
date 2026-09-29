@@ -23,6 +23,7 @@ import { analyze } from '../src/desk/analysis';
 import { DeskLedger } from '../src/desk/ledger';
 import { DeskEngine } from '../src/desk/engine';
 import { crashCheck, exitReason, scaleAdvice, strategyStats } from '../src/desk/strategies';
+import { replayExit, sizedReturn } from '../src/desk/replay';
 import type { DeskEvent, LedgerEntry } from '../src/desk/types';
 
 // Synthetic, deterministic fixtures only. No request leaves the process and nothing is signed or submitted.
@@ -472,6 +473,10 @@ test('CRASH enters a young pump in its first scan (no fair launch needed), exits
     view = engine.status({ connected: true, address: owner.toBase58() });
     assert.equal(view.positions.length, 0, 'the fast loop took the profit between scans');
     assert.ok(engine.events.list().some(e => e.stage === 'EXIT' && /^CRASH · exit signal: TAKE_PROFIT 10[45]\.\d+% ≥ 100%/.test(e.message)));
+    assert.equal(engine.events.list().filter(e => e.stage === 'QUOTE').at(-1)!.detail!.slippageBps, 1000, 'CRASH exits use the wider exit slippage');
+    await engine.persist();
+    const tape = (await fs.readFile(path.join(dir, 'tape-PAPER.jsonl'), 'utf8')).trim().split('\n').map(l => JSON.parse(l));
+    assert.ok(tape.some(r => r.mint === MINT && r.signal === true && r.poolAgeMin > 9 && r.liquidityUsd === 50_000), 'every CRASH signal is on the replay tape');
     const stats = view.strategies.find(s => s.id === 'CRASH')!.stats;
     assert.equal(stats.trades, 1); assert.equal(stats.wins, 1); assert.ok(stats.netPnlUsd > 2);
     await fs.access(path.join(dir, 'ledger-PAPER-CRASH.json'));
@@ -525,4 +530,33 @@ test('several coins at once: FAIR fills both slots in one scan while CRASH trade
     assert.ok(engine.events.list().some(e => /^FAIR · 1 candidate\(s\), but 2\/2 positions are open$/.test(e.message)));
     assert.equal(engine.events.list().filter(e => /slots|positions are open/.test(e.message)).length, 1, 'the full-slots note is logged once, not every scan');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('drill with an empty TEST sleeve waits instead of requesting quotes', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-drill-empty-')), { shared } = world({ priceChange: { m5: -5, h1: 5 } });
+  try {
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    engine.start(); await engine.pulse();
+    (engine as unknown as { ledgers: Map<string, { state: { paperCashLamports: string } }> }).ledgers.get('PAPER')!.state.paperCashLamports = '597000';
+    engine.drill = true; await engine.pulse(); await engine.pulse();
+    assert.ok(!engine.events.list().some(e => e.stage === 'QUOTE'), 'no quote is requested for an unfundable entry');
+    assert.equal(engine.events.list().filter(e => /^DRILL paused: FAIR · TEST sleeve/.test(e.message)).length, 1, 'logged once');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('replay: pessimistic minute-candle exits and constant-product size impact', () => {
+  const t0 = Date.UTC(2026, 8, 29, 21, 9, 0), entryAt = t0 + 5_000, entry = 1;
+  const c = (i: number, o: number, h: number, l: number, cl: number) => ({ t: t0 + i * 60_000, o, h, l, c: cl });
+  const crash = { takeProfitPct: 100, stopLossPct: 15, maxHoldMin: 4, trailing: null, giveback: { lockPeakPct: 40, points: 15 } };
+  // The entry candle only contributes its close; a later candle reaching +100% takes profit at the target.
+  assert.deepEqual(replayExit([c(0, 0.9, 5, 0.5, 1.1), c(1, 1.1, 2.2, 1.05, 2)], entryAt, entry, crash, 30 * 60_000),
+    { exitAt: t0 + 60_000, exitPrice: 2, reason: 'TAKE_PROFIT', peakPct: 120.00000000000001 });
+  // Within one candle the low is assumed first: after a +60% peak, a dip to +30% locks the profit before any high counts.
+  const lock = replayExit([c(0, 1, 1, 1, 1), c(1, 1, 1.6, 1.2, 1.5), c(2, 1.5, 2.5, 1.3, 2.4)], entryAt, entry, crash, 30 * 60_000);
+  assert.equal(lock.reason, 'PROFIT_LOCK'); assert.ok(Math.abs(lock.exitPrice - 1.45) < 1e-9);
+  assert.equal(replayExit([c(0, 1, 1, 1, 1), c(1, 1, 1.05, 0.8, 0.9)], entryAt, entry, crash, 30 * 60_000).reason, 'STOP_LOSS');
+  assert.equal(replayExit([0, 1, 2, 3, 4].map(i => c(i, 1, 1.05, 0.97, 1.02)), entryAt, entry, crash, 30 * 60_000).reason, 'MAX_HOLD');
+  // $2 on a $12.8K reserve barely moves the price; $10K into the same pool loses even on a +110% move.
+  assert.ok(Math.abs(sizedReturn(2, 1, 2.1, 12_800, 1) - 1.1) < 0.001);
+  assert.ok(sizedReturn(10_000, 1, 2.1, 12_800, 1) < 0);
 });
