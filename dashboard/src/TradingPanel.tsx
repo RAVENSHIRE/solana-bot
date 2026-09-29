@@ -25,6 +25,9 @@ const explanations:Record<string,string>={
   JUPITER_API_KEY_REQUIRED:'The local Jupiter API key is missing. Add it to the local configuration, never to the browser.',
   SCAN_IN_PROGRESS:'A check is still running. Wait for it to finish before starting the session.',
   WALLET_SESSION_MISMATCH:'The wallet session expired or changed. Reconnect Phantom.',
+  SIMULATED_TOKEN_AUTHORITY:'The swap would leave a delegate or close authority on the USDC account. Nothing was signed.',
+  UNSCOPED_HOLDING_CHANGED:'The swap would change a token account outside SOL / USDC, for example existing wrapped SOL. Nothing was signed.',
+  TOO_MANY_UNSCOPED_HOLDINGS:'Too many other token accounts to verify before signing. Use a dedicated test wallet.',
 };
 const describe=(code:string)=>explanations[code]??code.replaceAll('_',' ');
 const labels:Record<string,string>={WAITING_FOR_WALLET:'Connect your wallet',DISARMED:'Trading paused',WAITING_FOR_GATES:'Waiting for checks',SCANNING:'Scanning live quotes',SIGNATURE_REQUIRED:'Phantom approval needed',HALTED:'Execution halted'};

@@ -14,7 +14,7 @@ import { LiveExecutor } from '../execution/live-executor';
 import { TransactionSender } from '../execution/tx-sender';
 import { type SwapFill,type SwapRequest } from '../execution/executor';
 import { loadWalletFromEnv } from '../utils/wallet';
-import { atomicWriteFile } from '../utils/fs';
+import { acquireProcessLock, atomicWriteFile } from '../utils/fs';
 import { configureLogger,rootLogger as log } from '../utils/logger';
 import { redactText } from '../utils/redact';
 import { book,recordFailure } from './ledger';
@@ -69,8 +69,7 @@ export async function run(args=process.argv.slice(2)):Promise<number> {
   const lockFile=path.join(dir,`micro-${mode}.lock`);
   if((await fs.readdir(dir)).some(name=>name!==`micro-${mode}.lock`&&name.startsWith('micro-')&&name.endsWith(`-${mode}.lock`)))
     throw new MicroReject('LEGACY_INSTANCE_LOCK','Stop the older micro instance and review its ledger before removing its lock');
-  const lock=await fs.open(lockFile,'wx').catch(()=>{throw new MicroReject('INSTANCE_LOCK','Check previous process before removing a stale lock');});
-  await lock.writeFile(String(process.pid));
+  const lock=await acquireProcessLock(lockFile).catch(()=>{throw new MicroReject('INSTANCE_LOCK','Another running process owns this ledger');});
   let stop=false;let wake:(()=>void)|undefined;const abort=new AbortController();
   const requestStop=()=>{stop=true;abort.abort();wake?.();};
   process.once('SIGINT',requestStop);process.once('SIGTERM',requestStop);

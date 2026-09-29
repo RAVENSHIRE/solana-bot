@@ -11,7 +11,7 @@ import { ConnectionManager } from '../../src/rpc/connection-manager';
 import { DataRuntime } from '../../src/data/core/data-runtime';
 import { DexScreenerClient } from '../../src/data/dexscreener';
 import { Logger } from '../../src/utils/logger';
-import { atomicWriteFile } from '../../src/utils/fs';
+import { acquireProcessLock, atomicWriteFile } from '../../src/utils/fs';
 import { JupiterClient } from '../../src/execution/jupiter-client';
 import { LiveExecutor } from '../../src/execution/live-executor';
 import { TransactionSender } from '../../src/execution/tx-sender';
@@ -55,9 +55,8 @@ export function engineFactory(repo:string):EngineFactory {
       throw new MicroReject('LEGACY_INSTANCE_LOCK');
     // The ledger filename is shared across owners: its lock must have the same scope.
     const lockPath=path.join(dir,'micro-LIVE.lock');
-    const lock=await fs.open(lockPath,'wx').catch(()=>{throw new MicroReject('INSTANCE_LOCK');});
+    const lock=await acquireProcessLock(lockPath).catch(()=>{throw new MicroReject('INSTANCE_LOCK');});
     try {
-      await lock.writeFile(String(process.pid));
       const statePath=path.join(dir,'micro-LIVE.json');
       let state:MicroState|undefined;
       try {state=MicroStateSchema.parse(JSON.parse(await fs.readFile(statePath,'utf8')));}

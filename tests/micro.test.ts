@@ -29,16 +29,22 @@ const buyFill=(patch:Partial<SwapFill>={}):SwapFill=>({simulated:false,signature
   solDeltaLamports:-10_006_000n,feeLamports:6_000n,rentLamports:0n,priceImpactPct:0,realizedSlippageBps:30,route:'fixture',latencyMs:1,...patch});
 function fixture(patch:Partial<Snapshot>={}) {
   let s=snap(patch);const st=freshState(owner.toBase58(),'LIVE',s,createProfile(5));let fee=6_000,simNative=39_994_000,simToken=1_000_000n;
-  let err:unknown=null;let priority=1_000n;let reverse=quote('SELL');let persisted=0;
+  let err:unknown=null;let priority=1_000n;let reverse=quote('SELL');let persisted=0;let simDelegate=false;
+  const unscoped:{key:PublicKey;before:Buffer;after:Buffer}[]=[];
   const accountData=()=>{
     const data=Buffer.alloc(AccountLayout.span);
-    AccountLayout.encode({mint:new PublicKey(USDC_MINT),owner,amount:simToken,delegateOption:0,
-      delegate:SystemProgram.programId,state:1,isNativeOption:0,isNative:0n,delegatedAmount:0n,
-      closeAuthorityOption:0,closeAuthority:SystemProgram.programId},data);return data.toString('base64');
+    AccountLayout.encode({mint:new PublicKey(USDC_MINT),owner,amount:simToken,delegateOption:simDelegate?1:0,
+      delegate:simDelegate?Keypair.fromSeed(new Uint8Array(32).fill(66)).publicKey:SystemProgram.programId,state:1,isNativeOption:0,isNative:0n,
+      delegatedAmount:simDelegate?simToken:0n,closeAuthorityOption:0,closeAuthority:SystemProgram.programId},data);return data.toString('base64');
   };
-  const connection={getFeeForMessage:async()=>({value:fee}),simulateTransaction:async()=>({value:{err,accounts:[
+  const connection={getFeeForMessage:async()=>({value:fee}),
+    getMultipleAccountsInfo:async(keys:PublicKey[])=>keys.map(k=>{const u=unscoped.find(x=>x.key.equals(k));
+      return u?{owner:TOKEN_PROGRAM_ID,lamports:2_039_280,data:u.before,executable:false,rentEpoch:0}:null;}),
+    simulateTransaction:async(_tx:unknown,config:{accounts:{addresses:string[]}})=>({value:{err,accounts:[
     {owner:SystemProgram.programId.toBase58(),lamports:simNative},
     {owner:TOKEN_PROGRAM_ID.toBase58(),data:[accountData(),'base64']},
+    ...config.accounts.addresses.slice(2).map(a=>{const u=unscoped.find(x=>x.key.toBase58()===a)!;
+      return {owner:TOKEN_PROGRAM_ID.toBase58(),lamports:2_039_280,data:[u.after.toString('base64'),'base64']};}),
   ]}})};
   const rpc={execute:async(_label:string,fn:(c:typeof connection)=>unknown)=>fn(connection)};
   const jupiter={quote:async()=>reverse,assertFresh:()=>{}};
@@ -47,7 +53,11 @@ function fixture(patch:Partial<Snapshot>={}) {
     persist:async()=>{persisted++;},configuredPriorityCap:100_000n});
   const tx=new VersionedTransaction(new TransactionMessage({payerKey:owner,recentBlockhash:SystemProgram.programId.toBase58(),instructions:[]}).compileToV0Message());
   const built={swapTransaction:'AA==',lastValidBlockHeight:1,prioritizationFeeLamports:1000};
-  return {guard,st,tx,built,set:(patch:{fee?:number,simNative?:number,simToken?:bigint,err?:unknown,priority?:bigint,s?:Snapshot,reverse?:JupiterQuote})=>{
+  return {guard,st,tx,built,unscoped:(before:Buffer,after:Buffer=before)=>{
+    const key=Keypair.generate().publicKey;unscoped.push({key,before,after});
+    s={...s,unsupportedHoldings:[...(s.unsupportedHoldings??[]),{mint:SOL_MINT,account:key.toBase58(),amountRaw:'1',reason:'OUTSIDE_SOL_USDC_SCOPE'}]};
+  },set:(patch:{fee?:number,simNative?:number,simToken?:bigint,err?:unknown,priority?:bigint,s?:Snapshot,reverse?:JupiterQuote,delegate?:boolean})=>{
+    if(patch.delegate!==undefined)simDelegate=patch.delegate;
     if(patch.fee!==undefined)fee=patch.fee;if(patch.simNative!==undefined)simNative=patch.simNative;
     if(patch.simToken!==undefined)simToken=patch.simToken;if('err' in patch)err=patch.err;
     if(patch.priority!==undefined)priority=patch.priority;if(patch.s)s=patch.s;if(patch.reverse)reverse=patch.reverse;
@@ -206,6 +216,17 @@ test('new ATA can pass only when observed rent fits the fee budget and the net q
   const f=fixture({ataExists:false,ataRent:1000n}),r=req(),q=quote();
   await f.guard.beforeBuild(r,q);assert.equal(f.guard.lastRent,1000n);
   f.set({simNative:39_993_000});await f.guard.beforeSign(r,q,f.tx,f.built);
+});
+test('simulated USDC delegate approval is rejected even when balances match',async()=>{
+  const f=fixture(),r=req(),q=quote();await f.guard.beforeBuild(r,q);
+  f.set({delegate:true});await assert.rejects(f.guard.beforeSign(r,q,f.tx,f.built),/SIMULATED_TOKEN_AUTHORITY/);
+  f.set({delegate:false});await f.guard.beforeSign(r,q,f.tx,f.built);
+});
+test('holdings outside SOL/USDC must be unchanged by the simulated swap',async()=>{
+  const untouched=fixture(),r=req(),q=quote();untouched.unscoped(Buffer.alloc(165,7));
+  await untouched.guard.beforeBuild(r,q);await untouched.guard.beforeSign(r,q,untouched.tx,untouched.built);
+  const drained=fixture(),r2=req();drained.unscoped(Buffer.alloc(165,7),Buffer.alloc(165,8));
+  await drained.guard.beforeBuild(r2,q);await assert.rejects(drained.guard.beforeSign(r2,q,drained.tx,drained.built),/UNSCOPED_HOLDING_CHANGED/);
 });
 test('unexpected fee payer is rejected before simulation or signing',async()=>{
   const f=fixture(),r=req(),q=quote();await f.guard.beforeBuild(r,q);

@@ -6,6 +6,7 @@ import { TradingService, tradingEnvironment, engineFactory } from '../server/tra
 import { SessionEngine } from '../../src/micro/session-engine';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 
 test('trading API requires same-origin capability and session; status never exposes private signing requests',async(t)=>{
   let executions=0;
@@ -63,6 +64,28 @@ test('the shared LIVE ledger has one lock across wallets and refuses legacy inst
     await fs.writeFile(path.join(dir,'data-micro',`micro-${signer(62).publicKey.toBase58()}-LIVE.lock`),'fixture-old-instance');
     await assert.rejects(factory(signer(63),()=>false,()=>{}),/LEGACY_INSTANCE_LOCK/);
   }finally{await first?.close();await fs.rm(dir,{recursive:true,force:true});}
+});
+
+test('a lock left by a crashed process is recovered; a live or unreadable owner still blocks',async()=>{
+  const dir=await fs.mkdtemp(path.join(process.cwd(),'.trading-test-'));
+  const signer={publicKey:Keypair.fromSeed(new Uint8Array(32).fill(65)).publicKey,signTransaction:async()=>{throw new Error('Never sign in this test');}};
+  const factory=engineFactory(dir),lockPath=path.join(dir,'data-micro','micro-LIVE.lock');
+  try {
+    await fs.writeFile(path.join(dir,'.env'),'RPC_ENDPOINTS=https://fixture.invalid\nJUPITER_API_KEY=fixture-key\n');
+    await fs.mkdir(path.dirname(lockPath));
+    const child=spawn(process.execPath,['-e','']);await new Promise(r=>child.once('exit',r));
+    await fs.writeFile(lockPath,String(child.pid));
+    const recovered=await factory(signer,()=>false,()=>{});
+    assert.equal(await fs.readFile(lockPath,'utf8'),String(process.pid));
+    await recovered.close();
+    const sleeper=spawn(process.execPath,['-e','setTimeout(()=>{},60000)']);
+    try {
+      await fs.writeFile(lockPath,String(sleeper.pid));
+      await assert.rejects(factory(signer,()=>false,()=>{}),/INSTANCE_LOCK/);
+    } finally {sleeper.kill();}
+    await fs.writeFile(lockPath,'');
+    await assert.rejects(factory(signer,()=>false,()=>{}),/INSTANCE_LOCK/);
+  }finally{await fs.rm(dir,{recursive:true,force:true});}
 });
 
 test('wallet replacement cannot restart an old scan and shutdown drains a delayed new factory',async()=>{

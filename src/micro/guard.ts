@@ -10,6 +10,8 @@ import type { ConnectionManager } from '../rpc/connection-manager';
 import { exactNumber, parse, safeInteger } from '../data/core/data-validator';
 import { MICRO, MicroReject, checkCosts, checkReserve, equityUsd, validPrices, killThreshold, type MicroState, type Snapshot } from './policy';
 
+/** getMultipleAccounts accepts 100 keys; the simulation also returns the wallet and its USDC account. */
+const MAX_UNSCOPED_ACCOUNTS=98;
 type Authorization = { snapshot:Snapshot; priority:bigint; notional:bigint; slip:bigint; spread:bigint;
   priorDrag:bigint; drag:bigint; fee:bigint; message?:string };
 export interface GuardDeps {
@@ -108,14 +110,26 @@ export class MicroGuard implements ExecutionGuard {
     const s=await this.snapshot();
     checkReserve(s.native,req.side==='BUY'?req.amountRaw:0n,a.fee+s.ataRent,s.tempRent);
     const ata=getAssociatedTokenAddressSync(new Key(USDC_MINT),this.d.owner);
-    const sim=await this.d.rpc.execute('micro:simulate-unsigned',c=>c.simulateTransaction(tx,{sigVerify:false,commitment:'confirmed',accounts:{encoding:'base64',addresses:[this.d.owner.toBase58(),ata.toBase58()]}}));
+    // Balances alone miss approvals and transfers of holdings outside SOL/USDC; a swap must leave those accounts untouched.
+    const others=(s.unsupportedHoldings??[]).map(h=>new Key(h.account));
+    if(others.length>MAX_UNSCOPED_ACCOUNTS)throw new MicroReject('TOO_MANY_UNSCOPED_HOLDINGS');
+    const before=others.length?await this.d.rpc.execute('micro:unscoped-before',c=>c.getMultipleAccountsInfo(others,'confirmed')):[];
+    const sim=await this.d.rpc.execute('micro:simulate-unsigned',c=>c.simulateTransaction(tx,{sigVerify:false,commitment:'confirmed',accounts:{encoding:'base64',
+      addresses:[this.d.owner.toBase58(),ata.toBase58(),...others.map(k=>k.toBase58())]}}));
     if(sim.value.err)throw new MicroReject('ROUTE_SIMULATION_FAILED');
-    const [wallet,token]=sim.value.accounts??[];
+    const [wallet,token,...after]=sim.value.accounts??[];
+    others.forEach((_,i)=>{
+      const b=before[i],a=after[i];
+      if(!b||!a||a.owner!==b.owner.toBase58()||a.lamports!==b.lamports||a.data[1]!=='base64'||
+        !Buffer.from(a.data[0]??'','base64').equals(b.data))throw new MicroReject('UNSCOPED_HOLDING_CHANGED');
+    });
     if(!wallet||!token||wallet.owner!==SystemProgram.programId.toBase58()||token.owner!==TOKEN_PROGRAM_ID.toBase58())throw new MicroReject('SIMULATED_ACCOUNTS_MISSING');
     const native=BigInt(parse(safeInteger,wallet.lamports,'solana-rpc'));
     if(token.data[1]!=='base64'||typeof token.data[0]!=='string')throw new MicroReject('TOKEN_DATA_ENCODING');
     const decoded=AccountLayout.decode(Buffer.from(token.data[0],'base64'));
     if(!decoded.mint.equals(new Key(USDC_MINT))||!decoded.owner.equals(this.d.owner))throw new MicroReject('SIMULATED_TOKEN_IDENTITY');
+    // A delegate or close authority leaves balances unchanged in simulation but lets a third party drain the account later.
+    if(decoded.delegateOption!==0||decoded.closeAuthorityOption!==0)throw new MicroReject('SIMULATED_TOKEN_AUTHORITY');
     const usdc=decoded.amount;
     if(native<MICRO.reserveLamports)throw new MicroReject('PROJECTED_RESERVE_FLOOR');
     if(req.side==='BUY' && (s.native-native>req.amountRaw+a.fee+s.ataRent || usdc-s.usdc<BigInt(q.otherAmountThreshold)))throw new MicroReject('SIMULATED_BUY_MISMATCH');
