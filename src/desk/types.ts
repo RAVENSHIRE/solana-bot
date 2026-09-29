@@ -96,7 +96,9 @@ export interface DeskCapitalView {
 
 export interface DeskStatus {
   mode: DeskMode; label: string; scanner: boolean; execution: boolean;
-  wallet: { connected: boolean; address: string | null };
+  /** CONFIGURED: TEST is using WALLET_PUBLIC_KEY from .env because Phantom is not connected (address only, never a signer). */
+  wallet: { connected: boolean; address: string | null; source?: 'PHANTOM' | 'CONFIGURED' };
+  drill: boolean;
   capital: DeskCapitalView; message: string | null; halted: string | null;
   lastScanAt: number | null; nextScanAt: number | null; scanning: boolean;
   events: DeskEvent[]; candidates: Candidate[]; preflights: Preflight[];

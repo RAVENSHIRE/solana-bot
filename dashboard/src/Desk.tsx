@@ -67,7 +67,9 @@ function Controls({ t, d }: { t: TradingSession; d: DeskStatus | null }) {
     <div className="chips">
       {chip(running, 'SCANNER: ON', 'SCANNER: OFF')}
       {chip(!!d?.execution, 'EXECUTION: ENABLED', 'EXECUTION: DISABLED')}
-      {chip(t.connected, `WALLET: CONNECTED ${short(t.address)}`, 'WALLET: DISCONNECTED')}
+      {t.connected ? chip(true, `WALLET: PHANTOM ${short(t.address)}`, '') : d?.wallet.source === 'CONFIGURED'
+        ? <span className="chip on">WALLET: .env ADDRESS {short(d.wallet.address)} (TEST, no signing)</span> : chip(false, '', 'WALLET: DISCONNECTED')}
+      {!live && chip(!!d?.drill, 'DRILL: ON', 'DRILL: OFF')}
       {d?.scanning && <span className="chip on">SCANNING…</span>}
     </div>
     <div className="trading-actions">
@@ -76,6 +78,8 @@ function Controls({ t, d }: { t: TradingSession; d: DeskStatus | null }) {
       {!live ? <>
         <button className="primary-action" disabled={busy || running} onClick={() => void t.desk('start-test')}>START TEST</button>
         <button className="stop-action" disabled={busy || !running} onClick={() => void t.desk('stop-test')}>STOP TEST</button>
+        <button className="source-button" disabled={busy} title="Paper entries in the best safe candidate even when strategy gates are not met"
+          onClick={() => void t.desk(d?.drill ? 'drill-off' : 'drill-on')}>{d?.drill ? 'TEST DRILL: TURN OFF' : 'TEST DRILL: TURN ON'}</button>
       </> : <>
         <button className="primary-action live" disabled={busy || running || !t.connected} onClick={() => void t.desk('start-live')}>START LIVE SESSION</button>
         <button className="stop-action" disabled={busy || !running} onClick={() => void t.desk('stop-live')}>STOP LIVE SESSION</button>
@@ -94,7 +98,7 @@ function Capital({ d }: { d: DeskStatus }) {
   const row = (label: string, value: string, note?: string) => <div><span>{label}</span><strong>{value}</strong>{note && <small>{note}</small>}</div>;
   return <div className="capital">
     <section><h3>Phantom wallet <em>actual</em></h3>
-      {row('Actual SOL', c.walletSol === null ? '--' : `${numeric(c.walletSol, 6)} SOL`, d.wallet.connected ? short(d.wallet.address) : 'Connect Phantom')}
+      {row('Actual SOL', c.walletSol === null ? '--' : `${numeric(c.walletSol, 6)} SOL`, d.wallet.connected ? short(d.wallet.address) : d.wallet.source === 'CONFIGURED' ? `${short(d.wallet.address)} · from .env (read-only)` : 'Connect Phantom')}
       {row('Actual USD value', money(c.walletUsd), c.solUsd ? `SOL ${money(c.solUsd)}` : undefined)}
       {row('Last wallet sync', ago(c.lastWalletSync))}
     </section>

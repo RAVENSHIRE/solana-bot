@@ -2,7 +2,7 @@
  * Headless TEST / PAPER run of the desk pipeline on live market data. It never signs, never submits and never
  * reads a private key; the wallet address is only used to build and simulate transactions.
  *
- *   npm run desk:paper -- --address <PUBLIC_KEY> [--scans 6] [--env <dir containing .env>] [--data <dir>] [--probe] [--probe-mint <MINT>] [--status-out <file>]
+ *   npm run desk:paper -- --address <PUBLIC_KEY> [--scans 6] [--env <dir containing .env>] [--data <dir>] [--probe] [--probe-mint <MINT>] [--status-out <file>] [--drill]
  */
 import path from 'node:path';
 import { writeFile } from 'node:fs/promises';
@@ -30,6 +30,7 @@ async function main(): Promise<void> {
   try {
     console.log(`TEST / PAPER — NO REAL TRANSACTIONS · wallet ${owner.toBase58()} · planned $${desk.capital.plannedStartingCapitalUsd} · base entry $${desk.capital.baseEntryUsd}`);
     engine.start();
+    if (process.argv.includes('--drill')) engine.drill = true;
     for (let i = 0; i < scans; i++) {
       await engine.pulse(); flushEvents();
       if (i < scans - 1) await new Promise(r => setTimeout(r, DESK.scanMs));

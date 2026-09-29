@@ -45,6 +45,9 @@ const sol = (l: bigint) => exactNumber(l < 0n ? -l : l) / 1e9 * (l < 0n ? -1 : 1
 export class DeskEngine {
   scanner = false;
   execution = false;
+  /** TEST only: allow drill entries when nothing qualifies. */
+  drill = false;
+  private drillSkips = new Map<string, number>();
   message: string | null = null;
   lastScanAt: number | null = null;
   nextScanAt: number | null = null;
@@ -170,6 +173,7 @@ export class DeskEngine {
     if (ledger && this.solUsd) ledger.fundPaper(d.capital.plannedStartingCapitalUsd, this.solUsd);
     if (ledger) await this.managePositions(ledger, stopped);
     if (stopped()) return;
+    for (const [mint, at] of this.drillSkips) if (Date.now() - at > 15 * 60_000) this.drillSkips.delete(mint);
     const found = await discover(d.dex, d.gecko, this.watchlist(ledger));
     this.sources = found.sources;
     const shortlist = await this.evaluate(found.tokens, started);
@@ -311,7 +315,10 @@ export class DeskEngine {
     const recentExit = (mint: string) => s.entries.some(e => e.mint === mint && e.side === 'SELL' && Date.now() - e.at < DESK.reentryCooldownMs);
     const qualified = [...this.candidates.values()].filter(c => c.status === 'QUALIFIED' && !ledger.position(c.mint) && !recentExit(c.mint))
       .sort((a, b) => composite(b) - composite(a));
-    if (!qualified.length) { this.message = 'No qualified entry candidate'; return; }
+    if (!qualified.length) {
+      if (this.drill && this.d.mode === 'PAPER') return this.drillEnter(ledger, stopped, recentExit);
+      this.message = 'No qualified entry candidate'; return;
+    }
     if (s.positions.length >= DESK.maxOpenPositions) {
       this.event('WAITING', `${qualified.length} qualified, but ${s.positions.length}/${DESK.maxOpenPositions} positions are open`); return;
     }
@@ -322,13 +329,35 @@ export class DeskEngine {
       token2022: c.onchain.token2022 === true }, ledger, stopped);
   }
 
+  /**
+   * TEST drill: when nothing qualifies, open a paper position in the best trending candidate whose safety gates
+   * pass (mint/freeze authority revoked, no dangerous extensions, AMM liquidity), bypassing volume, buy-pressure,
+   * concentration and momentum gates. The execution guard still applies. Every drill fill is marked in the ledger.
+   */
+  private async drillEnter(ledger: DeskLedger, stopped: () => boolean, recentExit: (mint: string) => boolean): Promise<void> {
+    if (ledger.state.positions.length >= DESK.maxOpenPositions) return;
+    const safe = (c: Candidate) => ['mintAuthority', 'freezeAuthority', 'contract', 'liquidity'].every(k => c.gates.find(g => g.key === k)?.status === 'PASS');
+    const pool = [...this.candidates.values()].filter(c => c.tier === 'TRENDING' && c.onchain.decimals !== null && safe(c) &&
+      !ledger.position(c.mint) && !recentExit(c.mint) && !this.drillSkips.has(c.mint)).sort((a, b) => composite(b) - composite(a));
+    if (!pool.length) { this.message = 'DRILL: no trending candidate with passing safety gates yet'; return; }
+    for (const c of pool.slice(0, 3)) {
+      if (stopped()) return;
+      this.event('QUALIFIED', `DRILL entry (strategy gates bypassed; status ${c.status}: ${c.reasons[0] ?? ''})`, { mint: c.mint, symbol: c.symbol });
+      await this.execute('BUY', { mint: c.mint, symbol: c.symbol, decimals: c.onchain.decimals!, pairAddress: c.pair.address, heldRaw: 0n,
+        token2022: c.onchain.token2022 === true, drill: true }, ledger, stopped);
+      if (ledger.position(c.mint)) return;
+      // Blocked by the guard (e.g. max drag): skip it for a while and try the next one.
+      this.drillSkips.set(c.mint, Date.now());
+    }
+  }
+
   // ------------------------------------------------------------------ one order through the production path
 
-  private async execute(side: 'BUY' | 'SELL', t: { mint: string; symbol: string | null; decimals: number; pairAddress: string; heldRaw: bigint; token2022?: boolean },
+  private async execute(side: 'BUY' | 'SELL', t: { mint: string; symbol: string | null; decimals: number; pairAddress: string; heldRaw: bigint; token2022?: boolean; drill?: boolean },
     ledger: DeskLedger, stopped: () => boolean, probe = false): Promise<void> {
     const d = this.d, ctx = { mint: t.mint, symbol: t.symbol };
     const wallet = d.wallet(), solUsd = this.solUsd;
-    if (!wallet) { this.event('WAITING', 'Connect Phantom: orders are built and simulated for your wallet address', ctx); return; }
+    if (!wallet) { this.event('WAITING', d.mode === 'PAPER' ? 'No wallet address: connect Phantom or set WALLET_PUBLIC_KEY in .env' : 'Connect Phantom to trade LIVE', ctx); return; }
     if (!solUsd) { this.event('WAITING', 'SOL price unavailable; order deferred', ctx); return; }
     if (d.mode === 'LIVE' && (!wallet.signer || !d.sender)) { this.event('WAITING', 'LIVE needs an active Phantom signing session', ctx); return; }
     let tokenProgram = t.token2022 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
@@ -397,8 +426,10 @@ export class DeskEngine {
     }
   }
 
-  private paperFill(side: 'BUY' | 'SELL', t: { mint: string; symbol: string | null; decimals: number; pairAddress: string; heldRaw: bigint },
-    guard: DeskGuard, ledger: DeskLedger, solUsd: number, note: string): void {
+  private paperFill(side: 'BUY' | 'SELL', t: { mint: string; symbol: string | null; decimals: number; pairAddress: string; heldRaw: bigint; drill?: boolean },
+    guard: DeskGuard, ledger: DeskLedger, solUsd: number, detail: string): void {
+    const drill = t.drill || (side === 'SELL' && !!ledger.state.entries.filter(e => e.mint === t.mint && e.side === 'BUY').at(-1)?.note?.startsWith('DRILL'));
+    const note = drill ? `DRILL — strategy gates bypassed · ${detail}` : detail;
     const o = guard.lastOrder!, q = o.quote, ctx = { mint: t.mint, symbol: t.symbol };
     const fee = o.fee > 0n ? o.fee : BASE_FEE_LAMPORTS + o.priority;
     const buy = side === 'BUY';
@@ -452,7 +483,7 @@ export class DeskEngine {
 
   // ------------------------------------------------------------------ view
 
-  status(wallet: { connected: boolean; address: string | null }): DeskStatus {
+  status(wallet: DeskStatus['wallet']): DeskStatus {
     const d = this.d, ledger = this.currentLedger(), s = ledger?.state, solUsd = this.solUsd;
     const positions = s?.positions ?? [];
     // A position without an executable valuation yet makes totals unknown, never silently $0.
@@ -460,13 +491,15 @@ export class DeskEngine {
     const value = valued ? positions.reduce((a, p) => a + BigInt(p.lastValueLamports!), 0n) : null;
     const rent = positions.reduce((a, p) => a + BigInt(p.rentLamports), 0n);
     const unrealized = solUsd && valued ? positions.reduce((a, p) => a + sol(BigInt(p.lastValueLamports!)) * solUsd - p.costUsd, 0) : null;
+    const configured = !wallet.connected && d.mode === 'PAPER' && this.walletView ? this.walletView.owner : null;
+    if (configured) wallet = { connected: false, address: configured, source: 'CONFIGURED' };
     const native = this.walletView && this.walletView.owner === wallet.address ? this.walletView.native : null;
     const paper = s?.paperCashLamports != null ? BigInt(s.paperCashLamports) : null;
     const budget = d.mode === 'PAPER' ? paper : native;
     const spendable = budget === null ? null : budget - DESK.reserveLamports > 0n ? budget - DESK.reserveLamports : 0n;
     const cash = d.mode === 'PAPER' ? paper : native;
     return {
-      mode: d.mode, label: LABEL[d.mode], scanner: this.scanner, execution: this.execution, wallet,
+      mode: d.mode, label: LABEL[d.mode], scanner: this.scanner, execution: this.execution, drill: this.drill, wallet,
       capital: {
         plannedStartingCapitalUsd: d.capital.plannedStartingCapitalUsd, baseEntryUsd: d.capital.baseEntryUsd, reserveSol: sol(DESK.reserveLamports),
         maxDragPct: Number(DESK.maxDragBps) / 100, slippageBps: d.capital.slippageBps,

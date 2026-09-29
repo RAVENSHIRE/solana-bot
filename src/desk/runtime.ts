@@ -17,6 +17,7 @@ import { DeskEngine, type DeskWallet } from './engine';
 import { DeskReject } from './guard';
 import { XClient } from './social';
 import { deskCapital, type DeskCapital } from './config';
+import { PublicKey } from '@solana/web3.js';
 import type { DeskMode } from './types';
 
 /**
@@ -26,7 +27,7 @@ import type { DeskMode } from './types';
 const ENV_KEYS = ['RPC_ENDPOINTS', 'RPC_MAX_RPS', 'RPC_TIMEOUT_MS', 'JUPITER_API_KEY', 'JUPITER_API_BASE', 'JUPITER_MAX_RPS', 'JUPITER_QUOTE_MAX_AGE_MS',
   'MAX_PRIORITY_FEE_LAMPORTS', 'PRIORITY_LEVEL', 'MAX_PRICE_IMPACT_PCT', 'TX_CONFIRM_TIMEOUT_MS', 'RS_TAKE_PROFIT_PCT', 'RS_STOP_LOSS_PCT',
   'RS_TRAILING_ACTIVATION_PCT', 'RS_TRAILING_STOP_PCT', 'RS_MAX_HOLD_MIN', 'RS_MAX_WASH_RATIO',
-  'DESK_PLANNED_CAPITAL_USD', 'DESK_BASE_ENTRY_USD', 'DESK_SLIPPAGE_BPS', 'X_BEARER_TOKEN'];
+  'DESK_PLANNED_CAPITAL_USD', 'DESK_BASE_ENTRY_USD', 'DESK_SLIPPAGE_BPS', 'X_BEARER_TOKEN', 'WALLET_PUBLIC_KEY'];
 export async function deskEnvironment(repo: string): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = {};
   try {
@@ -59,9 +60,13 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
     const shared = { cfg, capital, logger, rpc, jupiter: new JupiterClient(cfg.jupiter, logger, data), dex: new DexScreenerClient(logger, data),
       gecko: new GeckoTerminalClient(logger, data), safety: new TokenSafetyChecker(rpc, logger), x: new XClient(env.X_BEARER_TOKEN ?? null),
       dir: o.dataDir, authorized: context.authorized };
+    let configured: PublicKey | null = null;
+    try { configured = env.WALLET_PUBLIC_KEY ? new PublicKey(env.WALLET_PUBLIC_KEY.trim()) : null; } catch { configured = null; }
     const sender = new TransactionSender(rpc, logger, { confirmTimeoutMs: cfg.execution.confirmTimeoutMs, pollIntervalMs: 1500, rebroadcastIntervalMs: 2000 });
     const engines = {
-      PAPER: await DeskEngine.create({ ...shared, mode: 'PAPER', sender: null, wallet: () => context.wallet('PAPER') }),
+      // TEST needs only an address to build and simulate; without Phantom it uses the public key from .env, never a secret.
+      PAPER: await DeskEngine.create({ ...shared, mode: 'PAPER', sender: null,
+        wallet: () => context.wallet('PAPER') ?? (configured ? { owner: configured, signer: null } : null) }),
       LIVE: await DeskEngine.create({ ...shared, mode: 'LIVE', sender, wallet: () => context.wallet('LIVE') }),
     };
     return { engines, capital, close: async () => {

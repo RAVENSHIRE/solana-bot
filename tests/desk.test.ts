@@ -157,7 +157,7 @@ test('process lock: a crashed owner is recovered; a live or unreadable owner sti
 
 // ---------------------------------------------------------------- full pipeline against a simulated network
 
-function world() {
+function world(patch: Record<string, unknown> = {}) {
   const w = { priceFactor: 1, native: 45_000_000, last: null as null | { side: 'BUY' | 'SELL'; inAmount: bigint; outAmount: bigint }, sends: 0, signRequests: 0 };
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
   const solPair = { chainId: 'solana', dexId: 'orca', pairAddress: SOL_POOL, baseToken: { address: SOL_MINT, symbol: 'SOL' }, quoteToken: { address: USDC_MINT, symbol: 'USDC' },
@@ -168,7 +168,7 @@ function world() {
       if (url.pathname.startsWith('/token-')) return json([{ chainId: 'solana', tokenAddress: MINT, description: 'Alpha does things', totalAmount: 100,
         links: [{ type: 'twitter', url: 'https://x.com/alphaproj' }, { label: 'Website', url: 'https://alpha.example' }] }]);
       const mints = url.pathname.split('/').pop()!.split(',');
-      return json([...(mints.includes(SOL_MINT) ? [solPair] : []), ...(mints.includes(MINT) ? [pairRaw({ pairCreatedAt: NOW - 2 * 86_400_000 })] : [])]);
+      return json([...(mints.includes(SOL_MINT) ? [solPair] : []), ...(mints.includes(MINT) ? [pairRaw({ pairCreatedAt: NOW - 2 * 86_400_000, ...patch })] : [])]);
     }
     if (url.hostname === 'api.geckoterminal.com') return url.pathname.includes('/trades') ? json({}, 404) : json({ data: [] });
     if (url.pathname.endsWith('/quote')) {
@@ -275,6 +275,21 @@ test('TEST probe runs the real pre-flight path, books nothing, and is refused in
     assert.equal(view.ledger.length, 0); assert.equal(view.positions.length, 0); assert.equal(w.sends, 0);
     const live = await DeskEngine.create({ ...shared, mode: 'LIVE', dir, sender: null, wallet: () => ({ owner, signer: null }) });
     await assert.rejects(live.probe(MINT), /PROBE_TEST_ONLY/);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('TEST drill opens a marked paper position when nothing qualifies; without drill nothing is entered', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-drill-')), { shared } = world({ priceChange: { m5: -5, h1: 5 } });
+  try {
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    engine.start(); await engine.pulse(); await engine.pulse();
+    let view = engine.status({ connected: false, address: null });
+    assert.equal(view.candidates[0]!.status, 'WAITING'); assert.equal(view.positions.length, 0);
+    engine.drill = true; await engine.pulse();
+    view = engine.status({ connected: false, address: null });
+    assert.equal(view.positions.length, 1); assert.match(view.ledger[0]!.note!, /^DRILL — strategy gates bypassed/);
+    assert.equal(view.wallet.source, 'CONFIGURED'); assert.equal(view.wallet.address, owner.toBase58());
+    assert.equal(view.preflights[0]!.signature, 'NOT_REQUESTED_TEST');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 

@@ -13,7 +13,7 @@ export { deskEnvironment as tradingEnvironment, type DeskHandle };
 export type DeskFactory = (context: DeskContext) => Promise<DeskHandle>;
 export const deskFactory = (repo: string): DeskFactory => context => createDesk({ envDir: repo, dataDir: path.join(repo, 'data-desk') }, context);
 
-const DESK_ACTIONS = new Set(['select-mode', 'start-test', 'stop-test', 'start-live', 'pause', 'resume', 'stop-live', 'probe']);
+const DESK_ACTIONS = new Set(['select-mode', 'start-test', 'stop-test', 'start-live', 'pause', 'resume', 'stop-live', 'probe', 'drill-on', 'drill-off']);
 
 export class TradingService {
   readonly broker = new SigningBroker({ sessionTtlMs: 900_000 });
@@ -112,6 +112,11 @@ export class TradingService {
       case 'stop-live': live.stop(); this.broker.cancel(); return;
       case 'pause': handle.engines[this.mode].pause(); if (this.mode === 'LIVE') this.broker.cancel(); return;
       case 'resume': if (this.mode === 'LIVE') requireSession(); handle.engines[this.mode].resume(); return;
+      case 'drill-on': case 'drill-off':
+        // Drill entries exist only in TEST; LIVE never bypasses a strategy gate.
+        if (this.mode !== 'PAPER') throw new DeskReject('DRILL_TEST_ONLY');
+        paper.drill = action === 'drill-on'; paper.events.add('SYSTEM', `TEST drill ${paper.drill ? 'ON: paper entries may bypass strategy gates (safety gates and guard still apply)' : 'OFF'}`);
+        return;
       case 'probe':
         // Never available in LIVE: a probe must not be able to produce a signature request.
         if (this.mode !== 'PAPER' || typeof body.mint !== 'string') throw new DeskReject('PROBE_TEST_ONLY');
