@@ -123,15 +123,16 @@ export class DeskEngine {
     if (this.d.mode !== 'PAPER') return Promise.reject(new DeskReject('PROBE_TEST_ONLY'));
     if (this.work) return Promise.reject(new DeskReject('SCAN_IN_PROGRESS'));
     const c = this.candidates.get(mint);
-    if (!c) return Promise.reject(new DeskReject('UNKNOWN_CANDIDATE'));
-    if (c.onchain.decimals === null) return Promise.reject(new DeskReject('EVIDENCE_PENDING'));
+    if (c && c.onchain.decimals === null) return Promise.reject(new DeskReject('EVIDENCE_PENDING'));
     const work = (async () => {
       await this.syncWallet();
       const ledger = await this.ledgerFor(null);
       if (this.solUsd) ledger.fundPaper(this.d.capital.plannedStartingCapitalUsd, this.solUsd);
-      this.event('SYSTEM', `PROBE started for ${c.symbol ?? mint} (status ${c.status}); nothing will be booked`, { mint, symbol: c.symbol });
-      await this.execute('BUY', { mint, symbol: c.symbol, decimals: c.onchain.decimals!, pairAddress: c.pair.address, heldRaw: 0n, token2022: c.onchain.token2022 === true },
-        ledger, () => false, true);
+      // Any mint can be probed (e.g. to verify the path on a liquid token); its decimals come from the chain, never a guess.
+      const mintInfo = c ? null : await this.d.safety.check(mint, { rejectMintAuthority: false, fresh: true });
+      const decimals = c?.onchain.decimals ?? mintInfo!.decimals, token2022 = c ? c.onchain.token2022 === true : mintInfo!.isToken2022;
+      this.event('SYSTEM', `PROBE started for ${c?.symbol ?? mint} (${c ? `candidate status ${c.status}` : 'not a strategy candidate'}); nothing will be booked`, { mint, symbol: c?.symbol ?? null });
+      await this.execute('BUY', { mint, symbol: c?.symbol ?? null, decimals, pairAddress: c?.pair.address ?? '', heldRaw: 0n, token2022 }, ledger, () => false, true);
     })().finally(async () => { this.work = null; await this.persist(); });
     this.work = work;
     return work;

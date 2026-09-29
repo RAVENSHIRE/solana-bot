@@ -2,9 +2,10 @@
  * Headless TEST / PAPER run of the desk pipeline on live market data. It never signs, never submits and never
  * reads a private key; the wallet address is only used to build and simulate transactions.
  *
- *   npm run desk:paper -- --address <PUBLIC_KEY> [--scans 6] [--env <dir containing .env>] [--data <dir>] [--probe]
+ *   npm run desk:paper -- --address <PUBLIC_KEY> [--scans 6] [--env <dir containing .env>] [--data <dir>] [--probe] [--probe-mint <MINT>] [--status-out <file>]
  */
 import path from 'node:path';
+import { writeFile } from 'node:fs/promises';
 import { PublicKey } from '@solana/web3.js';
 import { configureLogger } from '../utils/logger';
 import { createDesk } from '../desk/runtime';
@@ -35,6 +36,8 @@ async function main(): Promise<void> {
     }
     engine.stop('headless run finished');
     const view = () => engine.status({ connected: true, address: owner.toBase58() });
+    const probeMint = arg('probe-mint');
+    if (probeMint) { await engine.probe(probeMint).catch(error => console.log(`PROBE rejected: ${(error as Error).message}`)); flushEvents(); }
     if (process.argv.includes('--probe') && !view().preflights.length) {
       const rank: Record<Candidate['status'], number> = { QUALIFIED: 0, WAITING: 1, WATCHLIST: 2, FILTERED: 3 };
       const pick = view().candidates.filter(c => c.tier === 'TRENDING' && c.onchain.decimals !== null).sort((a, b) => rank[a.status] - rank[b.status])[0];
@@ -42,6 +45,8 @@ async function main(): Promise<void> {
       else console.log('PROBE skipped: no analysed trending candidate with known decimals');
     }
     const s = view();
+    const out = arg('status-out');
+    if (out) await writeFile(path.resolve(out), JSON.stringify({ session: null, pending: null, mode: 'PAPER', desk: s, deskError: null }));
     console.log('\nCANDIDATES');
     for (const c of s.candidates.slice(0, 15)) console.log(`  ${(c.symbol ?? '?').padEnd(10)} ${c.tier.padEnd(11)} ${c.status.padEnd(9)} ${c.classification.padEnd(9)} cap ${usd(c.metrics.marketCapUsd).padEnd(10)} liq ${usd(c.metrics.liquidityUsd).padEnd(9)} 5m ${usd(c.metrics.volume5mUsd).padEnd(8)} b/s ${c.metrics.buySellRatio5m?.toFixed(2) ?? 'UNKNOWN'} · ${c.reasons[0] ?? ''}`);
     console.log('\nPRE-FLIGHT');
