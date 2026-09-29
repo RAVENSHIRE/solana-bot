@@ -52,10 +52,10 @@ export class DexScreenerClient {
     }
     return [...pairs.values()];
   }
-  static selectPairs(pairs: DexPair[], now = Date.now(), maxAgeMs = 90_000): { selected: Map<string, DexPair>; rejected: Array<{ pool: string; reason: string }> } {
+  static selectPairs(pairs: DexPair[], now = Date.now(), maxAgeMs = 90_000, quotes: ReadonlySet<string> = QUOTE_MINTS): { selected: Map<string, DexPair>; rejected: Array<{ pool: string; reason: string }> } {
     const selected = new Map<string, DexPair>(); const rejected: Array<{ pool: string; reason: string }> = [];
     for (const p of pairs) {
-      const reason = !QUOTE_MINTS.has(p.quoteToken.address) ? 'UNSUPPORTED_QUOTE' :
+      const reason = !quotes.has(p.quoteToken.address) ? 'UNSUPPORTED_QUOTE' :
         now - p.meta.receivedAt > maxAgeMs || now < p.meta.receivedAt ? 'STALE_PRICE' :
         !p.priceUsd || !p.liquidity?.usd ? 'MISSING_PRICE_OR_LIQUIDITY' :
         !p.pairCreatedAt ? 'UNKNOWN_POOL_AGE' : !p.txns?.h1 || p.txns.h1.buys + p.txns.h1.sells === 0 ? 'NO_RECENT_ACTIVITY' : null;

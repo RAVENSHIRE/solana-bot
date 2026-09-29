@@ -4,7 +4,7 @@ import type { ConnectionManager } from '../rpc/connection-manager';
 import { DexScreenerClient } from '../data/dexscreener';
 import { listTokenAccounts } from '../execution/token-accounts';
 import { exactNumber, parse, safeInteger } from '../data/core/data-validator';
-import { ESTIMATED_SWAP_COMPUTE_UNITS, SOL_MINT, USDC_MINT } from '../core/types';
+import { ESTIMATED_SWAP_COMPUTE_UNITS, PRICE_QUOTE_MINTS, SOL_MINT, USDC_MINT } from '../core/types';
 import { MICRO, MicroReject, validPrices, type Snapshot } from './policy';
 
 export class MicroMarket {
@@ -12,7 +12,7 @@ export class MicroMarket {
   async snapshot():Promise<Snapshot> {
     this.dex.data.cache.invalidate('dexscreener:tokens:');
     const pairs=await this.dex.getPairsForTokens([SOL_MINT,USDC_MINT]);
-    const selected=DexScreenerClient.selectPairs(pairs,Date.now(),MICRO.priceMaxAgeMs).selected;
+    const selected=DexScreenerClient.selectPairs(pairs,Date.now(),MICRO.priceMaxAgeMs,PRICE_QUOTE_MINTS).selected;
     const sol=selected.get(SOL_MINT),usdc=selected.get(USDC_MINT);
     if(!sol?.priceUsd || !usdc?.priceUsd) throw new MicroReject('USD_PRICE_MISSING');
     const prices={solUsd:sol.priceUsd,usdcUsd:usdc.priceUsd,receivedAt:Math.min(sol.meta.receivedAt,usdc.meta.receivedAt)};

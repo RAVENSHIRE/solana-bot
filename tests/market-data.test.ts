@@ -28,6 +28,7 @@ import { BaseStrategy } from '../src/strategies/base-strategy';
 import { ReversalSniperStrategy } from '../src/strategies/reversal-sniper';
 import { SuckUpTheRentStrategy } from '../src/strategies/suck-up-the-rent';
 import { Engine } from '../src/core/engine';
+import { PRICE_QUOTE_MINTS, USDC_MINT, USDT_MINT } from '../src/core/types';
 import { TokenBucket } from '../src/utils/rate-limiter';
 import { Logger, configureLogger } from '../src/utils/logger';
 import { redact } from '../src/utils/redact';
@@ -76,6 +77,12 @@ test('analytical pool selection records rejected alternatives and never keys by 
   assert.equal(choice.selected.get(MINT)?.pairAddress, POOL); assert.equal(choice.rejected[0]?.pool, WALLET);
   assert.equal(DexScreenerClient.selectPairs(rows, NOW + 90001).selected.size, 0);
   assert.equal(DexScreenerClient.selectPairs([{ ...rows[0]!, liquidity: { usd: null } }], NOW).selected.size, 0);
+});
+test('USD valuation prices USDC from its USDC/USDT pool; discovery still rejects USDT quotes', () => {
+  // DexScreener lists USDC only as the base of a USDC/USDT pool; without it every micro scan was USD_PRICE_MISSING.
+  const rows = normalizeDexPairs([{ ...dexRaw(), baseToken: { address: USDC_MINT, symbol: 'USDC' }, quoteToken: { address: USDT_MINT }, priceUsd: '1.0003' }], NOW);
+  assert.equal(DexScreenerClient.selectPairs(rows, NOW).rejected[0]?.reason, 'UNSUPPORTED_QUOTE');
+  assert.equal(DexScreenerClient.selectPairs(rows, NOW, 90_000, PRICE_QUOTE_MINTS).selected.get(USDC_MINT)?.priceUsd, 1.0003);
 });
 test('Dex client batches 31 distinct mints into <=30 and shares concurrent discovery', async () => {
   const paths: string[] = []; const runtime = new DataRuntime(log, settings, undefined, async input => {

@@ -9,6 +9,9 @@ export const SOL_MINT = 'So11111111111111111111111111111111111111112';
 export const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 /** Quote-Assets, gegen die gehandelt wird (werden nie selbst als "Token" behandelt). */
 export const QUOTE_MINTS: ReadonlySet<string> = new Set([SOL_MINT, USDC_MINT]);
+export const USDT_MINT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB';
+/** USD-Bewertung gehaltener Assets: DexScreener führt USDC selbst nur als Basis eines USDC/USDT-Pools. Nicht für Discovery. */
+export const PRICE_QUOTE_MINTS: ReadonlySet<string> = new Set([SOL_MINT, USDC_MINT, USDT_MINT]);
 
 /** Basisgebühr pro Signatur in Lamports. */
 export const BASE_FEE_LAMPORTS = 5_000n;

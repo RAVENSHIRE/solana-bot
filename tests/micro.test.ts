@@ -7,7 +7,9 @@ import { MicroGuard } from '../src/micro/guard';
 import { book, recordFailure, options } from '../src/micro/runtime';
 import { dashboard } from '../src/micro/dashboard';
 import { BotStateSchema } from '../dashboard/shared/state';
-import { SOL_MINT, USDC_MINT } from '../src/core/types';
+import { SOL_MINT, USDC_MINT, USDT_MINT } from '../src/core/types';
+import { MicroMarket } from '../src/micro/market';
+import { normalizeDexPairs } from '../src/data/dexscreener';
 import { SwapError, type SwapFill, type SwapRequest } from '../src/execution/executor';
 import { LiveExecutor } from '../src/execution/live-executor';
 import { JupiterClient, type JupiterQuote } from '../src/execution/jupiter-client';
@@ -227,6 +229,15 @@ test('holdings outside SOL/USDC must be unchanged by the simulated swap',async()
   await untouched.guard.beforeBuild(r,q);await untouched.guard.beforeSign(r,q,untouched.tx,untouched.built);
   const drained=fixture(),r2=req();drained.unscoped(Buffer.alloc(165,7),Buffer.alloc(165,8));
   await drained.guard.beforeBuild(r2,q);await assert.rejects(drained.guard.beforeSign(r2,q,drained.tx,drained.built),/UNSCOPED_HOLDING_CHANGED/);
+});
+test('micro snapshot prices USDC from the USDC/USDT pool DexScreener actually returns',async()=>{
+  const raw=(base:string,quote:string,price:string)=>({chainId:'solana',dexId:'fixture',pairAddress:base,baseToken:{address:base,symbol:'X'},
+    quoteToken:{address:quote},priceUsd:price,liquidity:{usd:1_000_000},pairCreatedAt:Date.now()-86_400_000,txns:{h1:{buys:1,sells:1}}});
+  const dex={data:{cache:{invalidate:()=>{}}},getPairsForTokens:async()=>normalizeDexPairs([raw(SOL_MINT,USDC_MINT,'118'),raw(USDC_MINT,USDT_MINT,'1.0003')],Date.now())};
+  const rpc={execute:async(_label:string,fn:(c:unknown)=>unknown)=>fn({getParsedTokenAccountsByOwner:async()=>({value:[]}),
+    getBalance:async()=>50_000_000,getMinimumBalanceForRentExemption:async()=>2_039_280})};
+  const s=await new MicroMarket(rpc as any,dex as any,owner).snapshot();
+  assert.equal(s.solUsd,118);assert.equal(s.usdcUsd,1.0003);assert.equal(s.native,50_000_000n);
 });
 test('unexpected fee payer is rejected before simulation or signing',async()=>{
   const f=fixture(),r=req(),q=quote();await f.guard.beforeBuild(r,q);
