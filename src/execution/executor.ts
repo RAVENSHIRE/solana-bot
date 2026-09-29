@@ -6,6 +6,7 @@ import { JupiterClient, type JupiterQuote } from './jupiter-client';
 import { errorMessage } from '../utils/errors';
 import type { Logger } from '../utils/logger';
 import { checkTask } from '../data/core/request-scope';
+import type { ExecutionGuard } from './execution-guard';
 
 /** Jeder Swap ist SOL ↔ Token. `amountRaw` ist Lamports (BUY) bzw. Token-Rohbetrag (SELL). */
 export interface SwapRequest {
@@ -79,6 +80,7 @@ export interface TradeExecutor {
 }
 
 export interface ExecutorDeps {
+  guard?: ExecutionGuard;
   cfg: AppConfig;
   rpc: ConnectionManager;
   jupiter: JupiterClient;

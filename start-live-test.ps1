@@ -1,59 +1,46 @@
-param([decimal]$BudgetSol = 0, [decimal]$TradeSol = 0, [switch]$CheckOnly)
+param([decimal]$BudgetUsd = 5, [decimal]$BuyUsd = 1, [switch]$CheckOnly)
 $ErrorActionPreference = 'Stop'
-Set-Location $PSScriptRoot
-
-function Read-Sol([string]$Prompt) {
-    $value = (Read-Host $Prompt).Replace(',', '.')
-    return [decimal]::Parse($value, [Globalization.CultureInfo]::InvariantCulture)
-}
-
-if ($BudgetSol -le 0) { $BudgetSol = Read-Sol 'Maximales SOL-Guthaben der separaten Testwallet' }
-if ($TradeSol -le 0) { $TradeSol = Read-Sol 'SOL pro Kauf (zusaetzliche Gebuehrenreserve erforderlich)' }
-if ($TradeSol -lt 0.001 -or $BudgetSol -le $TradeSol) {
-    throw 'Kauf muss mindestens 0.001 SOL sein; Gesamtbudget muss groesser sein.'
-}
-
-$values = @{
-    SIMULATION_MODE = 'false'
-    LIVE_TRADING_CONFIRMED = 'I_UNDERSTAND_THE_RISKS'
-    LIVE_TEST_BUDGET_SOL = $BudgetSol.ToString([Globalization.CultureInfo]::InvariantCulture)
-    RS_TRADE_SIZE_SOL = $TradeSol.ToString([Globalization.CultureInfo]::InvariantCulture)
-    SUTR_ARB_SIZE_SOL = $TradeSol.ToString([Globalization.CultureInfo]::InvariantCulture)
-    RISK_MAX_POSITION_SOL = $TradeSol.ToString([Globalization.CultureInfo]::InvariantCulture)
-    RISK_MAX_TOTAL_EXPOSURE_SOL = $TradeSol.ToString([Globalization.CultureInfo]::InvariantCulture)
-    RISK_MAX_DAILY_LOSS_SOL = $TradeSol.ToString([Globalization.CultureInfo]::InvariantCulture)
-    RISK_MAX_OPEN_POSITIONS = '1'
-    SUTR_ENABLED = 'false'
-    SUTR_LP_SIM_ENABLED = 'false'
-    SUTR_RENT_RECLAIM_ENABLED = 'false'
-    RS_ENABLED = 'true'
-    PRE_SIMULATE_TX = 'true'
-    STATE_DIR = './data-live-test'
-    LOG_DIR = './logs/live-test'
-}
+Push-Location $PSScriptRoot
 $saved = @{}
-foreach ($key in $values.Keys) {
-    $saved[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
-    [Environment]::SetEnvironmentVariable($key, $values[$key], 'Process')
-}
-$saved['RISK_MIN_SOL_RESERVE'] = [Environment]::GetEnvironmentVariable('RISK_MIN_SOL_RESERVE', 'Process')
 try {
+    if ($BudgetUsd -lt 3.5 -or $BudgetUsd -gt 5 -or $BuyUsd -lt 1 -or $BuyUsd -gt 1.5) {
+        throw 'Micro-Profil: Budget 3.50-5.00 USD; Kauf 1.00-1.50 USD.'
+    }
+    $values = @{
+        MICRO_BUDGET_USD = $BudgetUsd.ToString([Globalization.CultureInfo]::InvariantCulture)
+        MICRO_TRADE_USD = $BuyUsd.ToString([Globalization.CultureInfo]::InvariantCulture)
+        MICRO_STATE_DIR = './data-micro'
+        LIVE_TRADING_CONFIRMED = ''
+    }
+    foreach ($key in $values.Keys) {
+        $saved[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
+        [Environment]::SetEnvironmentVariable($key, $values[$key], 'Process')
+    }
     & npm.cmd run typecheck
     if ($LASTEXITCODE -ne 0) { throw 'Typecheck fehlgeschlagen.' }
-    & npm.cmd run live:check
-    if ($LASTEXITCODE -ne 0) { throw 'Live-Vorpruefung fehlgeschlagen; nichts gesendet.' }
-    $report = Get-Content './data-live-test/live-preflight.json' -Raw | ConvertFrom-Json
-    $env:RISK_MIN_SOL_RESERVE = ([decimal]$report.reserveSol).ToString([Globalization.CultureInfo]::InvariantCulture)
-    Write-Host "Wallet: $($report.wallet) | Guthaben: $($report.balanceSol) SOL | Kauf: $TradeSol SOL"
-    Write-Host 'Hauptstrategie ReversalSniper; maximal eine offene Position. Nach einem Exit sind weitere Einstiege moeglich.'
-    Write-Host 'Das Tageslimit sperrt neue Einstiege, garantiert aber keinen Maximalverlust. Strg+C beendet den Bot, verkauft offene Positionen nicht.'
+    & npm.cmd run micro:check
+    if ($LASTEXITCODE -ne 0) { throw 'Micro-Vorpruefung fehlgeschlagen; keine Transaktion gesendet.' }
+    Write-Host "MICRO | Budget $BudgetUsd USD | Kauf $BuyUsd USD | Reserve 0.003 SOL | Kostenlimit 1.5%"
+    Write-Host 'Signer: lokaler Wallet-Schluessel aus .env. Keine Phantom-Browserverbindung.'
+    Write-Host 'SOL/USDC: Kauf nur bei positivem Netto-Roundtrip-Quote. Zwei separate Swaps, kein garantierter Arbitragegewinn.'
+    Write-Host 'Strg+C stoppt neue Arbeit; eine bereits gesendete Transaktion kann noch landen. Kein automatischer Verkauf beim Stop.'
     if ($CheckOnly) { return }
     if ((Read-Host 'Echte Orders erlauben? Zum Start exakt LIVE eingeben') -cne 'LIVE') { return }
-    & node --import tsx src/index.ts
-    if ($LASTEXITCODE -ne 0) { throw 'Live-Bot beendet; Log pruefen.' }
+    $env:LIVE_TRADING_CONFIRMED = 'I_UNDERSTAND_THE_RISKS'
+    & npm.cmd run micro:live
+    $microExit = $LASTEXITCODE
+    $env:LIVE_TRADING_CONFIRMED = ''
+    if ($microExit -eq 75) {
+        Write-Host 'HALT | Live-Ledger gesperrt. Wechsel zur getrennten Micro-Simulation.' -ForegroundColor Yellow
+        Write-Host 'Das Micro-Dashboard auf Port 3002 zeigt nach dem naechsten Snapshot SIMULATION.'
+        & npm.cmd run micro:sim
+        if ($LASTEXITCODE -ne 0) { throw 'Simulation beendet; Log pruefen.' }
+    }
+    elseif ($microExit -ne 0) { throw 'Micro-Prozess beendet. Kein automatischer Live-Neustart; Log pruefen.' }
 }
 finally {
     foreach ($key in $saved.Keys) {
         [Environment]::SetEnvironmentVariable($key, $saved[$key], 'Process')
     }
+    Pop-Location
 }

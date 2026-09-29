@@ -1,1 +1,88 @@
-{"version":"2.0.0","tasks":[{"label":"Solana: Verbindung und Live-Voraussetzungen pruefen","type":"shell","command":"npm.cmd","args":["run","live:check"],"options":{"cwd":"${workspaceFolder}"},"problemMatcher":[],"presentation":{"reveal":"always","panel":"dedicated"}},{"label":"Solana: Kleinen Live-Test starten","type":"shell","command":"powershell.exe","args":["-NoProfile","-File","${workspaceFolder}\\start-live-test.ps1"],"options":{"cwd":"${workspaceFolder}"},"problemMatcher":[],"presentation":{"reveal":"always","panel":"dedicated","focus":true},"runOptions":{"instanceLimit":1}},{"label":"Solana: Live-Dashboard starten","type":"shell","command":"npm.cmd","args":["start"],"options":{"cwd":"${workspaceFolder}\\dashboard","env":{"DASHBOARD_PORT":"3002","BOT_STATE_FILE":"${workspaceFolder}\\data-live-test\\state-LIVE.json","BOT_TELEMETRY_FILE":"${workspaceFolder}\\data-live-test\\dashboard-LIVE.json"}},"problemMatcher":[],"presentation":{"reveal":"always","panel":"dedicated"},"runOptions":{"instanceLimit":1}}]}
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Solana: Verbindung und Live-Voraussetzungen pruefen",
+      "type": "shell",
+      "command": "npm.cmd",
+      "args": [
+        "run",
+        "micro:check"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "Solana: Kleinen Live-Test starten",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}\\start-live-test.ps1"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true
+      },
+      "runOptions": {
+        "instanceLimit": 1
+      }
+    },
+    {
+      "label": "Solana: Micro-Dashboard starten",
+      "type": "shell",
+      "command": "npm.cmd",
+      "args": [
+        "start"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}\\dashboard",
+        "env": {
+          "DASHBOARD_PORT": "3002",
+          "BOT_STATE_FILE": "${workspaceFolder}\\data-micro\\active-dashboard.json",
+          "BOT_TELEMETRY_FILE": ""
+        }
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      },
+      "runOptions": {
+        "instanceLimit": 1
+      }
+    },
+    {
+      "label": "Solana: Micro-Simulation starten",
+      "type": "shell",
+      "command": "npm.cmd",
+      "args": [
+        "run",
+        "micro:sim"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      },
+      "runOptions": {
+        "instanceLimit": 1
+      }
+    }
+  ]
+}

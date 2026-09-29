@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import type { BotState } from "../shared/state";
 import { Chart, Sparkline } from "./Chart";
 import { useBotState } from "./use-state";
+import { WalletPanel } from "./WalletPanel";
 import {
   duration,
   money,
@@ -471,6 +472,7 @@ function App() {
               </button>
             </div>
           </header>
+          <WalletPanel />
           <section className="metric-grid" aria-label="Performance metrics">
             {cards.map((card) => (
               <article className="metric" key={card.label}>

@@ -30,7 +30,11 @@
     "test:data": "node --import tsx --test tests/market-data.test.ts",
     "data:check": "node --import tsx src/scripts/test-market-data.ts",
     "data:replay": "node --import tsx src/scripts/replay-data.ts",
-    "live:check": "node --import tsx src/scripts/live-preflight.ts"
+    "live:check": "node --import tsx src/scripts/live-preflight.ts",
+    "micro:check": "node --import tsx src/micro/runtime.ts --check",
+    "micro:sim": "node --import tsx src/micro/runtime.ts --simulation",
+    "micro:live": "node --import tsx src/micro/runtime.ts --live",
+    "test:micro": "node --import tsx --test tests/micro.test.ts"
   },
   "dependencies": {
     "@solana/spl-token": "^0.4.9",

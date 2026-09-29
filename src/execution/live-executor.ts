@@ -30,15 +30,16 @@ export class LiveExecutor extends BaseExecutor {
     const started = Date.now();
     const quote = await this.checkedQuote(req);
     const owner = this.owner.toBase58();
+    const authorization = await this.deps.guard?.beforeBuild(req, quote);
 
     let tx: VersionedTransaction;
     let lastValidBlockHeight: number;
     try {
-      const built = await this.deps.jupiter.buildSwap(quote, owner);
+      const built = await this.deps.jupiter.buildSwap(quote, owner, authorization?.priorityFeeCapLamports);
       tx = VersionedTransaction.deserialize(Buffer.from(built.swapTransaction, 'base64'));
       lastValidBlockHeight = built.lastValidBlockHeight;
       this.ensureFresh(quote);
-      tx.sign([this.wallet]);
+      await this.deps.guard?.beforeSign(req, quote, tx, built);
     } catch (e) {
       throw new SwapError(`Swap-Transaktion konnte nicht gebaut werden: ${errorMessage(e)}`, 'build', 0n, null, { cause: e });
     }
@@ -63,6 +64,11 @@ export class LiveExecutor extends BaseExecutor {
     }
 
     let signature: string;
+    this.ensureFresh(quote);
+    await this.deps.guard?.beforeSend(req, quote, tx);
+    this.ensureFresh(quote);
+    tx.sign([this.wallet]);
+    await this.deps.guard?.onSigned?.(tx);
     this.ensureFresh(quote);
     try {
       ({ signature } = await this.sender.sendAndConfirm(tx, lastValidBlockHeight));
@@ -174,6 +180,7 @@ export class LiveExecutor extends BaseExecutor {
   }
 
   async closeTokenAccountIfEmpty(mint: string): Promise<bigint> {
+    if (this.deps.guard) return 0n; // Account maintenance must not bypass the micro execution guard.
     if (!this.deps.cfg.execution.closeEmptyAccounts) return 0n;
     try {
       const accounts = await listTokenAccounts(this.deps.rpc, this.owner, mint);
@@ -190,6 +197,7 @@ export class LiveExecutor extends BaseExecutor {
   }
 
   async reclaimEmptyAccounts(excludeMints: ReadonlySet<string>): Promise<RentReclaimResult> {
+    if (this.deps.guard) return { found:0,closed:0,reclaimableLamports:0n,reclaimedLamports:0n,signatures:[] };
     const all = await listTokenAccounts(this.deps.rpc, this.owner);
     const candidates = all.filter((a) => a.closable && !excludeMints.has(a.mint));
     const reclaimable = candidates.reduce((s, a) => s + BigInt(a.lamports), 0n);

@@ -1212,3 +1212,21 @@ b {
 .file-path {
   overflow-wrap: anywhere;
 }
+
+.wallet-panel { border:1px solid var(--border); border-radius:14px; padding:18px 22px; margin-bottom:18px; background:#fff; }
+.wallet-heading,.wallet-actions { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.wallet-heading h2 { font-size:16px; }
+.wallet-heading h2 span { font-size:12px; font-weight:400; color:var(--muted); margin-left:8px; }
+.wallet-heading p,.wallet-status { color:var(--muted); font-size:12px; margin-top:7px; }
+.wallet-values { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:20px; margin-top:18px; }
+.wallet-values>div { display:flex; flex-direction:column; gap:5px; }
+.wallet-values span,.wallet-values small { color:var(--muted); font-size:12px; }
+.wallet-values strong { font-size:21px; font-variant-numeric:tabular-nums; }
+.wallet-status { margin-top:14px; }
+.wallet-tokens { margin-top:14px; font-size:12px; }
+.wallet-tokens summary { cursor:pointer; color:var(--muted); }
+.wallet-table { overflow:auto; }
+.wallet-table table { width:100%; border-collapse:collapse; margin-top:8px; }
+.wallet-table td,.wallet-table th { text-align:left; padding:8px; border-bottom:1px solid var(--border); }
+.wallet-table td:nth-child(n+2),.wallet-table th:nth-child(n+2) { text-align:right; font-variant-numeric:tabular-nums; }
+@media(max-width:720px) { .wallet-heading { align-items:flex-start; flex-direction:column; }.wallet-values { grid-template-columns:1fr; gap:12px; }.wallet-actions { flex-wrap:wrap; } }

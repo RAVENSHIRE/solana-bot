@@ -107,7 +107,9 @@ export class JupiterClient {
       throw new DataError('critical-execution-data', 'jupiter', 'quote is stale, copied, or modified');
   }
 
-  async buildSwap(quote: JupiterQuote, userPublicKey: string): Promise<JupiterSwapResponse> {
+  async buildSwap(quote: JupiterQuote, userPublicKey: string, priorityFeeCapLamports = this.cfg.maxPriorityFeeLamports): Promise<JupiterSwapResponse> {
+    parse(safeInteger, priorityFeeCapLamports, 'jupiter');
+    if (priorityFeeCapLamports > this.cfg.maxPriorityFeeLamports) throw new DataError('critical-execution-data', 'jupiter', 'cannot raise configured priority cap');
     this.assertFresh(quote); parse(address, userPublicKey, 'jupiter');
     const raw = await requestScope.run({ ...requestScope.getStore(), category: 'execution' }, () => this.http.post<unknown>('/swap', {
       quoteResponse: quote,
@@ -116,7 +118,7 @@ export class JupiterClient {
       dynamicComputeUnitLimit: true,
       prioritizationFeeLamports: {
         priorityLevelWithMaxLamports: {
-          maxLamports: this.cfg.maxPriorityFeeLamports,
+          maxLamports: priorityFeeCapLamports,
           priorityLevel: this.cfg.priorityLevel,
         },
       },
@@ -124,7 +126,7 @@ export class JupiterClient {
     const res = parse(z.object({ swapTransaction: z.string().min(1).regex(/^[A-Za-z0-9+/]+={0,2}$/), lastValidBlockHeight: safeInteger,
       prioritizationFeeLamports: safeInteger, computeUnitLimit: safeInteger.optional(), simulationError: z.unknown().optional() }), raw, 'jupiter');
     this.assertFresh(quote);
-    if (res.prioritizationFeeLamports > this.cfg.maxPriorityFeeLamports) throw new DataError('critical-execution-data', 'jupiter', 'priority fee exceeds configured cap');
+    if (res.prioritizationFeeLamports > priorityFeeCapLamports) throw new DataError('critical-execution-data', 'jupiter', 'priority fee exceeds configured cap');
     if (res.simulationError) {
       throw new NonRetryableError('Jupiter /swap simulation failed');
     }
