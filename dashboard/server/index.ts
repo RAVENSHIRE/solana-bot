@@ -6,6 +6,8 @@ import { StateStore } from "./state-store";
 import { DashboardStore } from "./dashboard-store";
 import { adaptTelemetry } from "./telemetry-adapter";
 import type { StreamSnapshot } from "../shared/state";
+import { createWalletReader } from "./wallet";
+import { TradingService, engineFactory } from './trading';
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const port = Number(process.env.DASHBOARD_PORT || 3000);
@@ -25,6 +27,8 @@ const store =
         new StateStore(telemetryPath, 250, adaptTelemetry),
       );
 await store.start();
+const walletReader = await createWalletReader(path.resolve(root, '..')).catch(() => null);
+const trading = new TradingService(engineFactory(path.resolve(root, '..')));
 const dev = process.argv.includes("--dev");
 const vite = dev
   ? await (
@@ -56,6 +60,11 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(403).end("Local access only");
     return;
   }
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  if (await trading.handleRequest(req, res)) return;
   if (req.method !== "GET" && req.method !== "HEAD") {
     res.writeHead(405, { Allow: "GET, HEAD" }).end();
     return;
@@ -63,6 +72,26 @@ const server = http.createServer(async (req, res) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "no-referrer");
   const pathname = new URL(req.url || "/", "http://localhost").pathname;
+  if (pathname === '/api/wallet') {
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Cache-Control', 'no-store');
+    if (req.method === 'HEAD') { res.writeHead(200).end(); return; }
+    try {
+      if (!walletReader) throw new Error('WALLET_CONFIG_UNAVAILABLE');
+      const selected = new URL(req.url!, 'http://localhost').searchParams.get('address');
+      // Resolve the read before sending headers; rejected RPC/address requests need an error status.
+      const payload = JSON.stringify(await walletReader.read(selected));
+      if (!res.destroyed) res.writeHead(200).end(payload);
+    } catch (error) {
+      if (res.destroyed) return;
+      if (res.headersSent) { res.destroy(); return; }
+      const invalid = error instanceof Error && error.message === 'INVALID_ADDRESS';
+      res.writeHead(invalid ? 400 : 503).end(JSON.stringify({
+        balance: null, message: invalid ? 'Invalid Solana address.' : 'Wallet data unavailable. Check local RPC configuration and connectivity.',
+      }));
+    }
+    return;
+  }
   if (pathname === "/api/state") {
     res.writeHead(200, {
       "Content-Type": "application/json",
@@ -166,6 +195,7 @@ server.on("error", (error) => {
   void shutdown(1);
 });
 async function shutdown(code = 0) {
+  await trading.close();
   store.stop();
   for (const client of clients) client.end();
   await vite?.close();

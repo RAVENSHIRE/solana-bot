@@ -1,0 +1,110 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Solana: Lokalen Keypair vorpruefen (Legacy)",
+      "type": "shell",
+      "command": "npm.cmd",
+      "args": [
+        "run",
+        "micro:check"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "Solana: Kleinen Live-Test starten",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}\\start-phantom-dashboard.ps1"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true
+      },
+      "runOptions": {
+        "instanceLimit": 1
+      }
+    },
+    {
+      "label": "Solana: Micro-Dashboard starten",
+      "type": "shell",
+      "command": "npm.cmd",
+      "args": [
+        "start"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}\\dashboard",
+        "env": {
+          "DASHBOARD_PORT": "3002",
+          "BOT_STATE_FILE": "${workspaceFolder}\\data-micro\\active-dashboard.json",
+          "BOT_TELEMETRY_FILE": ""
+        }
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      },
+      "runOptions": {
+        "instanceLimit": 1
+      }
+    },
+    {
+      "label": "Solana: Micro-Simulation starten",
+      "type": "shell",
+      "command": "npm.cmd",
+      "args": [
+        "run",
+        "micro:sim"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      },
+      "runOptions": {
+        "instanceLimit": 1
+      }
+    },
+    {
+      "label": "Solana: Lokaler Keypair Live-Test (Legacy)",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}\\start-live-test.ps1"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true
+      },
+      "runOptions": {
+        "instanceLimit": 1
+      }
+    }
+  ]
+}

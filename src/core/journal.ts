@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { redact } from '../utils/redact';
 import path from 'node:path';
 import type { ExecMode, TradeRecord } from './types';
 import type { Logger } from '../utils/logger';
@@ -29,6 +30,7 @@ export class TradeJournal {
     private readonly mode: ExecMode,
     logger: Logger,
     private readonly color = true,
+    private readonly observer?: (record: TradeRecord) => void,
   ) {
     this.log = logger.child('journal');
     fs.mkdirSync(dir, { recursive: true });
@@ -42,7 +44,8 @@ export class TradeJournal {
   }
 
   record(r: Omit<TradeRecord, 'ts' | 'mode'>): void {
-    const rec: TradeRecord = { ts: new Date().toISOString(), mode: this.mode, ...r };
+    const rec = redact({ ts: new Date().toISOString(), mode: this.mode, ...r }) as TradeRecord;
+    this.observer?.(rec);
     this.printLine(rec);
     for (const fn of this.listeners) {
       try {

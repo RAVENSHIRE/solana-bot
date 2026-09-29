@@ -31,6 +31,8 @@ export interface Candle {
 }
 
 export interface PoolTrade {
+  /** Provider event identity; one transaction can contain multiple trades. */
+  id?: string;
   txHash: string;
   wallet: string;
   kind: 'buy' | 'sell';

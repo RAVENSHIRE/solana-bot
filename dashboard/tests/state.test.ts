@@ -1,11 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rename, rm, mkdir } from "node:fs/promises";
+import { mkdtemp, writeFile, rm, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { BotStateSchema, emptyState } from "../shared/state";
 import { parseState } from "../server/adapter";
 import { StateStore } from "../server/state-store";
+import { atomicWriteFile } from "../../src/utils/fs";
 
 // Synthetic accounting values are confined to tests; no fixture is served by the app.
 const bigint = (value: string) => ({ $bigint: value });
@@ -134,8 +135,9 @@ test("watcher handles a missing directory, partial writes, atomic replacement, d
     await until(() => store.snapshot.status === "invalid");
     assert.equal(store.snapshot.state?.metrics.total_trades, 1);
     state.metrics.total_trades = 2;
-    await writeFile(file + ".tmp", JSON.stringify(state));
-    await rename(file + ".tmp", file);
+    // Exercise the engine's real atomic writer, including retries for transient
+    // Windows sharing violations while the watcher is reading the old file.
+    await atomicWriteFile(file, JSON.stringify(state));
     await until(() => store.snapshot.state?.metrics.total_trades === 2);
     let replayed = false;
     const unsubscribe = store.subscribe((snapshot) => {

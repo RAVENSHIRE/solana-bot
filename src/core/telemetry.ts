@@ -299,7 +299,7 @@ export class Telemetry {
           for (const [mint, pair] of DexScreenerClient.bestPairPerToken(pairs)) {
             const price = Number(pair.priceUsd);
             if (!Number.isFinite(price) || price <= 0) continue;
-            this.recordMarketTick(mint, pair.baseToken.symbol, price);
+            this.recordMarketTick(mint, pair.baseToken.symbol ?? mint.slice(0, 8), price);
             const watch = this.data.watchlist.find(w => w.mint === mint);
             if (watch) { watch.price_usd = price; watch.updated_at = Date.now(); }
           }

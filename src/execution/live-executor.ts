@@ -1,3 +1,4 @@
+import { parse, safeInteger } from '../data/core/data-validator';
 import { VersionedTransaction, type Keypair, type VersionedTransactionResponse } from '@solana/web3.js';
 import { BaseExecutor, SwapError, type ExecutorDeps, type RentReclaimResult, type SwapFill, type SwapRequest } from './executor';
 import { JupiterClient, type JupiterQuote } from './jupiter-client';
@@ -7,10 +8,11 @@ import { BASE_FEE_LAMPORTS, type ExecMode } from '../core/types';
 import { TxExpiredError, TxFailedError, TxUnknownError, errorMessage } from '../utils/errors';
 import { sleep } from '../utils/retry';
 import { bpsOf } from '../utils/format';
+import { isTransactionSigner, signTransactionChecked, type TransactionSigner } from './transaction-signer';
 
 /**
  * Echte On-Chain-Ausführung über Jupiter.
- * Ablauf: Quote → Impact-Check → /swap (Tx bauen) → signieren → optional simulieren →
+ * Ablauf: Quote → Impact-Check → /swap (Tx bauen) → simulieren → prüfen → signieren → erneut prüfen →
  * senden & bestätigen → tatsächlichen Fill aus den Balance-Deltas der Transaktion lesen.
  */
 export class LiveExecutor extends BaseExecutor {
@@ -18,25 +20,28 @@ export class LiveExecutor extends BaseExecutor {
 
   constructor(
     deps: ExecutorDeps,
-    private readonly wallet: Keypair,
+    private readonly wallet: Keypair | TransactionSigner,
     private readonly sender: TransactionSender,
   ) {
     super(deps);
     if (!wallet.publicKey.equals(deps.owner)) throw new Error('LiveExecutor: Wallet passt nicht zum Owner');
+    if (isTransactionSigner(wallet) && !deps.guard) throw new Error('Browser signer requires execution guards');
   }
 
   async swap(req: SwapRequest): Promise<SwapFill> {
     const started = Date.now();
     const quote = await this.checkedQuote(req);
     const owner = this.owner.toBase58();
+    const authorization = await this.deps.guard?.beforeBuild(req, quote);
 
     let tx: VersionedTransaction;
     let lastValidBlockHeight: number;
     try {
-      const built = await this.deps.jupiter.buildSwap(quote, owner);
+      const built = await this.deps.jupiter.buildSwap(quote, owner, authorization?.priorityFeeCapLamports);
       tx = VersionedTransaction.deserialize(Buffer.from(built.swapTransaction, 'base64'));
       lastValidBlockHeight = built.lastValidBlockHeight;
-      tx.sign([this.wallet]);
+      this.ensureFresh(quote);
+      await this.deps.guard?.beforeSign(req, quote, tx, built);
     } catch (e) {
       throw new SwapError(`Swap-Transaktion konnte nicht gebaut werden: ${errorMessage(e)}`, 'build', 0n, null, { cause: e });
     }
@@ -61,6 +66,24 @@ export class LiveExecutor extends BaseExecutor {
     }
 
     let signature: string;
+    this.ensureFresh(quote);
+    await this.deps.guard?.beforeSend(req, quote, tx);
+    this.ensureFresh(quote);
+    try {
+      tx = await signTransactionChecked(this.wallet, tx, {
+        // Conservative deadline begins before obtaining this quote, never after wallet approval.
+        expiresAt: this.deps.jupiter.expiresAt?.(quote) ?? started + (this.deps.cfg.jupiter?.quoteMaxAgeMs ?? 15_000),
+      });
+    } catch (error) {
+      throw new SwapError(`Wallet-Signatur abgelehnt: ${errorMessage(error)}`, 'build', 0n, null, { cause: error });
+    }
+    this.ensureFresh(quote);
+    // A browser confirmation can take seconds; balances and risk gates must pass again.
+    await this.deps.guard?.beforeSend(req, quote, tx);
+    this.ensureFresh(quote);
+    await this.deps.guard?.onSigned?.(tx);
+    this.ensureFresh(quote);
+    this.deps.guard?.assertActive?.();
     try {
       ({ signature } = await this.sender.sendAndConfirm(tx, lastValidBlockHeight));
     } catch (e) {
@@ -74,7 +97,8 @@ export class LiveExecutor extends BaseExecutor {
       throw new SwapError(`Senden fehlgeschlagen: ${errorMessage(e)}`, 'send', 0n, null, { cause: e });
     }
 
-    return this.parseFill(req, quote, signature, started);
+    try { return await this.parseFill(req, quote, signature, started); }
+    catch (error) { throw error instanceof SwapError ? error : new SwapError('Confirmed fill validation failed', 'unknown', 0n, signature); }
   }
 
   /** Liest die tatsächlichen Beträge aus der bestätigten Transaktion. */
@@ -86,35 +110,15 @@ export class LiveExecutor extends BaseExecutor {
     const impact = JupiterClient.priceImpactPct(quote);
 
     if (!tx?.meta) {
-      // Tx ist bestätigt, aber (noch) nicht indexiert → konservativ mit Quote-Werten buchen
-      this.deps.logger.warn('Transaktion bestätigt, Details nicht abrufbar – buche Quote-Mindestwerte', { signature });
-      const fee = BASE_FEE_LAMPORTS;
-      const inAmount = BigInt(quote.inAmount);
-      return {
-        simulated: false,
-        signature,
-        side: req.side,
-        mint: req.mint,
-        inAmountRaw: inAmount,
-        outAmountRaw: minOut,
-        quotedOutRaw: quotedOut,
-        minOutRaw: minOut,
-        solDeltaLamports: req.side === 'BUY' ? -(inAmount + fee) : minOut - fee,
-        feeLamports: fee,
-        rentLamports: 0n,
-        priceImpactPct: impact,
-        realizedSlippageBps: bpsOf(quotedOut - minOut, quotedOut),
-        route,
-        latencyMs: Date.now() - started,
-      };
+      throw new SwapError('Confirmed transaction details unavailable; reconciliation required', 'unknown', 0n, signature);
     }
 
     const meta = tx.meta;
     const keys = tx.transaction.message.getAccountKeys({ accountKeysFromLookups: meta.loadedAddresses ?? undefined });
     const ownerIdx = Array.from({ length: keys.length }, (_, i) => i).find((i) => keys.get(i)?.equals(this.owner));
-    const idx = ownerIdx ?? 0;
-    const solDelta = BigInt(meta.postBalances[idx] ?? 0) - BigInt(meta.preBalances[idx] ?? 0);
-    const fee = BigInt(meta.fee);
+    if (ownerIdx === undefined) throw new SwapError('Transaction owner missing', 'unknown', 0n, signature);
+    const solDelta = BigInt(parse(safeInteger, meta.postBalances[ownerIdx], 'solana-rpc')) - BigInt(parse(safeInteger, meta.preBalances[ownerIdx], 'solana-rpc'));
+    const fee = BigInt(parse(safeInteger, meta.fee, 'solana-rpc'));
     const owner = this.owner.toBase58();
 
     const sumToken = (list: typeof meta.preTokenBalances): bigint =>
@@ -181,7 +185,7 @@ export class LiveExecutor extends BaseExecutor {
 
   async getSolBalanceLamports(): Promise<bigint> {
     const bal = await this.deps.rpc.execute('getBalance', (c) => c.getBalance(this.owner, 'confirmed'));
-    return BigInt(bal);
+    return BigInt(parse(safeInteger, bal, 'solana-rpc'));
   }
 
   async getTokenBalanceRaw(mint: string): Promise<bigint> {
@@ -190,6 +194,8 @@ export class LiveExecutor extends BaseExecutor {
   }
 
   async closeTokenAccountIfEmpty(mint: string): Promise<bigint> {
+    if (this.deps.guard) return 0n; // Account maintenance must not bypass the micro execution guard.
+    if (isTransactionSigner(this.wallet)) return 0n; // Browser signs only the authorized swap path.
     if (!this.deps.cfg.execution.closeEmptyAccounts) return 0n;
     try {
       const accounts = await listTokenAccounts(this.deps.rpc, this.owner, mint);
@@ -206,6 +212,8 @@ export class LiveExecutor extends BaseExecutor {
   }
 
   async reclaimEmptyAccounts(excludeMints: ReadonlySet<string>): Promise<RentReclaimResult> {
+    if (this.deps.guard) return { found:0,closed:0,reclaimableLamports:0n,reclaimedLamports:0n,signatures:[] };
+    if (isTransactionSigner(this.wallet)) return { found:0,closed:0,reclaimableLamports:0n,reclaimedLamports:0n,signatures:[] };
     const all = await listTokenAccounts(this.deps.rpc, this.owner);
     const candidates = all.filter((a) => a.closable && !excludeMints.has(a.mint));
     const reclaimable = candidates.reduce((s, a) => s + BigInt(a.lamports), 0n);
@@ -222,4 +230,3 @@ export class LiveExecutor extends BaseExecutor {
     };
   }
 }
-

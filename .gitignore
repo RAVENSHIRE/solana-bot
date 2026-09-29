@@ -16,3 +16,6 @@ dist-playbook/
 playbook-backup-*/
 
 solana-playbook-update/
+
+/data-micro/
+/data-live-test/

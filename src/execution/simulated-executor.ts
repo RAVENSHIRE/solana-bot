@@ -22,7 +22,7 @@ export class SimulatedExecutor extends BaseExecutor {
   constructor(
     deps: ExecutorDeps,
     private readonly portfolio: Portfolio,
-    private readonly strictRequote = false,
+    private readonly strictRequote = true,
   ) {
     super(deps);
   }
@@ -68,6 +68,8 @@ export class SimulatedExecutor extends BaseExecutor {
       throw new SwapError('Re-quote exceeds price-impact limit', 'impact');
     }
 
+    if (q2) await this.validateEntryQuote(req, q2);
+    this.ensureFresh(q2 ?? q1);
     const out1 = BigInt(q1.outAmount);
     const out2 = q2 ? BigInt(q2.outAmount) : out1;
     const worst = out2 < out1 ? out2 : out1;

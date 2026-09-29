@@ -228,9 +228,9 @@ test('paper profile forces simulation, isolated state and ignores wallet secret'
   assert.equal(c.cfg.rs.tradeSizeSol, .2); assert.equal(c.cfg.paper.useWalletBalance, false);
   assert.throws(() => config({ PLAYBOOK_STATE_DIR: './data' }), /separate/);
 });
-const request = { inputMint: 'input', outputMint: 'output', amountRaw: 100n, slippageBps: 150 };
-const quote = { inputMint: 'input', outputMint: 'output', inAmount: '100', outAmount: '1000', otherAmountThreshold: '985', swapMode: 'ExactIn', slippageBps: 150,
-  priceImpactPct: '0.01', routePlan: [{ percent: 100, swapInfo: { ammKey: 'pool', inputMint: 'input', outputMint: 'output', inAmount: '100', outAmount: '1000' } }] };
+const request = { inputMint: 'So11111111111111111111111111111111111111112', outputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', amountRaw: 100n, slippageBps: 150 };
+const quote = { inputMint: 'So11111111111111111111111111111111111111112', outputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', inAmount: '100', outAmount: '1000', otherAmountThreshold: '985', swapMode: 'ExactIn', slippageBps: 150,
+  priceImpactPct: '0.01', routePlan: [{ percent: 100, swapInfo: { ammKey: '11111111111111111111111111111111', inputMint: 'So11111111111111111111111111111111111111112', outputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', inAmount: '100', outAmount: '1000' } }] };
 test('invalid quote impact and mismatched input cannot be accepted as zero impact', () => {
   assert.equal(validateQuote(quote, request).outAmount, '1000');
   for (const patch of [{ priceImpactPct: 'NaN' }, { priceImpactPct: '' }, { inAmount: '99' }, { outputMint: 'other' }, { outAmount: '0' }, { otherAmountThreshold: '1001' }])
@@ -239,7 +239,7 @@ test('invalid quote impact and mismatched input cannot be accepted as zero impac
 test('strict simulated executor refuses missing re-quote instead of filling stale quote', async t => {
   const f = await fixture(t); let calls = 0;
   const executor = new SimulatedExecutor({ cfg: { ...f.cfg, paper: { ...f.cfg.paper, latencyMs: 0 } },
-    rpc: { execute: async () => [] }, jupiter: { quote: async () => { if (++calls > 1) throw new Error('offline'); return { ...quote, inAmount: '100' }; } },
+    rpc: { execute: async () => [] }, jupiter: { assertFresh: () => {}, quote: async () => { if (++calls > 1) throw new Error('offline'); return { ...quote, inAmount: '100' }; } },
     logger: log, owner: Keypair.generate().publicKey,
   } as any, f.portfolio, true);
   await assert.rejects(executor.swap({ side: 'BUY', mint: 'output', amountRaw: 100n, slippageBps: 150 }), /Fresh simulation re-quote/);

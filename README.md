@@ -1,5 +1,17 @@
 # Solana Autonomous Trading Bot
 
+Die zuvor fehlenden DexScreener-, GeckoTerminal- und Raydium-Clients sind auf dem Feature-Branch implementiert. Datenqualitätsprüfungen, Provider-Health, begrenzte Historie und frische Ausführungsquotes sind integriert. [Audit, Datenfluss und Betrieb](docs/DATA-INTEGRATION.md) · [Testergebnisse und Grenzen](docs/DATA-ENGINEERING-REPORT.md).
+
+```bash
+npm run typecheck
+npm test
+npm run build
+npm run data:check  # nur öffentliche APIs, keine Wallet oder Transaktionen
+```
+
+Die Strategiegewichte und `RISK_*`-Limits bleiben unverändert. Marktwert ist erforderlich, FDV ersetzt ihn nicht. Bei fehlenden Quotes bleiben Positionen verwaltet; neue Einstiege warten auf eine gültige Bewertung. Die optionalen `DATA_*`-Einstellungen stehen in `.env.example`.
+
+
 Modularer Node.js/TypeScript-Bot für Solana mit zwei parallel laufenden Strategien, Dry-Run-Modus, RPC-Failover und PM2-Deployment.
 
 > **Risiko-Hinweis:** Dies ist Software, keine Finanzberatung. Memecoin-Trading kann zum Totalverlust führen. Starte ausschließlich im Simulationsmodus, prüfe die Ergebnisse über Tage/Wochen und nutze für LIVE eine **separate Hot-Wallet** mit begrenztem Guthaben – niemals deine Haupt-Phantom-Wallet.

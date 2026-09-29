@@ -1,3 +1,7 @@
+import path from 'node:path';
+import { DataRuntime } from './data/core/data-runtime';
+import { MarketDataStore } from './data/storage/market-data-store';
+import { safeInteger, parse } from './data/core/data-validator';
 import { loadConfig, type AppConfig } from './config/config';
 import { configureLogger, rootLogger } from './utils/logger';
 import { checkEnvFilePermissions, loadWalletFromEnv } from './utils/wallet';
@@ -64,7 +68,9 @@ async function main(): Promise<void> {
     throw new Error(`Kein RPC-Endpoint erreichbar (${cfg.rpc.endpoints.map(maskUrl).join(', ')})`);
   }
 
-  const walletLamports = BigInt(await rpc.execute('getBalance', (c) => c.getBalance(owner, 'confirmed')));
+  const genesis = await rpc.execute('getGenesisHash', c => c.getGenesisHash());
+  if (genesis !== '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d') throw new Error('Data providers require Solana mainnet RPC');
+  const walletLamports = BigInt(parse(safeInteger, await rpc.execute('getBalance', (c) => c.getBalance(owner, 'confirmed')), 'solana-rpc'));
   log.info(`Wallet-Guthaben: ${lamportsToSol(walletLamports)} SOL`);
   if (cfg.mode === 'LIVE' && walletLamports < solToLamports(cfg.risk.minSolReserve)) {
     log.warn('Guthaben liegt unter RISK_MIN_SOL_RESERVE – es werden keine Einstiege möglich sein');
@@ -74,10 +80,13 @@ async function main(): Promise<void> {
   const initialVirtual = cfg.paper.useWalletBalance ? walletLamports : solToLamports(cfg.paper.startingBalanceSol);
   const portfolio = await Portfolio.load(cfg.stateDir, cfg.mode, initialVirtual, log);
   portfolioRef = portfolio;
-  const journal = new TradeJournal(cfg.logging.dir, cfg.mode, log, cfg.logging.color);
+  const history = cfg.data.persistHistory ? new MarketDataStore(path.join(cfg.stateDir, 'market-history'), cfg.mode, log, cfg.data.retentionDays, cfg.data.historyMaxBytes) : undefined;
+  const data = new DataRuntime(log.child('data'), cfg.data, history);
+  rpc.attachDataHealth(data.health);
+  const journal = new TradeJournal(cfg.logging.dir, cfg.mode, log, cfg.logging.color, record => data.record('trade-result', record.strategy, record));
 
   // ------------------------------------------------------------------ Ausführung
-  const jupiter = new JupiterClient(cfg.jupiter, log.child('jupiter'));
+  const jupiter = new JupiterClient(cfg.jupiter, log.child('jupiter'), data);
   const deps: ExecutorDeps = { cfg, rpc, jupiter, logger: log.child('executor'), owner };
   let executor: TradeExecutor;
   if (cfg.mode === 'LIVE') {
@@ -99,7 +108,7 @@ async function main(): Promise<void> {
     cfg.rs.enabled ? cfg.rs.scanIntervalMs : null,
     cfg.sutr.enabled ? cfg.sutr.scanIntervalMs : null,
   ].filter((v): v is number => v !== null);
-  const dex = new DexScreenerClient(log.child('dexscreener'));
+  const dex = new DexScreenerClient(log.child('dexscreener'), data);
   const telemetry = await Telemetry.load({
     dir: cfg.stateDir,
     mode: cfg.mode,
@@ -115,6 +124,7 @@ async function main(): Promise<void> {
   journal.onRecord((r) => telemetry.recordTrade(r));
   telemetryRef = telemetry;
   const ctx: StrategyContext = {
+    data,
     cfg,
     logger: log,
     rpc,
@@ -124,14 +134,15 @@ async function main(): Promise<void> {
     risk,
     journal,
     dex,
-    gecko: new GeckoTerminalClient(log.child('gecko')),
-    raydium: new RaydiumClient(log.child('raydium')),
+    gecko: new GeckoTerminalClient(log.child('gecko'), data),
+    raydium: new RaydiumClient(log.child('raydium'), data),
     safety: new TokenSafetyChecker(rpc, log.child('safety')),
     telemetry,
     wallet: owner,
   };
 
   engine = new Engine({
+    data,
     portfolio,
     risk,
     journal,

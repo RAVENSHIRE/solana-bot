@@ -1,83 +1,95 @@
-import { HttpError, NetworkError, errorMessage } from '../utils/errors';
 import type { Logger } from '../utils/logger';
 import type { TokenBucket } from '../utils/rate-limiter';
 import { withRetry } from '../utils/retry';
+import { DataError, type Source } from './core/data-types';
+import type { DataHealth } from './core/data-health';
+import { checkTask, priority, requestScope, RequestGate } from './core/request-scope';
 
-export type Query = Record<string, string | number | boolean | undefined>;
-
-export interface HttpClientOptions {
-  name: string;
-  baseUrl: string;
-  limiter: TokenBucket;
-  logger: Logger;
-  timeoutMs?: number;
-  retries?: number;
-  headers?: Record<string, string>;
+export interface HttpOptions {
+  name: string; baseUrl: string; limiter: TokenBucket; logger: Logger; timeoutMs: number; retries: number;
+  headers?: Record<string, string>; gate?: RequestGate; health?: DataHealth; source?: Source;
+  fetch?: typeof fetch; clock?: () => number; maxBodyBytes?: number;
 }
-
-/** Schlanker JSON-HTTP-Client auf Basis von Node-fetch (undici). */
+const defaultGate = new RequestGate(4);
+export function retryAfter(value: string | null, now = Date.now()): number {
+  if (value === null) return 1000;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - now) : 1000;
+}
 export class HttpClient {
-  constructor(private readonly o: HttpClientOptions) {}
-
-  get<T>(path: string, query?: Query): Promise<T> {
-    return this.request<T>('GET', path, query);
+  private failures = 0; private cooldownUntil = 0;
+  constructor(private readonly o: HttpOptions) {
+    const url = new URL(o.baseUrl);
+    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw new DataError('configuration', o.name, 'invalid provider URL');
   }
-
-  post<T>(path: string, body: unknown): Promise<T> {
-    return this.request<T>('POST', path, undefined, body);
-  }
-
-  private buildUrl(path: string, query?: Query): string {
-    const base = this.o.baseUrl.replace(/\/+$/, '');
-    const url = new URL(base + (path.startsWith('/') ? path : `/${path}`));
-    for (const [k, v] of Object.entries(query ?? {})) {
-      if (v !== undefined) url.searchParams.set(k, String(v));
+  get<T>(route: string, query: Record<string, string | number | boolean> = {}): Promise<T> { return this.request<T>('GET', route, query); }
+  post<T>(route: string, body: unknown, beforeSend?: () => void): Promise<T> { return this.request<T>('POST', route, {}, body, beforeSend); }
+  private async request<T>(method: string, route: string, query: Record<string, string | number | boolean>, body?: unknown, beforeSend?: () => void): Promise<T> {
+    checkTask();
+    const clock = this.o.clock ?? Date.now;
+    if (clock() < this.cooldownUntil) throw new DataError('unavailable-provider', this.o.name, 'provider cooldown', this.cooldownUntil - clock());
+    const url = new URL(this.o.baseUrl.replace(/\/$/, '') + route);
+    for (const [key, value] of Object.entries(query)) url.searchParams.set(key, String(value));
+    const source = this.o.source;
+    const health = source ? this.o.health?.status(source) : undefined;
+    try {
+      const result = await withRetry(async () => {
+        checkTask(); await this.o.limiter.acquire(requestScope.getStore()?.signal); checkTask();
+        return (this.o.gate ?? defaultGate).run(async () => {
+          checkTask(); beforeSend?.();
+          const started = clock(); if (health) health.requests++;
+          const timeout = AbortSignal.timeout(this.o.timeoutMs);
+          const scopeSignal = requestScope.getStore()?.signal;
+          const signal = scopeSignal ? AbortSignal.any([timeout, scopeSignal]) : timeout;
+          try {
+            const res = await (this.o.fetch ?? fetch)(url, { method, redirect: 'error',
+              headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...this.o.headers },
+              body: body === undefined ? undefined : JSON.stringify(body), signal });
+            if (!res.ok) {
+              await res.body?.cancel();
+              if (res.status === 429) {
+                const pause = retryAfter(res.headers.get('retry-after'), clock());
+                this.o.limiter.pause(pause);
+                if (health) health.cooldownUntil = clock() + pause;
+                throw new DataError('rate-limited', this.o.name, 'HTTP 429', pause);
+              }
+              throw new DataError(res.status >= 500 || res.status === 408 ? 'transient' : res.status === 401 || res.status === 403 ? 'configuration' : 'invalid-response', this.o.name, `HTTP ${res.status}`);
+            }
+            const limit = this.o.maxBodyBytes ?? 8 * 1024 * 1024;
+            const reader = res.body?.getReader();
+            if (!reader) throw new DataError('invalid-response', this.o.name, 'empty response');
+            const chunks: Uint8Array[] = []; let size = 0;
+            for (;;) {
+              const part = await reader.read(); if (part.done) break;
+              size += part.value.byteLength;
+              if (size > limit) { await reader.cancel(); throw new DataError('invalid-response', this.o.name, 'response too large'); }
+              chunks.push(part.value);
+            }
+            let raw: unknown;
+            try { raw = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+            catch { throw new DataError('invalid-response', this.o.name, 'invalid JSON'); }
+            if (health) { health.latencyMs = clock() - started; health.lastSuccessAt = clock(); health.cooldownUntil = 0; }
+            this.o.logger.debug('Data request complete', { source: this.o.name, latencyMs: clock() - started });
+            return raw as T;
+          } catch (err) {
+            const error = err instanceof DataError ? err : new DataError(scopeSignal?.aborted ? 'unavailable-provider' : 'transient', this.o.name, timeout.aborted ? 'request timeout' : 'network request failed');
+            if (source) this.o.health?.failure(source, error.kind);
+            this.o.logger.warn('Data request failed', { source: this.o.name, category: error.kind, latencyMs: clock() - started });
+            throw error;
+          }
+        }, priority());
+      }, { retries: this.o.retries, baseDelayMs: 250, maxDelayMs: 5000,
+        isRetryable: e => e instanceof DataError && ['transient', 'rate-limited'].includes(e.kind),
+        onRetry: (_e, attempt) => { if (health) health.retries++; this.o.logger.debug('Data request retry', { source: this.o.name, attempt }); } });
+      this.failures = 0; return result;
+    } catch (err) {
+      this.failures++;
+      if (err instanceof DataError && err.kind === 'rate-limited') this.cooldownUntil = clock() + err.retryAfterMs;
+      else if (this.failures >= 3) this.cooldownUntil = clock() + 30_000;
+      if (health) health.cooldownUntil = Math.max(health.cooldownUntil, this.cooldownUntil);
+      throw err;
     }
-    return url.toString();
-  }
-
-  private async request<T>(method: 'GET' | 'POST', path: string, query?: Query, body?: unknown): Promise<T> {
-    const url = this.buildUrl(path, query);
-    const target = `${this.o.name} ${method} ${path.split('?')[0]}`;
-
-    return withRetry(
-      async () => {
-        await this.o.limiter.acquire();
-        let res: Response;
-        try {
-          res = await fetch(url, {
-            method,
-            headers: {
-              Accept: 'application/json',
-              ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-              ...this.o.headers,
-            },
-            body: body !== undefined ? JSON.stringify(body) : undefined,
-            signal: AbortSignal.timeout(this.o.timeoutMs ?? 10_000),
-          });
-        } catch (e) {
-          throw new NetworkError(`${target}: ${errorMessage(e)}`, { cause: e });
-        }
-
-        if (res.status === 429) {
-          const retryAfter = Number(res.headers.get('retry-after'));
-          this.o.limiter.pause(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 5_000);
-        }
-        const text = await res.text().catch(() => '');
-        if (!res.ok) throw new HttpError(res.status, target, text.slice(0, 300));
-        try {
-          return JSON.parse(text) as T;
-        } catch {
-          throw new HttpError(res.status, target, `Ungültiges JSON: ${text.slice(0, 120)}`);
-        }
-      },
-      {
-        retries: this.o.retries ?? 3,
-        baseDelayMs: 600,
-        maxDelayMs: 10_000,
-        onRetry: (e, attempt, delay) =>
-          this.o.logger.debug(`${target} – Retry ${attempt} in ${delay} ms`, { error: errorMessage(e) }),
-      },
-    );
   }
 }

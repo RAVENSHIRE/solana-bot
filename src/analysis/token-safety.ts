@@ -1,10 +1,14 @@
-import { PublicKey, type ParsedAccountData } from '@solana/web3.js';
+import { PublicKey } from '@solana/web3.js';
+import { parseMintAccount } from '../data/solana-rpc';
+import { DataError, observation, type Observation } from '../data/core/data-types';
 import type { ConnectionManager } from '../rpc/connection-manager';
 import type { Logger } from '../utils/logger';
 import { errorMessage } from '../utils/errors';
 
 export interface TokenSafety {
   mint: string;
+  status: 'verified' | 'rejected' | 'unavailable';
+  meta: Observation;
   ok: boolean;
   decimals: number;
   isToken2022: boolean;
@@ -17,14 +21,7 @@ export interface TokenSafety {
 export interface SafetyOptions {
   /** Aktive Mint-Authority (unbegrenztes Nachprägen) als Ausschlussgrund werten. */
   rejectMintAuthority: boolean;
-}
-
-interface MintInfo {
-  decimals?: number;
-  mintAuthority?: string | null;
-  freezeAuthority?: string | null;
-  isInitialized?: boolean;
-  extensions?: Array<{ extension?: string; state?: Record<string, unknown> }>;
+  fresh?: boolean;
 }
 
 /** Token-2022-Extensions, die einen Exit verhindern oder Werte abschöpfen können. */
@@ -53,24 +50,26 @@ export class TokenSafetyChecker {
   ) {}
 
   async check(mint: string, o: SafetyOptions): Promise<TokenSafety> {
-    const base = await this.inspect(mint);
+    const base = await this.inspect(mint, o.fresh ?? false);
     const reasons = [...base.reasons];
     const warnings = [...base.warnings];
     if (base.hasMintAuthority) {
       if (o.rejectMintAuthority) reasons.push('Mint-Authority aktiv (Nachprägen möglich)');
       else warnings.push('Mint-Authority aktiv');
     }
-    return { ...base, reasons, warnings, ok: reasons.length === 0 };
+    return { ...base, reasons, warnings, ok: reasons.length === 0, status: reasons.length === 0 ? 'verified' : 'rejected' };
   }
 
-  private async inspect(mint: string): Promise<TokenSafety> {
+  private async inspect(mint: string, fresh: boolean): Promise<TokenSafety> {
     const cached = this.cache.get(mint);
-    if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.value;
+    if (!fresh && cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.value;
 
     const res = await this.rpc.execute('getParsedAccountInfo(mint)', (c) => c.getParsedAccountInfo(new PublicKey(mint)));
     const acc = res.value;
     const result: TokenSafety = {
       mint,
+      status: 'rejected',
+      meta: observation('solana-rpc', Date.now(), mint, null),
       ok: false,
       decimals: 0,
       isToken2022: false,
@@ -80,20 +79,9 @@ export class TokenSafetyChecker {
       warnings: [],
     };
 
-    const data = acc?.data as ParsedAccountData | Buffer | undefined;
-    if (!acc || !data || Buffer.isBuffer(data) || (data.program !== 'spl-token' && data.program !== 'spl-token-2022')) {
-      result.reasons.push('Kein gültiger SPL-Mint');
-      return this.store(mint, result);
-    }
-    const parsed = data.parsed as { type?: string; info?: MintInfo } | undefined;
-    const info = parsed?.info;
-    if (parsed?.type !== 'mint' || !info || typeof info.decimals !== 'number') {
-      result.reasons.push('Mint-Daten nicht lesbar');
-      return this.store(mint, result);
-    }
-
+    const info = parseMintAccount(acc);
     result.decimals = info.decimals;
-    result.isToken2022 = data.program === 'spl-token-2022';
+    result.isToken2022 = info.isToken2022;
     result.hasMintAuthority = !!info.mintAuthority;
     result.hasFreezeAuthority = !!info.freezeAuthority;
     if (info.isInitialized === false) result.reasons.push('Mint nicht initialisiert');
@@ -106,7 +94,9 @@ export class TokenSafetyChecker {
       if (name === 'transferFeeConfig') {
         const newer = ext.state?.newerTransferFee as { transferFeeBasisPoints?: number } | undefined;
         const older = ext.state?.olderTransferFee as { transferFeeBasisPoints?: number } | undefined;
-        const bps = Math.max(newer?.transferFeeBasisPoints ?? 0, older?.transferFeeBasisPoints ?? 0);
+        const fields = [newer?.transferFeeBasisPoints, older?.transferFeeBasisPoints];
+        if (fields.some(n => n === undefined || !Number.isInteger(n) || n < 0 || n > 10_000)) { result.reasons.push('Transfer-Fee-Daten unvollständig'); continue; }
+        const bps = Math.max(fields[0]!, fields[1]!);
         if (bps === 0) {
           result.warnings.push('Transfer-Fee-Extension (aktuell 0 bps)');
           continue;
@@ -128,6 +118,7 @@ export class TokenSafetyChecker {
     }
 
     result.ok = result.reasons.length === 0;
+    result.status = result.ok ? 'verified' : 'rejected';
     if (!result.ok) this.log.debug('Token-Sicherheitsprüfung negativ', { mint, reasons: result.reasons });
     return this.store(mint, result);
   }
@@ -148,6 +139,8 @@ export class TokenSafetyChecker {
     } catch (e) {
       return {
         mint,
+        status: e instanceof DataError && e.kind === 'on-chain-verification' ? 'rejected' : 'unavailable',
+        meta: { ...observation('solana-rpc', Date.now(), mint, null), validation: e instanceof DataError && e.kind === 'on-chain-verification' ? 'valid' : 'unavailable' },
         ok: false,
         decimals: 0,
         isToken2022: false,

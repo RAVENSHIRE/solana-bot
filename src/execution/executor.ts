@@ -5,6 +5,8 @@ import { ESTIMATED_SWAP_COMPUTE_UNITS, SOL_MINT, type ExecMode, type Side } from
 import { JupiterClient, type JupiterQuote } from './jupiter-client';
 import { errorMessage } from '../utils/errors';
 import type { Logger } from '../utils/logger';
+import { checkTask } from '../data/core/request-scope';
+import type { ExecutionGuard } from './execution-guard';
 
 /** Jeder Swap ist SOL ↔ Token. `amountRaw` ist Lamports (BUY) bzw. Token-Rohbetrag (SELL). */
 export interface SwapRequest {
@@ -13,6 +15,7 @@ export interface SwapRequest {
   amountRaw: bigint;
   slippageBps: number;
   maxPriceImpactPct?: number;
+  validateBuyQuote?: (quote: JupiterQuote) => Promise<void>;
 }
 
 export interface SwapFill {
@@ -77,6 +80,7 @@ export interface TradeExecutor {
 }
 
 export interface ExecutorDeps {
+  guard?: ExecutionGuard;
   cfg: AppConfig;
   rpc: ConnectionManager;
   jupiter: JupiterClient;
@@ -119,7 +123,18 @@ export abstract class BaseExecutor implements TradeExecutor {
     if (impact > limit) {
       throw new SwapError(`Price Impact ${impact.toFixed(2)} % > Limit ${limit} %`, 'impact');
     }
+    await this.validateEntryQuote(req, quote);
+    this.ensureFresh(quote);
     return quote;
+  }
+
+  protected async validateEntryQuote(req: SwapRequest, quote: JupiterQuote): Promise<void> {
+    try { if (req.side === 'BUY') await req.validateBuyQuote?.(quote); }
+    catch { throw new SwapError('Fresh strategy quote check rejected the entry', 'quote'); }
+  }
+  protected ensureFresh(quote: JupiterQuote): void {
+    try { checkTask(); this.deps.jupiter.assertFresh(quote); }
+    catch { throw new SwapError('Executable quote expired or task cancelled', 'quote'); }
   }
 
   /**

@@ -1,5 +1,9 @@
+import { geckoSnapshot } from '../../data/geckoterminal';
+import { assessQuality, reconcile } from '../../data/services/market-intelligence';
+import { assertFresh } from '../../data/core/data-types';
+import { checkTask } from '../../data/core/request-scope';
 import { BaseStrategy, type ExitDecision, type StrategyContext } from '../base-strategy';
-import { DexScreenerClient, type DexPair } from '../../data/dexscreener';
+import { dexSnapshot, DexScreenerClient, type DexPair } from '../../data/dexscreener';
 import { BASE58_ADDRESS_REGEX, QUOTE_MINTS, type Candle, type Position } from '../../core/types';
 import { ema, last, mean, rsi } from '../../analysis/indicators';
 import { analyzeSupport, bullishDivergence, type SupportAnalysis } from '../../analysis/support';
@@ -95,7 +99,7 @@ export class ReversalSniperStrategy extends BaseStrategy {
     const candidates = await this.discover();
     this.pruneEvaluated();
     const shortlisted = candidates
-      .map((c) => ({ c, why: this.prefilter(c.pair) }))
+      .map((c) => { const why = this.prefilter(c.pair); if (why) this.ctx.data.record('prefilter-rejection', this.name, { mint: c.mint, pool: c.pair.pairAddress, reason: why }); return { c, why }; })
       .filter((x): x is { c: Candidate; why: null } => x.why === null)
       .map((x) => x.c)
       .filter((c) => !this.evaluatedAt.has(c.mint) && !portfolio.hasOpenPosition(c.mint) && !portfolio.isCoolingDown(c.mint))
@@ -116,6 +120,7 @@ export class ReversalSniperStrategy extends BaseStrategy {
         this.log.warn(`Analyse ${symbol} fehlgeschlagen`, { error: errorMessage(e) });
         continue;
       }
+      this.ctx.data.record('decision', this.name, { mint: cand.mint, pool: cand.pair.pairAddress, sources: cand.sources, result });
       const latency = Date.now() - started;
       if ('rejected' in result) {
         this.log.info(`✗ ${symbol}: ${result.rejected}`);
@@ -223,21 +228,27 @@ export class ReversalSniperStrategy extends BaseStrategy {
     if (bySource.size === 0) return [];
 
     const pairs = await dex.getPairsForTokens([...bySource.keys()]);
-    const best = DexScreenerClient.bestPairPerToken(pairs);
+    const selection = DexScreenerClient.selectPairs(pairs, Date.now(), this.ctx.cfg.data.maxPriceAgeMs);
+    this.ctx.data.record('pool-selection', this.name, { sources: [...bySource], selected: [...selection.selected].map(([mint, p]) => ({ mint, pool: p.pairAddress })), rejected: selection.rejected });
+    const best = selection.selected;
     return [...best.entries()].map(([mint, pair]) => ({ mint, pair, sources: bySource.get(mint) ?? [] }));
   }
 
   /** Günstige Vorfilter auf DexScreener-Daten (keine weiteren API-Calls). null = bestanden. */
   private prefilter(p: DexPair): string | null {
     const c = this.c;
-    const liq = p.liquidity?.usd ?? 0;
+    try { assertFresh(p.meta, this.ctx.cfg.data.maxPriceAgeMs); } catch { return 'DATA_QUALITY: stale price'; }
+    const liq = p.liquidity?.usd;
+    if (liq === null || liq === undefined) return 'DATA_QUALITY: unknown liquidity';
     if (liq < c.minLiquidityUsd) return 'Liquidität';
-    const mcap = p.marketCap ?? p.fdv ?? 0;
+    const mcap = p.marketCap;
+    if (mcap === null) return 'DATA_QUALITY: unknown market cap (FDV is separate)';
     if (mcap < c.minMcapUsd || mcap > c.maxMcapUsd) return 'Marktkapitalisierung';
     if (!p.pairCreatedAt || Date.now() - p.pairCreatedAt < c.minPairAgeHours * 3_600_000) return 'Pair zu jung';
-    const h24 = p.priceChange?.h24 ?? 0;
-    const h6 = p.priceChange?.h6 ?? 0;
-    const m5 = p.priceChange?.m5 ?? 0;
+    const h24 = p.priceChange?.h24;
+    const h6 = p.priceChange?.h6;
+    const m5 = p.priceChange?.m5;
+    if (h24 == null || h6 == null || m5 == null) return 'DATA_QUALITY: missing price changes';
     if (!(h24 <= -c.minH24DropPct || h6 <= -10)) return 'kein Abwärtstrend';
     if (m5 <= -4) return 'akuter Abverkauf';
     const tx = p.txns?.h1;
@@ -249,7 +260,12 @@ export class ReversalSniperStrategy extends BaseStrategy {
 
   private async analyze(cand: Candidate): Promise<Analysis | Rejection> {
     const c = this.c;
-    const candles = await this.ctx.gecko.getOhlcv(cand.pair.pairAddress, 'minute', OHLCV_AGGREGATE_MIN, OHLCV_LIMIT);
+    checkTask();
+    const series = await this.ctx.gecko.getOhlcvSeries(cand.pair.pairAddress, 'minute', OHLCV_AGGREGATE_MIN, OHLCV_LIMIT, cand.mint);
+    const quality = assessQuality(series, null, this.ctx.cfg.data.maxCandleAgeMs);
+    this.ctx.data.record('signal-input', this.name, { mint: cand.mint, sources: cand.sources, series, quality, pair: cand.pair });
+    if (!quality.adequate) return { rejected: `DATA_QUALITY: ${quality.reasons.join(', ')}` };
+    const candles = series.candles;
     if (candles.length < MIN_CANDLES) return { rejected: `zu wenig Kursdaten (${candles.length} Kerzen)` };
 
     const closes = candles.map((k) => k.c);
@@ -279,7 +295,10 @@ export class ReversalSniperStrategy extends BaseStrategy {
       return { rejected: `Chartstruktur schwach (${chartScore}/55)`, sparkline };
     }
 
-    const trades = await this.ctx.gecko.getTrades(cand.pair.pairAddress, 0);
+    const trades = await this.ctx.gecko.getTradeEvents(cand.pair.pairAddress, cand.mint);
+    const tradeQuality = assessQuality(series, trades, this.ctx.cfg.data.maxCandleAgeMs);
+    this.ctx.data.record('signal-input', this.name, { mint: cand.mint, trades, quality: tradeQuality });
+    if (!tradeQuality.adequate) return { rejected: `DATA_QUALITY: ${tradeQuality.reasons.join(', ')}` };
     const volume = analyzeVolumeQuality(trades);
     if (volume.tradeCount < 10) return { rejected: 'zu wenige Einzel-Trades für Volumenanalyse', sparkline };
     if (volume.washRatio > c.maxWashRatio) {
@@ -383,7 +402,20 @@ export class ReversalSniperStrategy extends BaseStrategy {
 
   private async enter(cand: Candidate, symbol: string, a: Analysis, summary: string, latencyMs: number): Promise<void> {
     const c = this.c;
-    const safety = await this.ctx.safety.safeCheck(cand.mint, { rejectMintAuthority: true });
+    // Refresh the selected pool after the potentially slow historical analysis.
+    this.ctx.data.cache.invalidate('dexscreener:tokens:');
+    this.ctx.data.cache.invalidate(`geckoterminal:pool:${cand.pair.pairAddress}`);
+    const fresh = (await this.ctx.dex.getPairsForTokens([cand.mint])).find(p => p.pairAddress === cand.pair.pairAddress);
+    if (!fresh) { this.ctx.data.record('entry-quality', this.name, { mint: cand.mint, reasons: ['SELECTED_POOL_UNAVAILABLE'] }); return; }
+    const gecko = await this.ctx.gecko.getPool(fresh.pairAddress);
+    const reasons = reconcile(dexSnapshot(fresh), geckoSnapshot(gecko), this.ctx.cfg.data.maxPriceAgeMs,
+      this.ctx.cfg.data.maxPriceDifferencePct, this.ctx.cfg.data.maxLiquidityDifferencePct);
+    const prefilter = this.prefilter(fresh); if (prefilter) reasons.push(prefilter);
+    this.ctx.data.record('entry-quality', this.name, { mint: cand.mint, reasons });
+    if (reasons.length) { this.log.info('Entry blocked by data quality', { mint: cand.mint, reasons }); return; }
+    cand.pair = fresh;
+    const safety = await this.ctx.safety.safeCheck(cand.mint, { rejectMintAuthority: true, fresh: true });
+    this.ctx.data.record('token-verification', this.name, safety);
     if (!safety.ok) {
       this.log.info(`✗ ${symbol}: Sicherheitsprüfung – ${safety.reasons.join('; ')}`);
       this.report(cand, symbol, 'SKIP', `Skip: Sicherheit – ${safety.reasons[0] ?? 'unbekannt'}`, a, latencyMs, a.sparkline, safety);
@@ -440,17 +472,28 @@ export class ReversalSniperStrategy extends BaseStrategy {
   override async manage(): Promise<void> {
     const own = this.ctx.portfolio.positionsFor(this.name);
     if (own.length === 0) return;
+    this.lastPriceUsd.clear();
+    // Executable-quote exits run before optional external analytics.
+    await this.manageOpenPositions();
     // Aktuelle USD-Preise (ein Batch-Call) für den Support-Bruch-Exit
     try {
       const pairs = await this.ctx.dex.getPairsForTokens(own.map((p) => p.mint));
-      for (const [mint, pair] of DexScreenerClient.bestPairPerToken(pairs)) {
+      for (const pos of own) {
+        const mint = pos.mint;
+        const pair = pairs.find(p => p.pairAddress === pos.pairAddress && p.baseToken.address === mint);
+        if (!pair) continue;
+        assertFresh(pair.meta, this.ctx.cfg.data.maxPriceAgeMs);
         const px = Number(pair.priceUsd ?? NaN);
         if (Number.isFinite(px) && px > 0) this.lastPriceUsd.set(mint, px);
       }
     } catch (e) {
       this.log.debug('Preis-Update fehlgeschlagen', { error: errorMessage(e) });
     }
-    await this.manageOpenPositions();
+    for (const pos of this.ctx.portfolio.positionsFor(this.name)) {
+      if (pos.valuationMisses !== 0 || Date.now() - pos.lastCheckedAt > this.ctx.cfg.data.maxPriceAgeMs) continue;
+      const exit = await this.customExit(pos, pos.lastValueLamports);
+      if (exit) await this.closePosition(pos, exit.reason, exit.emergency);
+    }
   }
 
   /** Zusatz-Exit: Support-Zone per Schlusskurs deutlich unterschritten → These ungültig. */

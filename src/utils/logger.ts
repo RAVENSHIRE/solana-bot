@@ -1,3 +1,4 @@
+import { redact, redactText } from './redact';
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 export type LogFormat = 'pretty' | 'json';
 export type LogContext = Record<string, unknown>;
@@ -78,7 +79,8 @@ export class Logger {
   private write(level: LogLevel, msg: string, ctx?: LogContext): void {
     if (LEVELS[level] < LEVELS[options.level]) return;
     const ts = new Date().toISOString();
-    const merged: LogContext = { ...this.base, ...(ctx ?? {}) };
+    msg = redactText(msg);
+    const merged = redact({ ...this.base, ...(ctx ?? {}) }) as LogContext;
     const stream = level === 'error' || level === 'warn' ? process.stderr : process.stdout;
 
     if (options.format === 'json') {
