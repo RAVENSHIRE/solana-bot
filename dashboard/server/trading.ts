@@ -32,8 +32,7 @@ export class TradingService {
       const live = this.desk.engines.LIVE;
       // A lost browser session ends the LIVE session; it is never resumed automatically.
       if (live.scanner && !this.authorized()) { live.stop('Phantom session ended or browser closed'); this.broker.cancel(); }
-      for (const engine of Object.values(this.desk.engines))
-        if (engine.scanner && !engine.busy && (engine.nextScanAt ?? 0) <= Date.now()) void engine.pulse();
+      for (const engine of Object.values(this.desk.engines)) engine.tick();
     }, 1000);
     this.timer.unref();
   }

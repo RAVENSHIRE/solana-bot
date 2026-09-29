@@ -105,7 +105,8 @@ test('gates show actual vs required; ultra-early tokens are discovered, never au
   const onchain = { safety: { mint: MINT, status: 'verified' as const, meta: normalizeDexPairs([pairRaw()], NOW)[0]!.meta, ok: true, decimals: 6, isToken2022: false,
     hasMintAuthority: false, hasFreezeAuthority: false, reasons: [], warnings: [] },
     holders: { supplyRaw: 10n ** 15n, decimals: 6, walletTop10Pct: 20, largestWalletPct: 2, programOwnedPct: 30, accountsInspected: 20 }, developer: null, flow: null, errors: {} };
-  const base = { found: found(), pair: pair(), tier: 'TRENDING' as const, onchain, onchainAt: NOW, social: null, watch, now: NOW, maxWashRatio: 0.45 };
+  const launch = { launchedAt: NOW - 2 * 86_400_000, poolsChecked: 1, curvePool: null, migratedAfterSec: null, earlyHighMcUsd: 20_000, firstCandleMultiple: 1.2, windowMin: 5 };
+  const base = { found: found(), pair: pair(), tier: 'TRENDING' as const, onchain, onchainAt: NOW, social: null, watch, now: NOW, maxWashRatio: 0.45, launch };
   const qualified = analyze({ ...base, metrics: pairMetrics(base.pair, NOW) });
   assert.equal(qualified.status, 'QUALIFIED'); assert.equal(qualified.momentumStreak, 2);
   const thin = pair({ volume: { m5: 8_200, h1: 120_000 } });
@@ -119,6 +120,10 @@ test('gates show actual vs required; ultra-early tokens are discovered, never au
   assert.equal(early.status, 'WATCHLIST'); assert.notEqual(early.classification, 'QUALIFIED');
   const fresh = analyze({ ...base, watch: { ...watch, momentumStreak: 0 }, metrics: pairMetrics(base.pair, NOW) });
   assert.equal(fresh.status, 'WAITING'); assert.match(fresh.reasons[0]!, /Momentum confirmed in 1\/2/);
+  const insider = analyze({ ...base, launch: { ...launch, curvePool: POOL, migratedAfterSec: 0, earlyHighMcUsd: 446_271, firstCandleMultiple: 9 }, metrics: pairMetrics(base.pair, NOW) });
+  assert.equal(insider.status, 'FILTERED');
+  assert.match(insider.gates.find(g => g.key === 'fairLaunch')!.actual, /graduated 0 s after launch.*\$446,271 within first 5 min/);
+  assert.equal(analyze({ ...base, launch: null, metrics: pairMetrics(base.pair, NOW) }).status, 'WATCHLIST', 'unknown launch history never qualifies');
   const curvePair = pair({ dexId: 'pumpfun', liquidity: null, marketCap: 6_000 });
   const curve = analyze({ ...base, tier: 'ULTRA_EARLY', pair: curvePair, metrics: pairMetrics(curvePair, NOW) });
   assert.equal(curve.gates.find(g => g.key === 'liquidity')!.actual, 'bonding curve — no AMM pool yet');
@@ -157,8 +162,8 @@ test('process lock: a crashed owner is recovered; a live or unreadable owner sti
 
 // ---------------------------------------------------------------- full pipeline against a simulated network
 
-function world(patch: Record<string, unknown> = {}) {
-  const w = { priceFactor: 1, extraRent: 0, native: 45_000_000, last: null as null | { side: 'BUY' | 'SELL'; inAmount: bigint; outAmount: bigint }, sends: 0, signRequests: 0 };
+function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' = 'fair') {
+  const w = { priceFactor: 1, extraRent: 0, liquidity: 50_000, native: 45_000_000, last: null as null | { side: 'BUY' | 'SELL'; inAmount: bigint; outAmount: bigint }, sends: 0, signRequests: 0 };
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
   const solPair = { chainId: 'solana', dexId: 'orca', pairAddress: SOL_POOL, baseToken: { address: SOL_MINT, symbol: 'SOL' }, quoteToken: { address: USDC_MINT, symbol: 'USDC' },
     priceUsd: '100', liquidity: { usd: 10_000_000 }, marketCap: 5e10, fdv: 6e10, pairCreatedAt: NOW - 1e10, txns: { h1: { buys: 5, sells: 5 } } };
@@ -168,9 +173,20 @@ function world(patch: Record<string, unknown> = {}) {
       if (url.pathname.startsWith('/token-')) return json([{ chainId: 'solana', tokenAddress: MINT, description: 'Alpha does things', totalAmount: 100,
         links: [{ type: 'twitter', url: 'https://x.com/alphaproj' }, { label: 'Website', url: 'https://alpha.example' }] }]);
       const mints = url.pathname.split('/').pop()!.split(',');
-      return json([...(mints.includes(SOL_MINT) ? [solPair] : []), ...(mints.includes(MINT) ? [pairRaw({ pairCreatedAt: NOW - 2 * 86_400_000, ...patch })] : [])]);
+      return json([...(mints.includes(SOL_MINT) ? [solPair] : []), ...(mints.includes(MINT) ? [pairRaw({ pairCreatedAt: NOW - 2 * 86_400_000, liquidity: { usd: w.liquidity }, ...patch })] : [])]);
     }
-    if (url.hostname === 'api.geckoterminal.com') return url.pathname.includes('/trades') ? json({}, 404) : json({ data: [] });
+    if (url.hostname === 'api.geckoterminal.com') {
+      const created = Math.floor((NOW - 2 * 86_400_000) / 60_000) * 60;
+      const geckoPool = (address: string, dex: string) => ({ id: `solana_${address}`, attributes: { address, name: 'ABC / SOL', base_token_price_usd: '0.0005',
+        reserve_in_usd: '50000', market_cap_usd: null, fdv_usd: '500000', pool_created_at: new Date(created * 1000).toISOString(), volume_usd: { h1: '1000', h24: '9000' } },
+        relationships: { base_token: { data: { id: `solana_${MINT}` } }, quote_token: { data: { id: `solana_${SOL_MINT}` } }, dex: { data: { id: dex } } } });
+      if (url.pathname.endsWith(`/tokens/${MINT}/pools`)) return json({ data: launch === 'fair' ? [geckoPool(POOL, 'raydium')] : [geckoPool(SOL_POOL, 'pump-fun'), geckoPool(POOL, 'pumpswap')] });
+      if (url.pathname.includes('/ohlcv/minute')) {
+        const top = launch === 'fair' ? 0.00002 : 0.00045;
+        return json({ data: { attributes: { ohlcv_list: [[created, 0.00001, top, 0.00001, top, 5000], [created + 60, top, top, top, top, 900]] } } });
+      }
+      return url.pathname.includes('/trades') ? json({}, 404) : json({ data: [] });
+    }
     if (url.pathname.endsWith('/quote')) {
       const inputMint = url.searchParams.get('inputMint')!, outputMint = url.searchParams.get('outputMint')!, amount = BigInt(url.searchParams.get('amount')!);
       const slip = Number(url.searchParams.get('slippageBps')), buy = inputMint === SOL_MINT;
@@ -217,7 +233,7 @@ function world(patch: Record<string, unknown> = {}) {
   };
   const rpc = { execute: async (_label: string, fn: (c: typeof conn) => unknown) => fn(conn) };
   const cfg = loadConfig({ RPC_ENDPOINTS: 'https://rpc.example.invalid', JUPITER_API_KEY: 'synthetic-test-key', SIMULATION_MODE: 'true', JUPITER_MAX_RPS: '100' }, 'PHANTOM');
-  const data = new DataRuntime(log, { ...defaultDataSettings, dexRps: 100, geckoRps: 100 }, undefined, fetcher);
+  const data = new DataRuntime(log, { ...defaultDataSettings, dexRps: 100, geckoRps: 100, cacheEnabled: false }, undefined, fetcher);
   const shared = { cfg, capital: deskCapital({}), logger: log, rpc: rpc as never, jupiter: new JupiterClient(cfg.jupiter, log, data, fetcher),
     dex: new DexScreenerClient(log, data), gecko: new GeckoTerminalClient(log, data), safety: new TokenSafetyChecker(rpc as never, log),
     x: new XClient(null), authorized: () => true, website: async () => site };
@@ -306,6 +322,38 @@ test('venue account rent within the reserved budget passes and is booked; beyond
       else assert.ok(engine.events.list().some(e => /SIMULATED_BUY_MISMATCH/.test(e.message)));
     } finally { await fs.rm(dir, { recursive: true, force: true }); }
   }
+});
+
+test('an insider launch (instant graduation, $446K first candles) is never entered, not even by the drill', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-insider-')), { shared } = world({}, 'insider');
+  try {
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    engine.start(); engine.drill = true; await engine.pulse(); await engine.pulse(); await engine.pulse();
+    const view = engine.status({ connected: true, address: owner.toBase58() });
+    assert.equal(view.candidates[0]!.status, 'FILTERED'); assert.equal(view.positions.length, 0);
+    assert.ok(engine.events.list().some(e => e.stage === 'FILTERED' && /Fair launch: graduated 0 s after launch/.test(e.message)));
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('exits are never blocked by TEST cash, and a liquidity collapse exits before the stop-loss', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-exit-')), { w, shared } = world();
+  try {
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    engine.start(); await engine.pulse(); await engine.pulse();
+    assert.equal(engine.status({ connected: true, address: owner.toBase58() }).positions.length, 1);
+    // Drain TEST cash below zero: the exit must still go through.
+    const ledgerFile = path.join(dir, 'ledger-PAPER.json');
+    await engine.persist();
+    const state = JSON.parse(await fs.readFile(ledgerFile, 'utf8')); state.paperCashLamports = '-1';
+    (engine as unknown as { ledgers: Map<string, { state: unknown }> }).ledgers.get('PAPER')!.state = state;
+    w.liquidity = 20_000; // -60% since entry; price unchanged, so no stop-loss yet
+    await engine.pulse();
+    const view = engine.status({ connected: true, address: owner.toBase58() });
+    assert.equal(view.positions.length, 0);
+    assert.ok(engine.events.list().some(e => e.stage === 'EXIT' && /LIQUIDITY_DROP \$20,000 vs \$50,000/.test(e.message)));
+    assert.ok(!engine.events.list().some(e => /TEST_CAPITAL_INSUFFICIENT/.test(e.message)));
+    assert.equal(view.ledger[0]!.side, 'SELL');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
 test('LIVE reaches pre-flight and the Phantom signature request, and nothing is submitted without a signature', async () => {

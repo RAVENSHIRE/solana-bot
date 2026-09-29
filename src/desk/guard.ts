@@ -116,6 +116,7 @@ export class DeskGuard implements ExecutionGuard {
     d.event('QUOTE', `${buy ? 'Buy' : 'Sell'} quote ${buy ? sol(req.amountRaw) : `${q.inAmount} raw`} → expected ${buy ? `${q.outAmount} raw` : sol(BigInt(q.outAmount))}, minimum ${buy ? q.otherAmountThreshold : sol(BigInt(q.otherAmountThreshold))}`,
       { provider: 'Jupiter', impactPct: Number(impactPct.toFixed(4)), slippageBps: q.slippageBps });
     this.quoted = true;
+    this.lastOrder = { quote: q, fee: BASE_FEE_LAMPORTS, priority: 0n, rent: 0n, routerFee: this.routerFee(q, req.side), route };
     d.event('ROUTE', `Jupiter aggregator via ${route}`, { hops: q.routePlan.length, ammKeys: q.routePlan.map(s => s.swapInfo.ammKey).join(',') });
     const s = await this.snapshot();
     const inAmt = BigInt(q.inAmount), out = BigInt(q.outAmount), min = BigInt(q.otherAmountThreshold);
@@ -137,19 +138,28 @@ export class DeskGuard implements ExecutionGuard {
     const maxPriority = !capped || remainder >= d.configuredPriorityCap ? d.configuredPriorityCap : remainder;
     const priority = await recentPriorityFee(d.rpc, maxPriority);
     const fee = BASE_FEE_LAMPORTS + priority;
-    this.checkFunds(buy ? inAmt : 0n, fee, s);
+    this.checkFunds(buy ? inAmt : 0n, fee, s, buy);
     this.authorized.set(req, { snapshot: s, priority, fee, notional, slip, impact, routerFee, dragLamports: slip + impact + routerFee + fee });
     this.lastOrder = { quote: q, fee, priority, rent: buy ? s.ataRent : 0n, routerFee, route };
     return { priorityFeeCapLamports: exactNumber(priority) };
   }
 
-  private checkFunds(spend: bigint, fee: bigint, s: WalletSnapshot): void {
-    const d = this.d, rent = s.ataRent;
+  /**
+   * Entries must be fully funded, including the account-rent budget a venue may charge. An exit only needs its
+   * network fee from the wallet: it is never refused because TEST cash is low, since selling returns capital.
+   */
+  private checkFunds(spend: bigint, fee: bigint, s: WalletSnapshot, buy: boolean): void {
+    const d = this.d;
+    if (!buy) {
+      if (d.mode === 'LIVE' && s.native < fee) throw new DeskReject('FEE_UNAFFORDABLE', `wallet ${sol(s.native)} cannot pay ${sol(fee)}`);
+      return;
+    }
+    const rent = s.ataRent + s.tempRent;
     if (d.paperCashLamports !== null && d.paperCashLamports - spend - fee - rent < 0n)
-      throw new DeskReject('TEST_CAPITAL_INSUFFICIENT', `${sol(d.paperCashLamports)} available, ${sol(spend + fee + rent)} required`);
+      throw new DeskReject('TEST_CAPITAL_INSUFFICIENT', `${sol(d.paperCashLamports)} available, ${sol(spend + fee + rent)} required incl. account-rent budget`);
     // The wallet itself must also carry the order: TEST simulates against it, LIVE spends from it.
-    if (s.native - spend - fee - rent - s.tempRent < d.reserveLamports)
-      throw new DeskReject('SOL_RESERVE_FLOOR', `wallet ${sol(s.native)}; order ${sol(spend)} + fees ${sol(fee)} + rent ${sol(rent + s.tempRent)} + reserve ${sol(d.reserveLamports)}`);
+    if (s.native - spend - fee - rent < d.reserveLamports)
+      throw new DeskReject('SOL_RESERVE_FLOOR', `wallet ${sol(s.native)}; order ${sol(spend)} + fees ${sol(fee)} + rent ${sol(rent)} + reserve ${sol(d.reserveLamports)}`);
   }
 
   async beforeSign(req: SwapRequest, q: JupiterQuote, tx: VersionedTransaction, built: JupiterSwapResponse): Promise<void> {
@@ -164,7 +174,7 @@ export class DeskGuard implements ExecutionGuard {
     if (this.lastOrder) this.lastOrder.fee = a.fee;
     if (buy && d.enforceDrag !== false && a.dragLamports * 10_000n > a.notional * d.maxDragBps) throw new DeskReject('FEE_CAP', `actual fee ${sol(a.fee)} raises drag above ${Number(d.maxDragBps) / 100}%`);
     const s = await this.snapshot();
-    this.checkFunds(buy ? req.amountRaw : 0n, a.fee, s);
+    this.checkFunds(buy ? req.amountRaw : 0n, a.fee, s, buy);
     const sim = await d.rpc.execute('desk:simulate-unsigned', c => c.simulateTransaction(tx, { sigVerify: false, commitment: 'confirmed',
       accounts: { encoding: 'base64', addresses: [d.owner.toBase58(), s.tokenAccount.toBase58(), ...s.others.map(k => k.toBase58())] } }));
     const fail = (code: string, detail: string): never => {
@@ -197,7 +207,7 @@ export class DeskGuard implements ExecutionGuard {
       fail('SIMULATED_BUY_MISMATCH', `SOL ${sol(solDelta)}, tokens +${tokenDelta} (minimum ${q.otherAmountThreshold})`);
     if (!buy && (-tokenDelta !== req.amountRaw || solDelta < BigInt(q.otherAmountThreshold) - a.fee))
       fail('SIMULATED_SELL_MISMATCH', `tokens ${tokenDelta}, SOL ${sol(solDelta)}`);
-    if (native < d.reserveLamports) fail('PROJECTED_RESERVE_FLOOR', `wallet would hold ${sol(native)}`);
+    if (buy && native < d.reserveLamports) fail('PROJECTED_RESERVE_FLOOR', `wallet would hold ${sol(native)}`);
     this.lastSimulation = { status: 'PASSED', detail: `SOL ${sol(solDelta)} · tokens ${tokenDelta >= 0n ? '+' : ''}${tokenDelta}`, solDelta, tokenDelta };
     d.event('SIMULATION', `PASSED — ${this.lastSimulation.detail}`, { solDelta: String(solDelta), tokenDelta: String(tokenDelta), fee: String(a.fee) });
     a.message = Buffer.from(tx.message.serialize()).toString('base64');

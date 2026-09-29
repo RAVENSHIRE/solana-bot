@@ -14,7 +14,7 @@ function engine(mode: DeskMode) {
   const e = { mode, scanner: false, execution: false, busy: false, nextScanAt: null as number | null, pulses: 0,
     start() { e.scanner = true; e.execution = true; }, stop() { e.scanner = false; e.execution = false; },
     pause() { e.execution = false; }, resume() { if (!e.scanner) throw new DeskReject('SCANNER_OFF'); e.execution = true; },
-    pulse: async () => { e.pulses++; }, settled: async () => {}, persist: async () => {},
+    pulse: async () => { e.pulses++; }, tick: () => {}, settled: async () => {}, persist: async () => {}, events: { add: () => {} },
     status: (wallet: { connected: boolean; address: string | null }) => ({ mode, scanner: e.scanner, execution: e.execution, wallet }) };
   return e;
 }

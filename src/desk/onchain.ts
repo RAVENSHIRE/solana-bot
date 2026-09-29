@@ -65,6 +65,20 @@ export async function developer(rpc: ConnectionManager, mint: string, supplyRaw:
   return { creator: creator.toBase58(), heldPct: exactNumber(held * 1_000_000n / supplyRaw) / 10_000, source: 'pump.fun bonding-curve creator field' };
 }
 
+/** Current share of supply held by a known creator (for the dev-selling exit). */
+export async function creatorHolding(rpc: ConnectionManager, creator: string, mint: string): Promise<number> {
+  const key = new PublicKey(mint);
+  const supply = await rpc.execute('desk:supply', c => c.getTokenSupply(key, 'confirmed'));
+  const supplyRaw = BigInt(parse(z.string().regex(/^\d+$/), supply.value.amount, 'solana-rpc'));
+  const owned = await rpc.execute('desk:creator-balance', c => c.getParsedTokenAccountsByOwner(new PublicKey(creator), { mint: key }, 'confirmed'));
+  let held = 0n;
+  for (const row of owned.value) {
+    const amount = z.object({ parsed: z.object({ info: z.object({ tokenAmount: z.object({ amount: rawAmount }) }) }) }).safeParse(row.account.data);
+    if (amount.success) held += amount.data.parsed.info.tokenAmount.amount;
+  }
+  return supplyRaw > 0n ? exactNumber(held * 1_000_000n / supplyRaw) / 10_000 : 0;
+}
+
 export async function tradeFlow(gecko: GeckoTerminalClient, pool: string, mint: string): Promise<TradeFlow> {
   const trades = await gecko.getTradeEvents(pool, mint);
   const q = analyzeVolumeQuality(trades);

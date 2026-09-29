@@ -35,6 +35,19 @@ export const DESK = Object.freeze({
     maxDeveloperPct: 5,
     minLiquidityToMarketCap: 0.03,
     maxLiquidityDropPct: 25,
+    /** Fair launch: a curve graduating sooner was bought out at creation (bundled / insider launch). */
+    minGraduationSec: 300,
+    /** Fair launch: highest market cap allowed within the first 5 minutes after launch. */
+    maxLaunchMarketCapUsd: 250_000,
+  },
+  exits: {
+    /** Positions are re-valued this often, independent of the discovery scan. */
+    positionCheckMs: 5_000,
+    /** Emergency exit when pool liquidity falls this far below its level at entry. */
+    liquidityDropExitPct: 30,
+    /** Emergency exit when the pump.fun creator's holding falls by this many percentage points of supply. */
+    creatorSellExitPts: 0.5,
+    creatorCheckMs: 30_000,
   },
   momentum: { minObservations: 2, minAcceleration: 1, minPriceChange5mPct: 0 },
   /** Candidates kept in memory and on the status API. */

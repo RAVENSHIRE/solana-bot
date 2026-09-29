@@ -13,6 +13,8 @@ export class EventLog {
   private events: DeskEvent[] = [];
   private next = 1;
   private dirty = false;
+  /** Every event is also appended to a JSONL history so long runs are reviewable beyond the on-screen window. */
+  private unlogged: DeskEvent[] = [];
   constructor(readonly mode: DeskMode, private readonly file: string | null, private readonly now: () => number = Date.now) {}
 
   async load(): Promise<void> {
@@ -29,7 +31,7 @@ export class EventLog {
   add(stage: Stage, message: string, context: { mint?: string | null; symbol?: string | null; detail?: DeskEvent['detail'] } = {}): DeskEvent {
     const event: DeskEvent = { id: this.next++, at: this.now(), mode: this.mode, stage, mint: context.mint ?? null,
       symbol: context.symbol ?? null, message, ...(context.detail ? { detail: context.detail } : {}) };
-    this.events.push(event);
+    this.events.push(event); this.unlogged.push(event);
     if (this.events.length > DESK.maxEvents) this.events.splice(0, this.events.length - DESK.maxEvents);
     this.dirty = true;
     return event;
@@ -41,5 +43,10 @@ export class EventLog {
     if (!this.file || !this.dirty) return;
     this.dirty = false;
     await atomicWriteFile(this.file, JSON.stringify(this.events));
+    const rows = this.unlogged.splice(0), history = this.file.replace(/\.json$/, '.log.jsonl');
+    if (!rows.length) return;
+    const size = await fs.stat(history).then(st => st.size, () => 0);
+    if (size > 20 * 1024 * 1024) await fs.rename(history, `${history}.1`).catch(() => undefined);
+    await fs.appendFile(history, rows.map(r => JSON.stringify(r)).join('\n') + '\n');
   }
 }

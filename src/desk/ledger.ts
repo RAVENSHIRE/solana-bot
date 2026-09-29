@@ -9,7 +9,8 @@ const finite = z.number().finite();
 const position = z.object({ id: z.string(), mint: z.string(), symbol: z.string().nullable(), decimals: z.number().int().min(0).max(255),
   openedAt: z.number().int(), qtyRaw: raw, costLamports: raw, costUsd: finite, entryPriceUsd: finite.nullable(), peakValueLamports: raw,
   lastValueLamports: raw.nullable(), lastPriceUsd: finite.nullable(), router: z.string(), route: z.string(), entrySignature: z.string().nullable(),
-  rentLamports: raw, pairAddress: z.string() }).strict();
+  rentLamports: raw, pairAddress: z.string(), entryLiquidityUsd: finite.nullable().optional(), creator: z.string().nullable().optional(),
+  creatorPctAtEntry: finite.nullable().optional() }).strict();
 const entry = z.object({ id: z.string(), at: z.number().int(), mode: z.enum(['PAPER', 'LIVE']), txSignature: z.string().nullable(), mint: z.string(),
   symbol: z.string().nullable(), router: z.string(), route: z.string(), side: z.enum(['BUY', 'SELL']), quantity: z.string(), qtyRaw: raw,
   entryPriceUsd: finite.nullable(), exitPriceUsd: finite.nullable(), grossPnlUsd: finite.nullable(), networkFeeLamports: raw,
@@ -25,6 +26,7 @@ export interface Fill {
   side: 'BUY' | 'SELL'; mint: string; symbol: string | null; decimals: number; pairAddress: string;
   inAmountRaw: bigint; outAmountRaw: bigint; solDeltaLamports: bigint; feeLamports: bigint; rentLamports: bigint;
   router: string; route: string; routerFeeUsd: number | null; txSignature: string | null; solUsd: number; at: number; note: string | null;
+  entry?: { liquidityUsd: number | null; creator: string | null; creatorPct: number | null };
 }
 
 export const uiAmount = (rawAmount: bigint, decimals: number): string => {
@@ -78,7 +80,8 @@ export class DeskLedger {
       s.positions.push({ id: `${f.at}-${f.mint.slice(0, 6)}`, mint: f.mint, symbol: f.symbol, decimals: f.decimals, openedAt: f.at,
         qtyRaw: String(f.outAmountRaw), costLamports: String(cost), costUsd: lamportsUsd(cost, f.solUsd), entryPriceUsd: qty > 0 ? inputUsd / qty : null,
         peakValueLamports: String(f.inAmountRaw), lastValueLamports: null, lastPriceUsd: null, router: f.router, route: f.route,
-        entrySignature: f.txSignature, rentLamports: String(f.rentLamports), pairAddress: f.pairAddress });
+        entrySignature: f.txSignature, rentLamports: String(f.rentLamports), pairAddress: f.pairAddress,
+        entryLiquidityUsd: f.entry?.liquidityUsd ?? null, creator: f.entry?.creator ?? null, creatorPctAtEntry: f.entry?.creatorPct ?? null });
       entryRow = this.row(f, status, { quantity: uiAmount(f.outAmountRaw, f.decimals), qtyRaw: f.outAmountRaw, entryPriceUsd: qty > 0 ? inputUsd / qty : null,
         exitPriceUsd: null, grossPnlUsd: null, netPnlUsd: null, feeUsd });
       if (s.mode === 'PAPER') s.paperCashLamports = String(BigInt(s.paperCashLamports ?? '0') - f.inAmountRaw - fee - f.rentLamports);

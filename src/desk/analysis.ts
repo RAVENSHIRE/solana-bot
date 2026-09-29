@@ -2,6 +2,7 @@ import type { DexPair } from '../data/dexscreener';
 import { DESK } from './config';
 import type { Discovered } from './discovery';
 import type { OnchainEvidence } from './onchain';
+import type { LaunchCheck } from './launch';
 import type { AuthenticityResult, WebsiteCheck, XAccount, XLink } from './social';
 import type { Candidate, CandidateMetrics, CandidateStatus, Classification, ComponentScore, Evidence, EvidenceKind,
   GateResult, ScoreFactor, Tier } from './types';
@@ -14,6 +15,7 @@ export interface SocialEvidence { website: WebsiteCheck; link: XLink; account: X
 export interface AnalysisInput {
   found: Discovered; pair: DexPair; metrics: CandidateMetrics; tier: Tier; onchain: OnchainEvidence | null; onchainAt: number | null;
   social: SocialEvidence | null; watch: WatchState; now: number; maxWashRatio: number;
+  launch?: LaunchCheck | null;
 }
 
 const usd = (n: number | null) => n === null ? 'UNKNOWN' : `$${n >= 1000 ? Math.round(n).toLocaleString('en-US') : n.toFixed(2)}`;
@@ -44,6 +46,14 @@ function evidenceList(i: AnalysisInput): Evidence[] {
   add('OBSERVED', 'xPosts7d', 'X posts (7 days, of last 10)', s?.auth.posts7d ?? null, String(s?.auth.posts7d), 'X API', s?.at ?? null);
   add('OBSERVED', 'mintAuthority', 'Mint authority', o?.safety ? (o.safety.hasMintAuthority ? 'ACTIVE' : 'REVOKED') : null, o?.safety?.hasMintAuthority ? 'ACTIVE' : 'REVOKED', 'Solana RPC', i.onchainAt);
   add('OBSERVED', 'freezeAuthority', 'Freeze authority', o?.safety ? (o.safety.hasFreezeAuthority ? 'ACTIVE' : 'REVOKED') : null, o?.safety?.hasFreezeAuthority ? 'ACTIVE' : 'REVOKED', 'Solana RPC', i.onchainAt);
+  const L = i.launch ?? null;
+  add('OBSERVED', 'launch', 'Launch', L ? new Date(L.launchedAt).toISOString() : null,
+    L ? `${new Date(L.launchedAt).toISOString().slice(0, 16).replace('T', ' ')} UTC · ${L.poolsChecked} pool(s)` : '', 'GeckoTerminal pool history', null);
+  add('DERIVED', 'graduation', 'Curve → migration time', L?.migratedAfterSec ?? null,
+    L?.migratedAfterSec == null ? '' : L.migratedAfterSec < 120 ? `${Math.round(L.migratedAfterSec)} s` : `${(L.migratedAfterSec / 60).toFixed(1)} min`,
+    'pool creation times', null, L && L.migratedAfterSec === null ? (L.curvePool ? 'still on the bonding curve' : 'no pump.fun curve (other launch venue)') : undefined);
+  add('DERIVED', 'launchMc', `Market cap high, first ${L?.windowMin ?? 5} min`, L?.earlyHighMcUsd ?? null, usd(L?.earlyHighMcUsd ?? null), 'first candles × supply', null,
+    L?.firstCandleMultiple ? `first candle ${L.firstCandleMultiple.toFixed(1)}× open→high` : undefined);
   add('OBSERVED', 'boosts', 'DexScreener boost amount', i.found.boostAmount, String(i.found.boostAmount), 'DexScreener boosts', at);
   // Derived
   add('DERIVED', 'buySell', 'Buy/sell ratio (5m)', m.buySellRatio5m, num(m.buySellRatio5m), 'buys ÷ sells', at);
@@ -97,10 +107,23 @@ export function gates(i: AnalysisInput): GateResult[] {
     // Needs a previous observation; the first scan cannot fail it, and momentum confirmation already requires a second.
     gate('liquidityDrop', 'Liquidity change since last scan', liqDrop, (v: number) => v < g.maxLiquidityDropPct,
       liqDrop === null ? 'first observation' : `${liqDrop > 0 ? '-' : '+'}${Math.abs(liqDrop).toFixed(1)}%`, `drop < ${g.maxLiquidityDropPct}%`, liqDrop !== null),
+    fairLaunch(i.launch ?? null),
     // Not every venue exposes a creator; these two flag risk when known and never block on absence.
     gate('developer', 'Developer allocation', m.developerPct, (v: number) => v <= g.maxDeveloperPct, pct(m.developerPct, 2), `≤ ${g.maxDeveloperPct}%`, m.developerPct !== null),
     gate('clustering', 'Wallet clustering / wash volume', m.washRatio, (v: number) => v <= i.maxWashRatio, pct(m.washRatio === null ? null : m.washRatio * 100), `≤ ${Math.round(i.maxWashRatio * 100)}%`, m.washRatio !== null),
   ];
+}
+
+function fairLaunch(L: LaunchCheck | null): GateResult {
+  const g = DESK.gates, required = `graduation ≥ ${g.minGraduationSec / 60} min after launch; < ${usd(g.maxLaunchMarketCapUsd)} in first 5 min`;
+  if (!L) return { key: 'fairLaunch', label: 'Fair launch', status: 'UNKNOWN', actual: 'launch history not checked yet', required, blocking: true };
+  const problems: string[] = [];
+  if (L.migratedAfterSec !== null && L.migratedAfterSec < g.minGraduationSec)
+    problems.push(`graduated ${Math.round(L.migratedAfterSec)} s after launch (curve bought out at creation)`);
+  if (L.earlyHighMcUsd !== null && L.earlyHighMcUsd >= g.maxLaunchMarketCapUsd) problems.push(`${usd(L.earlyHighMcUsd)} within first ${L.windowMin} min`);
+  if (problems.length) return { key: 'fairLaunch', label: 'Fair launch', status: 'FAIL', actual: problems.join('; '), required, blocking: true };
+  if (L.earlyHighMcUsd === null) return { key: 'fairLaunch', label: 'Fair launch', status: 'UNKNOWN', actual: 'early market cap unknown (supply or candles missing)', required, blocking: true };
+  return { key: 'fairLaunch', label: 'Fair launch', status: 'PASS', actual: `${usd(L.earlyHighMcUsd)} in first ${L.windowMin} min${L.migratedAfterSec !== null ? `; graduated after ${(L.migratedAfterSec / 60).toFixed(1)} min` : ''}`, required, blocking: true };
 }
 
 export function scores(i: AnalysisInput, gateList: GateResult[]): ComponentScore[] {
@@ -197,7 +220,7 @@ export function analyze(i: AnalysisInput): Candidate {
   }
   if (i.tier === 'ULTRA_EARLY') {
     // Discovery first: an early token is classified, and only enters the entry path once every hard gate passes.
-    const highRisk = safetyFail || (m.top10WalletPct ?? 0) > DESK.gates.maxTop10WalletPct || (m.developerPct ?? 0) > DESK.gates.maxDeveloperPct ||
+    const highRisk = safetyFail || gateList.some(g => g.key === 'fairLaunch' && g.status === 'FAIL') || (m.top10WalletPct ?? 0) > DESK.gates.maxTop10WalletPct || (m.developerPct ?? 0) > DESK.gates.maxDeveloperPct ||
       i.social?.auth.authenticity === 'SUSPICIOUS' || (m.washRatio ?? 0) > i.maxWashRatio;
     classification = safetyFail ? 'REJECT' : highRisk ? 'HIGH_RISK' : score('MOMENTUM') >= 60 && score('ONCHAIN') >= 60 ? 'PROMISING'
       : (m.poolAgeMin ?? Infinity) <= 30 ? 'EARLY' : 'WATCH';

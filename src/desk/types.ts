@@ -76,6 +76,8 @@ export interface DeskPosition {
   qtyRaw: string; costLamports: string; costUsd: number; entryPriceUsd: number | null;
   peakValueLamports: string; lastValueLamports: string | null; lastPriceUsd: number | null;
   router: string; route: string; entrySignature: string | null; rentLamports: string; pairAddress: string;
+  /** Context at entry for early-warning exits; absent in ledgers written before they existed. */
+  entryLiquidityUsd?: number | null; creator?: string | null; creatorPctAtEntry?: number | null;
 }
 
 export interface LedgerEntry {

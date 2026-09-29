@@ -29,10 +29,12 @@ Native reserve (0.003 SOL) and max drag (1.5 %) are the project's existing micro
 - **Discovery**: DexScreener top/latest boosts and latest profiles, GeckoTerminal trending and new pools, plus the desk watchlist.
 - **Tiers**: trending / migrated below $1M (priority below $100K); ultra-early $2K–$10K, followed on the bonding curve up to $100K. Ultra-early tokens are classified (EARLY, PROMISING, WATCH, HIGH RISK, REJECT) and are never executed until they pass every hard gate as migrated tokens.
 - **Hard gates** (blocking): 5m volume > $15K, liquidity > $10K, buy/sell > 1.4, mint and freeze authority revoked, no dangerous token extensions, top-10 wallet concentration ≤ 35 %, largest wallet ≤ 10 %, liquidity ≥ 3 % of market cap, liquidity drop < 25 % since the last scan. Developer allocation (≤ 5 %) and wash/clustering (≤ `RS_MAX_WASH_RATIO`) block when known and are flagged when unknown. An UNKNOWN blocking gate keeps a token on the watchlist.
+- **Fair launch** (blocking, also for the TEST drill): a pump.fun curve that graduates within 5 minutes of launch was bought out at creation, and a market cap of $250K or more within the first 5 minutes is not a fair launch. Checked once per token from GeckoTerminal pool history.
 - **Momentum confirmation**: two consecutive scans with all gates passing, acceleration ≥ 1× and a non-negative 5-minute price change.
 - **Scores**: FUNDAMENTAL, SOCIAL, MARKET, ONCHAIN, RISK, MOMENTUM, each with its factors. They rank candidates; they never override a gate.
 - **Evidence**: OBSERVED / DERIVED / INFERRED; missing data is shown as UNKNOWN or UNVERIFIED, never filled in.
-- **Exits**: `RS_TAKE_PROFIT_PCT`, `RS_STOP_LOSS_PCT`, trailing stop and `RS_MAX_HOLD_MIN`, valued with an executable Jupiter quote. The max-drag cap applies to entries only.
+- **Exits**: checked every 5 seconds, independent of the discovery scan. Early warnings first — pool liquidity 30 % below its level at entry, or the known pump.fun creator selling — then `RS_STOP_LOSS_PCT`, `RS_TAKE_PROFIT_PCT`, trailing stop and `RS_MAX_HOLD_MIN`, valued with an executable Jupiter quote. Exits are never blocked by TEST cash or the max-drag cap; a TEST exit that cannot be simulated is booked at the executable quote.
+- **History**: besides the on-screen window, every event is appended to `data-desk/events-<MODE>.log.jsonl` (rotated at 20 MB).
 
 ## TEST without Phantom and the TEST drill
 

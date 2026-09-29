@@ -20,11 +20,12 @@ import { DESK, type DeskCapital } from './config';
 import { EventLog } from './events';
 import { DeskLedger } from './ledger';
 import { discover, pairMetrics, selectPair, tierFor, type Discovered } from './discovery';
-import { gatherOnchain, type OnchainEvidence } from './onchain';
+import { creatorHolding, gatherOnchain, type OnchainEvidence } from './onchain';
+import { launchCheck, type LaunchCheck } from './launch';
 import { assessAuthenticity, checkWebsite, parseXLink, type WebsiteCheck, type XClient } from './social';
 import { analyze, type SocialEvidence, type WatchState } from './analysis';
 import { DeskGuard, DeskReject, PaperExecution, paperSigner } from './guard';
-import type { Candidate, DeskEvent, DeskMode, DeskStatus, Preflight, Stage } from './types';
+import type { Candidate, DeskEvent, DeskMode, DeskPosition, DeskStatus, Preflight, Stage } from './types';
 
 export interface DeskWallet { owner: PublicKey; signer: TransactionSigner | null }
 export interface DeskDeps {
@@ -39,6 +40,10 @@ export interface DeskDeps {
 }
 
 interface Deep { at: number; onchain: OnchainEvidence; social: SocialEvidence }
+interface ExecTarget {
+  mint: string; symbol: string | null; decimals: number; pairAddress: string; heldRaw: bigint; token2022?: boolean; drill?: boolean;
+  entry?: { liquidityUsd: number | null; creator: string | null; creatorPct: number | null };
+}
 const LABEL: Record<DeskMode, string> = { PAPER: 'TEST / PAPER — NO REAL TRANSACTIONS', LIVE: 'LIVE — REAL FUNDS' };
 const sol = (l: bigint) => exactNumber(l < 0n ? -l : l) / 1e9 * (l < 0n ? -1 : 1);
 
@@ -48,6 +53,9 @@ export class DeskEngine {
   /** TEST only: allow drill entries when nothing qualifies. */
   drill = false;
   private drillSkips = new Map<string, number>();
+  private creatorChecks = new Map<string, number>();
+  private holdLog = new Map<string, { pct: number; at: number }>();
+  private lastPositionCheckAt = 0;
   message: string | null = null;
   lastScanAt: number | null = null;
   nextScanAt: number | null = null;
@@ -56,6 +64,8 @@ export class DeskEngine {
   private candidates = new Map<string, Candidate>();
   private watch = new Map<string, WatchState>();
   private deep = new Map<string, Deep>();
+  /** Launch history never changes: cached per token; failures are retried after ten minutes. */
+  private launches = new Map<string, { at: number; value: LaunchCheck | null }>();
   private lastState = new Map<string, string>();
   private preflights: Preflight[] = [];
   private sources: Record<string, string> = {};
@@ -154,6 +164,19 @@ export class DeskEngine {
     this.work = work;
     return work;
   }
+  /** Called every second by the host: a full scan when due, otherwise a fast position check. */
+  tick(): void {
+    if (!this.scanner || this.work) return;
+    if ((this.nextScanAt ?? 0) <= Date.now()) { void this.pulse(); return; }
+    const ledger = this.currentLedger();
+    if (!ledger?.state.positions.length || Date.now() - this.lastPositionCheckAt < DESK.exits.positionCheckMs) return;
+    const generation = this.generation;
+    const stopped = () => !this.scanner || generation !== this.generation || (this.d.mode === 'LIVE' && !this.d.authorized());
+    const work = this.managePositions(ledger, stopped).catch(error => { this.event('FAILED', `Position check failed: ${errorMessage(error)}`); })
+      .finally(async () => { this.work = null; await this.persist(); });
+    this.work = work;
+  }
+
   async settled(): Promise<void> { await this.work; }
   async persist(): Promise<void> {
     await this.events.flush();
@@ -227,12 +250,25 @@ export class DeskEngine {
       (s.metrics.liquidityUsd ?? 0) > DESK.gates.minLiquidityUsd && (s.metrics.buySellRatio5m ?? 0) > DESK.gates.minBuySellRatio;
     await Promise.all(due.map(s => this.deepAnalysis(s.found, s.pair, tradeable(s)).catch(error =>
       this.event('FAILED', `Evidence gathering failed: ${errorMessage(error)}`, { mint: s.found.mint, symbol: s.pair.baseToken.symbol ?? null }))));
+    // Launch fairness for trending tokens (at most two per scan: GeckoTerminal is rate-limited); needs supply from the deep evidence.
+    const launchDue = staged.filter(s => s.tier === 'TRENDING' && this.deep.get(s.found.mint)?.onchain.holders &&
+      (!this.launches.has(s.found.mint) || (this.launches.get(s.found.mint)!.value === null && now - this.launches.get(s.found.mint)!.at > 600_000)))
+      .sort((a, b) => priority(b) - priority(a)).slice(0, 2);
+    for (const s of launchDue) {
+      const h = this.deep.get(s.found.mint)!.onchain.holders!;
+      try { this.launches.set(s.found.mint, { at: now, value: await launchCheck(d.gecko, s.found.mint, exactNumber(h.supplyRaw) / 10 ** h.decimals) }); }
+      catch (error) {
+        this.launches.set(s.found.mint, { at: now, value: null });
+        this.event('WATCHLIST', `Launch history unavailable: ${errorMessage(error).slice(0, 100)}`, { mint: s.found.mint, symbol: s.pair.baseToken.symbol ?? null });
+      }
+    }
+    if (this.launches.size > 1_000) this.launches.delete(this.launches.keys().next().value!);
     const counts = { qualified: 0, waiting: 0, watch: 0, filtered };
     for (const s of staged) {
       const mint = s.found.mint, prev = this.watch.get(mint), deep = this.deep.get(mint) ?? null;
       const watch: WatchState = prev ?? { firstSeenAt: now, observations: 0, lastLiquidityUsd: null, lastPriceUsd: null, momentumStreak: 0 };
       const candidate = analyze({ found: s.found, pair: s.pair, metrics: s.metrics, tier: s.tier, onchain: deep?.onchain ?? null, onchainAt: deep?.at ?? null,
-        social: deep?.social ?? null, watch, now, maxWashRatio: d.cfg.rs.maxWashRatio });
+        social: deep?.social ?? null, watch, now, maxWashRatio: d.cfg.rs.maxWashRatio, launch: this.launches.get(mint)?.value ?? null });
       this.watch.set(mint, { ...watch, observations: candidate.observations, lastLiquidityUsd: s.metrics.liquidityUsd, lastPriceUsd: s.metrics.priceUsd,
         momentumStreak: candidate.momentumStreak });
       this.candidates.set(mint, candidate);
@@ -277,10 +313,34 @@ export class DeskEngine {
 
   // ------------------------------------------------------------------ positions & exits
 
+  /** Early-warning exits: pool liquidity collapsing since entry, or the known creator selling. */
+  private async earlyWarning(p: DeskPosition): Promise<string | null> {
+    const x = DESK.exits;
+    if (p.entryLiquidityUsd) {
+      try {
+        const pair = selectPair(await requestScope.run({ category: 'position' }, () => this.d.dex.getPairsForTokens([p.mint])), p.mint, Date.now());
+        const liq = pair?.liquidity?.usd ?? null;
+        if (liq !== null && liq <= p.entryLiquidityUsd * (1 - x.liquidityDropExitPct / 100))
+          return `LIQUIDITY_DROP $${Math.round(liq).toLocaleString('en-US')} vs $${Math.round(p.entryLiquidityUsd).toLocaleString('en-US')} at entry (−${((1 - liq / p.entryLiquidityUsd) * 100).toFixed(0)}%)`;
+      } catch { /* market data outage: the executable-quote rules below still apply */ }
+    }
+    const last = this.creatorChecks.get(p.mint) ?? 0;
+    if (p.creator && p.creatorPctAtEntry != null && Date.now() - last >= x.creatorCheckMs) {
+      this.creatorChecks.set(p.mint, Date.now());
+      try {
+        const pct = await creatorHolding(this.d.rpc, p.creator, p.mint);
+        if (pct < p.creatorPctAtEntry - x.creatorSellExitPts) return `DEV_SELLING creator holds ${pct.toFixed(2)}% (was ${p.creatorPctAtEntry.toFixed(2)}% at entry)`;
+      } catch { /* RPC outage: retried on the next check */ }
+    }
+    return null;
+  }
+
   private async managePositions(ledger: DeskLedger, stopped: () => boolean): Promise<void> {
     const rs = this.d.cfg.rs;
+    this.lastPositionCheckAt = Date.now();
     for (const p of [...ledger.state.positions]) {
       if (stopped()) return;
+      const warning = await this.earlyWarning(p);
       let value: bigint;
       try {
         const q = await requestScope.run({ category: 'position' }, () => this.d.jupiter.quote({ inputMint: p.mint, outputMint: SOL_MINT, amountRaw: BigInt(p.qtyRaw), slippageBps: this.d.capital.slippageBps }));
@@ -295,11 +355,19 @@ export class DeskEngine {
       const cost = BigInt(p.costLamports), pnlPct = (exactNumber(value) - exactNumber(cost)) / exactNumber(cost) * 100;
       const peakPct = (exactNumber(BigInt(p.peakValueLamports)) - exactNumber(cost)) / exactNumber(cost) * 100;
       const fromPeak = (exactNumber(value) / exactNumber(BigInt(p.peakValueLamports)) - 1) * 100;
-      const reason = pnlPct <= -rs.stopLossPct ? `STOP_LOSS ${pnlPct.toFixed(2)}% ≤ -${rs.stopLossPct}%`
+      const reason = warning ? warning : pnlPct <= -rs.stopLossPct ? `STOP_LOSS ${pnlPct.toFixed(2)}% ≤ -${rs.stopLossPct}%`
         : pnlPct >= rs.takeProfitPct ? `TAKE_PROFIT ${pnlPct.toFixed(2)}% ≥ ${rs.takeProfitPct}%`
         : rs.trailingStopPct > 0 && peakPct >= rs.trailingActivationPct && fromPeak <= -rs.trailingStopPct ? `TRAILING_STOP ${fromPeak.toFixed(2)}% from peak`
         : Date.now() - p.openedAt >= rs.maxHoldMin * 60_000 ? `MAX_HOLD ${rs.maxHoldMin} min` : null;
-      if (!reason) { this.event('POSITION', `Holding: value ${sol(value).toFixed(6)} SOL (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)`, { mint: p.mint, symbol: p.symbol }); continue; }
+      if (!reason) {
+        // Checked every few seconds; logged only when the result moves or once a minute, so telemetry stays readable.
+        const prev = this.holdLog.get(p.mint);
+        if (!prev || Math.abs(prev.pct - pnlPct) >= 2 || Date.now() - prev.at >= 60_000) {
+          this.holdLog.set(p.mint, { pct: pnlPct, at: Date.now() });
+          this.event('POSITION', `Holding: value ${sol(value).toFixed(6)} SOL (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%, peak ${peakPct >= 0 ? '+' : ''}${peakPct.toFixed(2)}%)`, { mint: p.mint, symbol: p.symbol });
+        }
+        continue;
+      }
       if (!this.execution) { this.event('WAITING', `Exit signal ${reason}, but execution is paused`, { mint: p.mint, symbol: p.symbol }); continue; }
       this.event('EXIT', `Exit signal: ${reason}`, { mint: p.mint, symbol: p.symbol });
       await this.execute('SELL', { mint: p.mint, symbol: p.symbol, decimals: p.decimals, pairAddress: p.pairAddress, heldRaw: BigInt(p.qtyRaw) }, ledger, stopped);
@@ -326,17 +394,17 @@ export class DeskEngine {
     if (c.onchain.decimals === null) { this.event('WAITING', 'Token decimals unknown; entry deferred', { mint: c.mint, symbol: c.symbol }); return; }
     this.event('QUALIFIED', `Entry candidate selected (composite ${composite(c).toFixed(0)})`, { mint: c.mint, symbol: c.symbol });
     await this.execute('BUY', { mint: c.mint, symbol: c.symbol, decimals: c.onchain.decimals, pairAddress: c.pair.address, heldRaw: 0n,
-      token2022: c.onchain.token2022 === true }, ledger, stopped);
+      token2022: c.onchain.token2022 === true, entry: this.entryContext(c) }, ledger, stopped);
   }
 
   /**
    * TEST drill: when nothing qualifies, open a paper position in the best trending candidate whose safety gates
-   * pass (mint/freeze authority revoked, no dangerous extensions, AMM liquidity), bypassing volume, buy-pressure,
+   * pass (mint/freeze authority revoked, no dangerous extensions, AMM liquidity, fair launch), bypassing volume, buy-pressure,
    * concentration and momentum gates. The execution guard still applies. Every drill fill is marked in the ledger.
    */
   private async drillEnter(ledger: DeskLedger, stopped: () => boolean, recentExit: (mint: string) => boolean): Promise<void> {
     if (ledger.state.positions.length >= DESK.maxOpenPositions) return;
-    const safe = (c: Candidate) => ['mintAuthority', 'freezeAuthority', 'contract', 'liquidity'].every(k => c.gates.find(g => g.key === k)?.status === 'PASS');
+    const safe = (c: Candidate) => ['mintAuthority', 'freezeAuthority', 'contract', 'liquidity', 'fairLaunch'].every(k => c.gates.find(g => g.key === k)?.status === 'PASS');
     const pool = [...this.candidates.values()].filter(c => c.tier === 'TRENDING' && c.onchain.decimals !== null && safe(c) &&
       !ledger.position(c.mint) && !recentExit(c.mint) && !this.drillSkips.has(c.mint)).sort((a, b) => composite(b) - composite(a));
     if (!pool.length) { this.message = 'DRILL: no trending candidate with passing safety gates yet'; return; }
@@ -344,16 +412,21 @@ export class DeskEngine {
       if (stopped()) return;
       this.event('QUALIFIED', `DRILL entry (strategy gates bypassed; status ${c.status}: ${c.reasons[0] ?? ''})`, { mint: c.mint, symbol: c.symbol });
       await this.execute('BUY', { mint: c.mint, symbol: c.symbol, decimals: c.onchain.decimals!, pairAddress: c.pair.address, heldRaw: 0n,
-        token2022: c.onchain.token2022 === true, drill: true }, ledger, stopped);
+        token2022: c.onchain.token2022 === true, drill: true, entry: this.entryContext(c) }, ledger, stopped);
       if (ledger.position(c.mint)) return;
       // Blocked by the guard (e.g. max drag): skip it for a while and try the next one.
       this.drillSkips.set(c.mint, Date.now());
     }
   }
 
+  private entryContext(c: Candidate): NonNullable<ExecTarget['entry']> {
+    const dev = this.deep.get(c.mint)?.onchain.developer ?? null;
+    return { liquidityUsd: c.metrics.liquidityUsd, creator: dev?.creator ?? null, creatorPct: dev?.heldPct ?? null };
+  }
+
   // ------------------------------------------------------------------ one order through the production path
 
-  private async execute(side: 'BUY' | 'SELL', t: { mint: string; symbol: string | null; decimals: number; pairAddress: string; heldRaw: bigint; token2022?: boolean; drill?: boolean },
+  private async execute(side: 'BUY' | 'SELL', t: ExecTarget,
     ledger: DeskLedger, stopped: () => boolean, probe = false): Promise<void> {
     const d = this.d, ctx = { mint: t.mint, symbol: t.symbol };
     const wallet = d.wallet(), solUsd = this.solUsd;
@@ -399,7 +472,7 @@ export class DeskEngine {
       const order = guard.lastOrder!;
       const row = ledger.book({ side, mint: t.mint, symbol: t.symbol, decimals: t.decimals, pairAddress: t.pairAddress, inAmountRaw: fill.inAmountRaw,
         outAmountRaw: fill.outAmountRaw, solDeltaLamports: fill.solDeltaLamports, feeLamports: fill.feeLamports, rentLamports: fill.rentLamports,
-        router: 'Jupiter', route: order.route, routerFeeUsd: sol(order.routerFee) * solUsd, txSignature: fill.signature, solUsd, at: Date.now(), note: null });
+        router: 'Jupiter', route: order.route, routerFeeUsd: sol(order.routerFee) * solUsd, txSignature: fill.signature, solUsd, at: Date.now(), note: null, entry: t.entry });
       if (guard.lastPreflight) { guard.lastPreflight.outcome = 'CONFIRMED'; guard.lastPreflight.txSignature = fill.signature; }
       record(guard.lastPreflight);
       this.event('CONFIRMED', `${side} confirmed on-chain: ${fill.signature}`, ctx);
@@ -427,7 +500,7 @@ export class DeskEngine {
     }
   }
 
-  private paperFill(side: 'BUY' | 'SELL', t: { mint: string; symbol: string | null; decimals: number; pairAddress: string; heldRaw: bigint; drill?: boolean },
+  private paperFill(side: 'BUY' | 'SELL', t: ExecTarget,
     guard: DeskGuard, ledger: DeskLedger, solUsd: number, detail: string): void {
     const drill = t.drill || (side === 'SELL' && !!ledger.state.entries.filter(e => e.mint === t.mint && e.side === 'BUY').at(-1)?.note?.startsWith('DRILL'));
     const drag = guard.lastPreflight?.dragPct;
@@ -445,7 +518,7 @@ export class DeskEngine {
     this.event('SUBMITTED', 'TEST — no signature requested, nothing submitted; paper execution recorded', ctx);
     const row = ledger.book({ side, mint: t.mint, symbol: t.symbol, decimals: t.decimals, pairAddress: t.pairAddress, inAmountRaw: BigInt(q.inAmount),
       outAmountRaw: buy ? tokens : BigInt(q.outAmount), solDeltaLamports: solDelta, feeLamports: fee, rentLamports: rent, router: 'Jupiter', route: o.route,
-      routerFeeUsd: sol(o.routerFee) * solUsd, txSignature: null, solUsd, at: Date.now(), note });
+      routerFeeUsd: sol(o.routerFee) * solUsd, txSignature: null, solUsd, at: Date.now(), note, entry: t.entry });
     this.bookedEvents(side, row, ctx);
   }
 
