@@ -17,6 +17,7 @@ const EXPLAIN: Record<string, string> = {
   RPC_NOT_CONFIGURED: 'Set RPC_ENDPOINTS in the local .env.', JUPITER_API_KEY_REQUIRED: 'Set JUPITER_API_KEY in the local .env (never in the browser).',
   INSTANCE_LOCK: 'Another dashboard process owns data-desk. Close it first.', SCANNER_OFF: 'Start the scanner first.',
   RESET_TEST_ONLY: 'Reset is only available in TEST.', INVALID_STRATEGY: 'Unknown strategy.',
+  AUTO_CONFIRM_UNAVAILABLE_FOR_DOMAIN: 'Phantom does not offer Auto-Confirm for this domain (only for domains it has approved). LIVE orders need your approval in Phantom within 15 s.',
 };
 const describe = (code: string | null) => code ? EXPLAIN[code] ?? code.replaceAll('_', ' ') : null;
 const fine = (v: number | null | undefined, d = 4) => v === null || v === undefined || !Number.isFinite(v) ? '--' : `${v < 0 ? '-' : ''}$${Math.abs(v).toFixed(d)}`;
@@ -86,18 +87,20 @@ function Controls({ t, d }: { t: TradingSession; d: DeskStatus | null }) {
           onClick={() => { if (window.confirm('Archive both TEST ledgers (kept on disk) and restart every TEST sleeve at its planned capital? Open paper positions end with the archive.')) void t.desk('reset-test'); }}>RESET TEST</button>
       </> : <>
         <button className="primary-action live" disabled={busy || running || !t.connected}
-          onClick={() => void (async () => { if (await t.desk('start-live') && !t.auto) await t.enableAuto(); })()}>START LIVE SESSION</button>
+          onClick={() => void (async () => { if (await t.desk('start-live') && !t.auto && !t.autoUnsupported) await t.enableAuto(); })()}>START LIVE SESSION</button>
         <button className="stop-action" disabled={busy || !running} onClick={() => void t.desk('stop-live')}>STOP LIVE SESSION</button>
       </>}
       <button className="source-button" disabled={busy || !running || !d?.execution} title="No new entries; open positions keep their exits"
         onClick={() => void t.desk('pause')}>PAUSE ENTRIES</button>
       <button className="source-button" disabled={busy || !running || !!d?.execution} onClick={() => void t.desk('resume')}>RESUME ENTRIES</button>
-      {live && t.connected && !t.auto && <button className="source-button" disabled={busy} onClick={() => void t.enableAuto()}>Enable Auto-Confirm</button>}
+      {live && t.connected && !t.auto && !t.autoUnsupported && <button className="source-button" disabled={busy} onClick={() => void t.enableAuto()}>Enable Auto-Confirm</button>}
       {live && t.auto && <span className="chip on">Auto-Confirm granted in Phantom</span>}
+      {live && t.autoUnsupported && <span className="chip off">Auto-Confirm: not offered for this domain</span>}
     </div>
     {live && running && !t.auto && <p className="trading-error" role="alert">
       Auto-Confirm is OFF: every LIVE order waits at most 15 s for your approval in Phantom, and a missed approval pauses entries.
-      Click <strong>Enable Auto-Confirm</strong> and accept the permission in Phantom once for this session.</p>}
+      {t.autoUnsupported ? ' Phantom offers Auto-Confirm only to domains it has approved, not to this local dashboard: approve each order in Phantom.'
+        : <> Click <strong>Enable Auto-Confirm</strong> and accept the permission in Phantom once for this session.</>}</p>}
     <p className="desk-note">{d?.message ? `Last result: ${describe(d.message)} · ` : ''}Last scan {ago(d?.lastScanAt)}{d?.nextScanAt ? ` · next ${ago(d.nextScanAt)}` : ''}. Stopping keeps all telemetry and ledger data.</p>
   </div>;
 }

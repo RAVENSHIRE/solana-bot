@@ -19,6 +19,7 @@ export function useTradingSession() {
   const [view, setView] = useState<TradingView | null>(null), [session, setSession] = useState<Session | null>(null);
   const [busy, setBusy] = useState<string | null>(null), [error, setError] = useState<string | null>(null);
   const [online, setOnline] = useState(false), [auto, setAuto] = useState(false), [revision, setRevision] = useState(0);
+  const [autoUnsupported, setAutoUnsupported] = useState(false);
   const sessionRef = useRef<Session | null>(null), cap = useRef<string | null>(null), sdk = useRef<BrowserSDK | null>(null);
   const generation = useRef(0), signing = useRef(false), autoRef = useRef(false), seen = useRef(new Set<string>());
   const getCapability = useCallback(async () => {
@@ -96,7 +97,7 @@ export function useTradingSession() {
     finally { setBusy(null); if (action === 'stop-live') void sdk.current?.disableAutoConfirm().catch(() => {}); }
   };
   const enableAuto = async () => {
-    if (!sdk.current || !sessionRef.current) return; setBusy('auto'); setError(null);
+    if (!sdk.current || !sessionRef.current || autoUnsupported) return; setBusy('auto'); setError(null);
     const attempt = generation.current, current = sessionRef.current;
     try {
       const { NetworkId } = await import('@phantom/browser-sdk');
@@ -104,7 +105,12 @@ export function useTradingSession() {
       if (attempt !== generation.current || sessionRef.current?.id !== current.id) { await sdk.current.disableAutoConfirm(); return; }
       const enabled = result.enabled && result.chains.includes(NetworkId.SOLANA_MAINNET);
       autoRef.current = enabled; setAuto(enabled); if (!enabled) throw new Error('Phantom did not enable Auto-Confirm. Manual approval remains available.');
-    } catch (e) { autoRef.current = false; setAuto(false); setError(message(e)); } finally { setBusy(null); }
+    } catch (e) {
+      autoRef.current = false; setAuto(false);
+      // Phantom offers Auto-Confirm only to domains it has approved; a local dashboard is not one of them.
+      if (/no supported networks/i.test(message(e))) { setAutoUnsupported(true); setError('AUTO_CONFIRM_UNAVAILABLE_FOR_DOMAIN'); }
+      else setError(message(e));
+    } finally { setBusy(null); }
   };
   const liveExecuting = view?.mode === 'LIVE' && !!view.desk?.scanner && !!view.desk?.execution;
   const approve = useCallback(async (automatic = false) => {
@@ -135,7 +141,7 @@ export function useTradingSession() {
     } finally { signing.current = false; setBusy(null); }
   }, [view, post, liveExecuting]);
   useEffect(() => { if (auto && liveExecuting && view?.pending) void approve(true); }, [auto, view, approve, liveExecuting]);
-  return { view, address: session?.address ?? null, connected: !!session, online, busy, error, auto, connect, desk, enableAuto,
+  return { view, address: session?.address ?? null, connected: !!session, online, busy, error, auto, autoUnsupported, connect, desk, enableAuto,
     approve: () => approve(false), disconnect: async () => { invalidate(null); try { await sdk.current?.disconnect(); } catch (e) { setError(message(e)); } } };
 }
 export type TradingSession = ReturnType<typeof useTradingSession>;
