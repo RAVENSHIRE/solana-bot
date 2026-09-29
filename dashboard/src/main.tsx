@@ -1,9 +1,12 @@
+import './polyfills';
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { BotState } from "../shared/state";
 import { Chart, Sparkline } from "./Chart";
 import { useBotState } from "./use-state";
 import { WalletPanel } from "./WalletPanel";
+import { TradingPanel } from "./TradingPanel";
+import { useTradingSession } from "./use-trading";
 import {
   duration,
   money,
@@ -292,6 +295,8 @@ const PriceChart = React.memo(Chart);
 const EMPTY: never[] = [];
 
 function App() {
+  const trading=useTradingSession();
+  const [workspace,setWorkspace]=useState<'wallet'|'market'>('wallet');
   const feed = useBotState();
   const state = feed.state,
     meta = state?.meta,
@@ -382,6 +387,7 @@ function App() {
             title="Dashboard overview"
             aria-label="Dashboard overview"
             onClick={() => {
+              setWorkspace("wallet");
               setTab("Decisions");
               setSelected(null);
             }}
@@ -391,32 +397,32 @@ function App() {
           <button
             title="Positions"
             aria-label="Positions"
-            className={tab === "Positions" ? "selected" : ""}
-            onClick={() => setTab("Positions")}
+            className={workspace==="market" && tab === "Positions" ? "selected" : ""}
+            onClick={() => {setWorkspace("market");setTab("Positions");}}
           >
             <Icon name="wallet" />
           </button>
           <button
             title="Decisions"
             aria-label="Decisions"
-            className={tab === "Decisions" ? "selected" : ""}
-            onClick={() => setTab("Decisions")}
+            className={workspace==="market" && tab === "Decisions" ? "selected" : ""}
+            onClick={() => {setWorkspace("market");setTab("Decisions");}}
           >
             <Icon name="activity" />
           </button>
           <button
             title="Trades"
             aria-label="Trades"
-            className={tab === "Trades" ? "selected" : ""}
-            onClick={() => setTab("Trades")}
+            className={workspace==="market" && tab === "Trades" ? "selected" : ""}
+            onClick={() => {setWorkspace("market");setTab("Trades");}}
           >
             <Icon name="layers" />
           </button>
           <button
             title="Equity"
             aria-label="Equity"
-            className={tab === "Equity" ? "selected" : ""}
-            onClick={() => setTab("Equity")}
+            className={workspace==="market" && tab === "Equity" ? "selected" : ""}
+            onClick={() => {setWorkspace("market");setTab("Equity");}}
           >
             <Icon name="chart" />
           </button>
@@ -437,7 +443,7 @@ function App() {
             <span className="topbar-divider" />
             <span>Trading workspace</span>
           </div>
-          <div className="stats" title="Active / skipped / closed tokens">
+          <div className="stats" hidden={workspace==='wallet'} title="Active / skipped / closed tokens">
             <Icon name="clock" size={16} />
             <span>
               Stats ({numeric(meta?.active_tokens_count)} |{" "}
@@ -450,18 +456,18 @@ function App() {
           <header className="page-header">
             <div className="page-heading">
               <Icon name="arrow" size={19} />
-              <h1>{meta?.bot_name || "Memecoin dashboard"}</h1>
-              <p>
+              <h1>{workspace==='wallet'?'Solana trading desk':meta?.bot_name || "Memecoin dashboard"}</h1>
+              {workspace==='wallet'?<p>Phantom wallet · local execution</p>:<p>
                 {meta?.network || "--"} <span>·</span>{" "}
                 {present(meta?.decision_cadence_seconds)
                   ? `${runtime ? "scan" : "a decision"} every ${numeric(meta.decision_cadence_seconds, 1)} seconds`
                   : "Decision cadence --"}
-              </p>
+              </p>}
             </div>
             <div className="header-actions">
               <span className="mode">
                 <Icon name="activity" size={16} />
-                {meta?.mode || "--"}
+                {workspace==='wallet'?(trading.online?(trading.status?.active?'LIVE SESSION':'DISARMED'):'OFFLINE'):meta?.mode || "--"}
               </span>
               <button
                 className="source-button"
@@ -472,7 +478,16 @@ function App() {
               </button>
             </div>
           </header>
-          <WalletPanel />
+          <nav className="workspace-tabs" aria-label="Dashboard workspace">
+            <button aria-pressed={workspace==='wallet'} onClick={()=>setWorkspace('wallet')}>Wallet & live session</button>
+            <button aria-pressed={workspace==='market'} onClick={()=>setWorkspace('market')}>Market & simulation</button>
+          </nav>
+          <div hidden={workspace!=='wallet'} className="wallet-workspace">
+            <TradingPanel session={trading}/>
+            <WalletPanel address={trading.address} connected={trading.connected}/>
+          </div>
+          <div hidden={workspace!=='market'}>
+          <p className="section-caption">Recorded bot telemetry · independent of the Phantom session above</p>
           <section className="metric-grid" aria-label="Performance metrics">
             {cards.map((card) => (
               <article className="metric" key={card.label}>
@@ -680,6 +695,7 @@ function App() {
               {feed.message}
             </p>
           )}
+          </div>
         </main>
       </div>
       {showInfo && (
@@ -706,8 +722,7 @@ function App() {
             </div>
             <p>
               This dashboard reads the local bot state and receives updates
-              automatically. It cannot place trades or change the execution
-              mode.
+              automatically. The separate Phantom session can submit guarded swaps after you start it and approve signing in your wallet.
             </p>
             <dl>
               <div>

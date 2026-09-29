@@ -17,17 +17,17 @@ export class MicroMarket {
     if(!sol?.priceUsd || !usdc?.priceUsd) throw new MicroReject('USD_PRICE_MISSING');
     const prices={solUsd:sol.priceUsd,usdcUsd:usdc.priceUsd,receivedAt:Math.min(sol.meta.receivedAt,usdc.meta.receivedAt)};
     const accounts=await listTokenAccounts(this.rpc,this.owner);
-    if(accounts.some(a=>a.amountRaw>0n && a.mint!==USDC_MINT)) throw new MicroReject('DEDICATED_SOL_USDC_WALLET_REQUIRED');
+
     const ata=getAssociatedTokenAddressSync(new PublicKey(USDC_MINT),this.owner);
     const token=accounts.find(a=>a.pubkey.equals(ata));
-    if(accounts.some(a=>a.mint===USDC_MINT && a.amountRaw>0n && !a.pubkey.equals(ata))) throw new MicroReject('USDC_MUST_BE_IN_ASSOCIATED_ACCOUNT');
+    const unsupportedHoldings=accounts.filter(a=>a.amountRaw>0n&&!a.pubkey.equals(ata)).map(a=>({mint:a.mint,account:a.pubkey.toBase58(),amountRaw:String(a.amountRaw),reason:a.mint===USDC_MINT?'NON_ASSOCIATED_USDC_ACCOUNT' as const:'OUTSIDE_SOL_USDC_SCOPE' as const}));
     if(token && (!token.programId.equals(TOKEN_PROGRAM_ID) || token.mint!==USDC_MINT)) throw new MicroReject('ATA_IDENTITY_MISMATCH');
     const native=BigInt(parse(safeInteger,await this.rpc.execute('micro:balance',c=>c.getBalance(this.owner,'confirmed')),'solana-rpc'));
     const rent=BigInt(parse(safeInteger,await this.rpc.execute('micro:rent',c=>c.getMinimumBalanceForRentExemption(ACCOUNT_SIZE)),'solana-rpc'));
-    const raw=accounts.filter(a=>a.mint===USDC_MINT).reduce((sum,a)=>sum+a.amountRaw,0n);
+    const raw=token?.amountRaw??0n;
     exactNumber(raw); validPrices(prices);
     // Budget temporary wrapping/routing account capital independently of permanent ATA fees.
-    return {...prices,native,usdc:raw,ataExists:!!token,ataRent:token?0n:rent,tempRent:rent*2n,at:Date.now()};
+    return {...prices,unsupportedHoldings,native,usdc:raw,ataExists:!!token,ataRent:token?0n:rent,tempRent:rent*2n,at:Date.now()};
   }
   async priorityCap(maximum:bigint):Promise<bigint> {
     if(maximum<0n) throw new MicroReject('NO_PRIORITY_FEE_BUDGET');

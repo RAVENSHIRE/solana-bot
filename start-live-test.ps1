@@ -1,10 +1,10 @@
-param([decimal]$BudgetUsd = 5, [decimal]$BuyUsd = 1, [switch]$CheckOnly)
+param([decimal]$BudgetUsd = 10, [decimal]$BuyUsd = 2, [switch]$CheckOnly)
 $ErrorActionPreference = 'Stop'
 Push-Location $PSScriptRoot
 $saved = @{}
 try {
-    if ($BudgetUsd -lt 3.5 -or $BudgetUsd -gt 5 -or $BuyUsd -lt 1 -or $BuyUsd -gt 1.5) {
-        throw 'Micro-Profil: Budget 3.50-5.00 USD; Kauf 1.00-1.50 USD.'
+    if ($BudgetUsd -lt 5 -or $BudgetUsd -gt 10 -or $BuyUsd -lt ($BudgetUsd * 0.2) -or $BuyUsd -gt ($BudgetUsd * 0.3)) {
+        throw 'Micro-Profil: Budget 5-10 USD; Kauf 20-30% des Budgets.'
     }
     $values = @{
         MICRO_BUDGET_USD = $BudgetUsd.ToString([Globalization.CultureInfo]::InvariantCulture)

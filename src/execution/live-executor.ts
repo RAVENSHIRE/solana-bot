@@ -8,10 +8,11 @@ import { BASE_FEE_LAMPORTS, type ExecMode } from '../core/types';
 import { TxExpiredError, TxFailedError, TxUnknownError, errorMessage } from '../utils/errors';
 import { sleep } from '../utils/retry';
 import { bpsOf } from '../utils/format';
+import { isTransactionSigner, signTransactionChecked, type TransactionSigner } from './transaction-signer';
 
 /**
  * Echte On-Chain-Ausführung über Jupiter.
- * Ablauf: Quote → Impact-Check → /swap (Tx bauen) → signieren → optional simulieren →
+ * Ablauf: Quote → Impact-Check → /swap (Tx bauen) → simulieren → prüfen → signieren → erneut prüfen →
  * senden & bestätigen → tatsächlichen Fill aus den Balance-Deltas der Transaktion lesen.
  */
 export class LiveExecutor extends BaseExecutor {
@@ -19,11 +20,12 @@ export class LiveExecutor extends BaseExecutor {
 
   constructor(
     deps: ExecutorDeps,
-    private readonly wallet: Keypair,
+    private readonly wallet: Keypair | TransactionSigner,
     private readonly sender: TransactionSender,
   ) {
     super(deps);
     if (!wallet.publicKey.equals(deps.owner)) throw new Error('LiveExecutor: Wallet passt nicht zum Owner');
+    if (isTransactionSigner(wallet) && !deps.guard) throw new Error('Browser signer requires execution guards');
   }
 
   async swap(req: SwapRequest): Promise<SwapFill> {
@@ -67,9 +69,21 @@ export class LiveExecutor extends BaseExecutor {
     this.ensureFresh(quote);
     await this.deps.guard?.beforeSend(req, quote, tx);
     this.ensureFresh(quote);
-    tx.sign([this.wallet]);
+    try {
+      tx = await signTransactionChecked(this.wallet, tx, {
+        // Conservative deadline begins before obtaining this quote, never after wallet approval.
+        expiresAt: this.deps.jupiter.expiresAt?.(quote) ?? started + (this.deps.cfg.jupiter?.quoteMaxAgeMs ?? 15_000),
+      });
+    } catch (error) {
+      throw new SwapError(`Wallet-Signatur abgelehnt: ${errorMessage(error)}`, 'build', 0n, null, { cause: error });
+    }
+    this.ensureFresh(quote);
+    // A browser confirmation can take seconds; balances and risk gates must pass again.
+    await this.deps.guard?.beforeSend(req, quote, tx);
+    this.ensureFresh(quote);
     await this.deps.guard?.onSigned?.(tx);
     this.ensureFresh(quote);
+    this.deps.guard?.assertActive?.();
     try {
       ({ signature } = await this.sender.sendAndConfirm(tx, lastValidBlockHeight));
     } catch (e) {
@@ -181,6 +195,7 @@ export class LiveExecutor extends BaseExecutor {
 
   async closeTokenAccountIfEmpty(mint: string): Promise<bigint> {
     if (this.deps.guard) return 0n; // Account maintenance must not bypass the micro execution guard.
+    if (isTransactionSigner(this.wallet)) return 0n; // Browser signs only the authorized swap path.
     if (!this.deps.cfg.execution.closeEmptyAccounts) return 0n;
     try {
       const accounts = await listTokenAccounts(this.deps.rpc, this.owner, mint);
@@ -198,6 +213,7 @@ export class LiveExecutor extends BaseExecutor {
 
   async reclaimEmptyAccounts(excludeMints: ReadonlySet<string>): Promise<RentReclaimResult> {
     if (this.deps.guard) return { found:0,closed:0,reclaimableLamports:0n,reclaimedLamports:0n,signatures:[] };
+    if (isTransactionSigner(this.wallet)) return { found:0,closed:0,reclaimableLamports:0n,reclaimedLamports:0n,signatures:[] };
     const all = await listTokenAccounts(this.deps.rpc, this.owner);
     const candidates = all.filter((a) => a.closable && !excludeMints.has(a.mint));
     const reclaimable = candidates.reduce((s, a) => s + BigInt(a.lamports), 0n);

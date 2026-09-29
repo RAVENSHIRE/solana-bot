@@ -12,72 +12,24 @@ import { ConnectionManager } from '../rpc/connection-manager';
 import { JupiterClient } from '../execution/jupiter-client';
 import { LiveExecutor } from '../execution/live-executor';
 import { TransactionSender } from '../execution/tx-sender';
-import { SwapError,type SwapFill,type SwapRequest } from '../execution/executor';
+import { type SwapFill,type SwapRequest } from '../execution/executor';
 import { loadWalletFromEnv } from '../utils/wallet';
 import { atomicWriteFile } from '../utils/fs';
 import { configureLogger,rootLogger as log } from '../utils/logger';
 import { redactText } from '../utils/redact';
-import { exactNumber } from '../data/core/data-validator';
-import { MICRO,MicroReject,MicroStateSchema,freshState,observeState,equityUsd,sizeUsd,usdToLamports,checkReserve,checkCosts,type MicroState,type Snapshot } from './policy';
+import { book,recordFailure } from './ledger';
+export { book,recordFailure } from './ledger';
+import { MICRO,MicroReject,MicroStateSchema,freshState,observeState,equityUsd,sizeUsd,usdToLamports,checkReserve,checkCosts,createProfile,killThreshold,type MicroState,type Snapshot } from './policy';
 import { MicroMarket } from './market';
 import { MicroGuard } from './guard';
 import { dashboard } from './dashboard';
 
 export function options(env:NodeJS.ProcessEnv=process.env) {
-  return z.object({MICRO_BUDGET_USD:z.coerce.number().min(3.5).max(5).default(5),
-    MICRO_TRADE_USD:z.coerce.number().min(1).max(1.5).default(1),MICRO_STATE_DIR:z.string().default('./data-micro')}).parse(env);
+  return z.object({MICRO_BUDGET_USD:z.coerce.number().min(5).max(10).default(10),
+    MICRO_TRADE_USD:z.coerce.number().min(1).max(3).default(Number(env.MICRO_BUDGET_USD??10)*.2),MICRO_STATE_DIR:z.string().default('./data-micro')}).parse(env);
 }
-export function book(state:MicroState,fill:SwapFill,s:Snapshot,drag:bigint):void {
-  if(state.mode==='LIVE'&&(fill.simulated||!fill.signature))throw new MicroReject('LIVE_FILL_WITHOUT_SIGNATURE');
-  if(state.mode==='SIMULATION'&&!fill.simulated)throw new MicroReject('MODE_MISMATCH');
-  if(fill.signature&&state.signatures.includes(fill.signature))throw new MicroReject('DUPLICATE_FILL');
-  if(fill.mint!==USDC_MINT||drag<0n)throw new MicroReject('INVALID_FILL_IDENTITY');
-  if(fill.feeLamports<0n||fill.inAmountRaw<=0n||fill.outAmountRaw<=0n||fill.outAmountRaw<fill.minOutRaw)throw new MicroReject('INVALID_OR_UNDER_MINIMUM_FILL');
-  const native=BigInt(state.expectedNative)+fill.solDeltaLamports;
-  const usdc=BigInt(state.expectedUsdc)+(fill.side==='BUY'?fill.outAmountRaw:-fill.inAmountRaw);
-  if(native<0n||usdc<0n)throw new MicroReject('NEGATIVE_SETTLED_BALANCE');
-  let pnl:number|null=null,pnlPct:number|null=null;
-  if(fill.side==='BUY') {
-    if(state.lot||fill.solDeltaLamports>=0n)throw new MicroReject('UNEXPECTED_BUY_FILL');
-    state.lot={amount:String(fill.outAmountRaw),costLamports:String(-fill.solDeltaLamports),notionalLamports:String(fill.inAmountRaw),
-      costUsd:exactNumber(-fill.solDeltaLamports)/1e9*s.solUsd,at:s.at,
-      notionalUsd:exactNumber(fill.inAmountRaw)/1e9*s.solUsd,spentDragUsd:exactNumber(drag)/1e9*s.solUsd,
-      feeBudgetLamports:String(fill.inAmountRaw*MICRO.feeBps/10000n),spentDragLamports:String(drag),entrySignature:fill.signature};
-    if(drag*10000n>fill.inAmountRaw*MICRO.feeBps){state.guardrailBreaches++;state.halted='REALIZED_COST_BREACH';}
-    state.paperAtaExists=true;
-  } else {
-    if(!state.lot||fill.inAmountRaw!==BigInt(state.lot.amount))throw new MicroReject('UNEXPECTED_SELL_FILL');
-    if(state.lot.spentDragUsd+exactNumber(drag)/1e9*s.solUsd>state.lot.notionalUsd*.015+1e-12) {
-      state.guardrailBreaches++;state.halted='REALIZED_COST_BREACH';
-    }
-    pnl=exactNumber(fill.solDeltaLamports)/1e9*s.solUsd-state.lot.costUsd;
-    pnlPct=pnl/state.lot.costUsd*100;
-    state.realizedNetUsd+=pnl;state.closedTrades++;state.lot=null;
-  }
-  state.expectedNative=String(native);state.expectedUsdc=String(usdc);
-  state.paperNative=String(native);state.paperUsdc=String(usdc);
-  state.feesUsd+=exactNumber(fill.feeLamports)/1e9*s.solUsd;
-  state.fills.push({side:fill.side,at:s.at,signature:fill.signature,pnlUsd:pnl,pnlPct,slippagePct:fill.realizedSlippageBps/100});
-  if(state.fills.length>10000){state.halted='LEDGER_CAPACITY';state.fills=state.fills.slice(-10000);}
-  if(fill.signature)state.signatures.push(fill.signature);
-  state.pending=null;
-  if(native<MICRO.reserveLamports){state.guardrailBreaches++;state.halted='REALIZED_RESERVE_BREACH';}
-}
-
-export function recordFailure(state:MicroState,error:unknown,fillReturned:boolean):void {
-  const root=error instanceof Error&&error.cause instanceof MicroReject?error.cause:error;
-  const rejectedBeforeSend=!fillReturned&&(root instanceof MicroReject ||
-    (error instanceof SwapError&&['quote','impact','build','simulate'].includes(error.stage)));
-  if(state.pending) {
-    if(rejectedBeforeSend&&!state.pending.signature)state.pending=null;
-    else {state.halted='TRANSACTION_RECONCILIATION_REQUIRED';
-      if(error instanceof SwapError&&error.signature)state.pending.signature=error.signature;
-    }
-  }
-}
-
 export async function run(args=process.argv.slice(2)):Promise<number> {
-  const opt=options(),checking=args.includes('--check'),live=args.includes('--live');
+  const opt=options(),profile=createProfile(opt.MICRO_BUDGET_USD,opt.MICRO_TRADE_USD),checking=args.includes('--check'),live=args.includes('--live');
   if(live&&(checking||args.includes('--simulation')))throw new MicroReject('CONFLICTING_MODES');
   if(live&&process.env.LIVE_TRADING_CONFIRMED!=='I_UNDERSTAND_THE_RISKS')throw new MicroReject('LIVE_CONFIRMATION_REQUIRED');
   const mode=live?'LIVE':'SIMULATION';
@@ -94,7 +46,7 @@ export async function run(args=process.argv.slice(2)):Promise<number> {
   const market=new MicroMarket(rpc,new DexScreenerClient(log,data),wallet.publicKey);
   const initial=await market.snapshot();
   if(checking) {
-    if(equityUsd(initial)<MICRO.killUsd)throw new MicroReject('FUNDING_BELOW_KILL_THRESHOLD');
+    if(equityUsd(initial)<killThreshold(profile))throw new MicroReject('FUNDING_BELOW_KILL_THRESHOLD');
     let prior:MicroState|undefined;
     try {prior=MicroStateSchema.parse(JSON.parse(await fs.readFile(path.join(dir,'micro-LIVE.json'),'utf8')));}
     catch(error) {if((error as NodeJS.ErrnoException).code!=='ENOENT')throw new MicroReject('STATE_INVALID');}
@@ -104,7 +56,7 @@ export async function run(args=process.argv.slice(2)):Promise<number> {
       if(prior.halted)throw new MicroReject('LIVE_HALTED',prior.halted);
       if(prior.baselineUsd>opt.MICRO_BUDGET_USD)throw new MicroReject('BASELINE_EXCEEDS_BUDGET');
     } else if(equityUsd(initial)>opt.MICRO_BUDGET_USD)throw new MicroReject('WALLET_EXCEEDS_BUDGET');
-    const selling=!!prior?.lot,input=selling?BigInt(prior!.lot!.amount):usdToLamports(sizeUsd(equityUsd(initial),opt.MICRO_TRADE_USD),initial);
+    const selling=!!prior?.lot,input=selling?BigInt(prior!.lot!.amount):usdToLamports(sizeUsd(equityUsd(initial),opt.MICRO_TRADE_USD,prior?.profile??profile),initial);
     await jupiter.quote({inputMint:selling?USDC_MINT:SOL_MINT,outputMint:selling?SOL_MINT:USDC_MINT,amountRaw:input,slippageBps:MICRO.slippageBps});
     if(!selling)checkCosts({notional:input,networkFee:BASE_FEE_LAMPORTS*2n,slippage:0n,spread:0n,accountRent:initial.ataRent});
     checkReserve(initial.native,selling?0n:input,BASE_FEE_LAMPORTS+BigInt(cfg.jupiter.maxPriorityFeeLamports)+initial.ataRent,initial.tempRent);
@@ -114,7 +66,9 @@ export async function run(args=process.argv.slice(2)):Promise<number> {
     return 0;
   }
   await fs.mkdir(dir,{recursive:true});
-  const lockFile=path.join(dir,`micro-${wallet.publicKey.toBase58()}-${mode}.lock`);
+  const lockFile=path.join(dir,`micro-${mode}.lock`);
+  if((await fs.readdir(dir)).some(name=>name!==`micro-${mode}.lock`&&name.startsWith('micro-')&&name.endsWith(`-${mode}.lock`)))
+    throw new MicroReject('LEGACY_INSTANCE_LOCK','Stop the older micro instance and review its ledger before removing its lock');
   const lock=await fs.open(lockFile,'wx').catch(()=>{throw new MicroReject('INSTANCE_LOCK','Check previous process before removing a stale lock');});
   await lock.writeFile(String(process.pid));
   let stop=false;let wake:(()=>void)|undefined;const abort=new AbortController();
@@ -128,7 +82,7 @@ export async function run(args=process.argv.slice(2)):Promise<number> {
       if((error as NodeJS.ErrnoException).code!=='ENOENT')throw new MicroReject('STATE_INVALID','No automatic reset');
       const s=live?initial:{...initial,native:usdToLamports(opt.MICRO_BUDGET_USD,initial),usdc:0n};
       if(live&&equityUsd(s)>opt.MICRO_BUDGET_USD)throw new MicroReject('WALLET_EXCEEDS_BUDGET','Use the dedicated test wallet');
-      state=freshState(wallet.publicKey.toBase58(),mode,s);await persist();
+      state=freshState(wallet.publicKey.toBase58(),mode,s,profile);await persist();
     }
     if(state.wallet!==wallet.publicKey.toBase58()||state.mode!==mode)throw new MicroReject('STATE_IDENTITY_MISMATCH');
     const snapshot=async()=>{
@@ -150,7 +104,7 @@ export async function run(args=process.argv.slice(2)):Promise<number> {
         if(state.halted){label=`HALT ${state.halted}`;log.error('[HALT]',{reason:state.halted,nextMode:'SIMULATION',openPosition:!!state.lot});}
         else {
           const side=state.lot?'SELL':'BUY';
-          const amount=state.lot?BigInt(state.lot.amount):usdToLamports(sizeUsd(state.equityUsd,opt.MICRO_TRADE_USD),s);
+          const amount=state.lot?BigInt(state.lot.amount):usdToLamports(sizeUsd(state.equityUsd,state.profile.requestedTradeUsd,state.profile),s);
           const req:SwapRequest={side,mint:USDC_MINT,amountRaw:amount,slippageBps:MICRO.slippageBps};
           const q=await jupiter.quote({inputMint:side==='BUY'?SOL_MINT:USDC_MINT,outputMint:side==='BUY'?USDC_MINT:SOL_MINT,amountRaw:amount,slippageBps:MICRO.slippageBps});
           const authorization=await guard.beforeBuild(req,q);

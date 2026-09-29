@@ -1,67 +1,37 @@
-# $5 Micro-Capital-Profil
+# Micro-Capital: 10-USD-Profil
 
-Dieses separate Profil verwendet die vorhandenen Jupiter-, RPC- und DexScreener-Clients. Es verändert weder die Hauptstrategie noch das 2x/5x/Phoenix-Playbook. Ein Live-Handel wurde bei der Implementierung nicht ausgeführt. Das Profil ist ein überprüfbarer Prototyp mit Ausführungssperren, kein Nachweis einer profitablen oder produktionsreifen Strategie.
+Das lokale Phantom-Dashboard verwendet die vorhandenen Jupiter-, RPC- und DexScreener-Clients. Die Hauptstrategie und das 2×/5×/Phoenix-Playbook bleiben eigenständige Simulationen. Dieses Profil ist ein guarded Live-Prototyp; keine beobachtete Profitabilität oder produktionsreife 24/7-Verfügbarkeit wird behauptet.
 
-## Start in VS Code unter Windows
+Start und Phantom-Freigaben: [PHANTOM-BALANCE.md](PHANTOM-BALANCE.md).
 
-1. `Solana: Verbindung und Live-Voraussetzungen pruefen` prüft Mainnet, die bestehende lokale Wallet, tatsächliche USD-Kurse, Balance, Rent und einen Jupiter-Quote. Es wird keine Transaktion gebaut, signiert oder gesendet. Ein erfolgreicher Check garantiert keinen handelbaren Kandidaten.
-2. `Solana: Micro-Dashboard starten` öffnet den lokalen Server auf `http://localhost:3002`. Die Webseite im Browser öffnen. Sie liest `data-micro/active-dashboard.json` und folgt dadurch LIVE oder SIMULATION.
-3. `Solana: Micro-Simulation starten` beobachtet echte Quotes mit einem getrennten virtuellen Buch. Für echtes Handeln startet **der Benutzer** `Solana: Kleinen Live-Test starten` und bestätigt im Terminal `LIVE`. Standard: Budget $5, Kaufwunsch $1. Der tatsächliche Betrag wird bei jeder Entscheidung aus aktuellen Kursen berechnet.
+## Handelsregeln
 
-Die Starter ändern nur Prozessvariablen; `.env` und vorhandene Portfolios bleiben erhalten. `start-main-live-test.ps1` bewahrt den bisherigen SOL-basierten Starter. Dieser gehört nicht zum Micro-Profil und besitzt dessen zusätzliche Gates nicht. Nicht gleichzeitig zwei Live-Engines mit derselben Wallet betreiben.
+- Standardbudget 10 USD, Standard-Einstieg 2 USD. Neue Orders liegen im 20–30%-Band der kleineren Größe aus aktueller Equity und Startbudget. Ein größeres Wallet erhöht die Ordergrenze nicht. Legacy-CLI-Profile mit 5 USD sind weiterhin ausdrücklich möglich.
+- Nur SOL/USDC. BUY benötigt einen frischen Rückverkaufsquote für den minimalen Kauf-Output. Minimaler Rückfluss muss Input, beide geschätzten Netzwerkgebühren und neue ATA-Rent übersteigen. Das ist ein Filter aus Quotes, kein statistischer Erwartungswert.
+- Zwei sequenzielle Swaps sind keine atomare Arbitrage. Exit-Quote und Ausführung können sich ändern. Ein Kosten-/Reserve-Gate darf einen Exit blockieren; die Position bleibt offen sichtbar. Kein Zwangsverkauf umgeht die Limits.
+- Native Reserve mindestens 0.003 SOL. Input, tatsächliche Netzwerkgebühr, permanente ATA-Rent und konservativ zwei temporäre Account-Rentbeträge müssen zusätzlich verfügbar sein. Die Reserve ist ein Betriebsparameter, keine allgemeine Rent-Konstante.
+- Maximal 1.5% konservativer Roundtrip-Drag, bezogen auf den ursprünglichen Kaufwert in USD: Basis-/Priority-Gebühr, Slippage, negativer Spread und neue permanente ATA-Rent. Der Exit hat nur das verbleibende USD-Budget. Rent wird über RPC gemessen, niemals als fester Marktwert erfunden.
+- Prioritätsgebühr aus frischen RPC-Stichproben, begrenzt durch Kostenbudget und vorhandenes Jupiter-Maximum. Vor Signatur wird `getFeeForMessage` der tatsächlichen Message geprüft. Fehlende Daten gelten nicht als Nullgebühr.
+- Maximal 30 bps Slippage pro Quote. Kein automatisches Erhöhen, kein Rent-Reclaim und kein Account-Close außerhalb der Swap-Gates. Unsigned RPC-Simulation muss die erwarteten Wallet-/USDC-Minima erhalten.
 
-## Wallet und Zugang
+Ein Ledger startet erst nach Funding und explizitem Arm. Die 30%-Verlustgrenze bezieht sich anschließend auf die tatsächliche Startbewertung, z.B. 7 USD bei exakt 10 USD Start. Die Grenze bleibt nach Neustart erhalten. Bei Kill Switch stoppt Live-Ausführung, die Oberfläche meldet HALTED und bleibt mit der getrennten Simulation zugänglich. Sie erfindet keinen weiterlaufenden Simulationsprozess.
 
-Der vorhandene Executor verwendet einen **lokalen Keypair-Signer** aus der bestehenden Wallet-Konfiguration. Er verbindet keine Phantom-Browser-Session. Ob die konfigurierte Wallet auch in Phantom angezeigt wird, ist davon unabhängig. Geheimnisse bleiben lokal; keine Seed Phrase oder privaten Schlüssel in Chat oder Git einfügen.
+## Persistenz und Wiederanlauf
 
-Das Dashboard besitzt jetzt eine native, rein lesende Phantom-Verbindung: `Connect Phantom` übernimmt die öffentliche Solana-Adresse und zeigt RPC-Balances an. Auto-Confirm und ein Phantom-Signer für den Trading-Executor sind weiterhin **nicht implementiert**. Die offizielle Browser-SDK-Dokumentation unterstützt `injected` ohne App-ID; Auto-Confirm ist für die Browser-Erweiterung vorgesehen. Dafür sind die tatsächliche Erweiterung, eine vom Nutzer freigegebene Session und eine signierte Rückgabe an den lokalen Executor erforderlich. Kein Phantom-Konto/App-ID wurde erfunden oder angelegt. Der lokale Signer wird nicht als Phantom-Auto-Confirm ausgegeben.
+`data-micro/micro-LIVE.json` und `micro-SIMULATION.json` sind getrennte Bücher. Eine serielle Engine und ein exklusiver Lock pro Ledger/Modus/State-Verzeichnis verhindern überlappende Micro-Tasks, auch bei unterschiedlichen Wallets auf mehreren Dashboard-Ports. Ältere Versionen mit Wallet-spezifischen Locks müssen vor dem Update beendet werden. Andere Programme oder State-Verzeichnisse werden dadurch nicht systemweit kontrolliert. Nicht mehrere Live-Bots mit derselben Wallet betreiben.
 
-Vor dem ersten Lauf muss die tatsächliche Gesamtbewertung der separaten SOL/USDC-Testwallet innerhalb des gewählten Budgets und mindestens bei $3.50 liegen. Bereits erwirtschaftete Gewinne dürfen das Startbudget übersteigen; ein vorhandener Ledger muss dazu passen. Andere finanzierte Token oder USDC in zusätzlichen Nicht-ATA-Konten führen zum Abbruch, weil ihre Bewertung/Verwaltung nicht Teil dieses Profils ist. Vorhandene Wallet-Bestände werden nicht als Bot-Handelserfolg verbucht.
+Ledger-Version 2 speichert das Profil. Version 1 wird ohne Verlust der Baseline, Historie, Halts oder Pending-Signaturen migriert; ihr bisheriger Startwert bestimmt ihr Profil. Eine neue 10-USD-Voreinstellung setzt ein altes Buch nicht zurück. Fehlerhafte Dateien, unerklärte Balanceänderungen und unklare Transaktionen bleiben gesperrt, bis sie nachvollziehbar abgeglichen sind.
 
-## Ausführung und Kosten
+Ein fehlender Quote schreibt keine Position ab. Bekannte Fehler vor dem Senden geben die noch unsignierte Absicht frei. Nach dauerhaft gespeicherter Signatur oder unbekanntem Broadcast-Ausgang erfolgt kein automatischer Ersatzauftrag. Ein Stop verkauft keine Position und macht einen Broadcast nicht rückgängig.
 
-- Eine serielle Schleife prüft alle 15 Sekunden. Pro Wallet/Modus/State-Verzeichnis verhindert ein exklusiver Prozess-Lock einen zweiten Micro-Prozess. Der Lock ersetzt keinen systemweiten Schutz vor anderen Programmen, die dieselbe Wallet verwenden.
-- Nur SOL/USDC. BUY verlangt einen frischen Rückverkaufsquote für den minimalen Kauf-Output. Dessen minimaler SOL-Output muss Input, beide geschätzten Netzwerkgebühren und neue ATA-Rent übersteigen. Fees in Jupiter-Routen sind bereits im Output enthalten. Zusätzlich wird negative Abweichung vom USD-Referenzwert konservativ als Spread berücksichtigt.
-- **Das sind zwei aufeinanderfolgende Swaps, keine atomare Arbitrage.** Der Rückverkaufsquote ist ein Kandidatenfilter, kein statistisch geschätzter EV und keine garantierte Exit-Ausführung. Der Exit wird bei der nächsten Schleife neu quotiert. Ein Kosten-/Reserve-Gate kann ihn blockieren; die Position bleibt dann sichtbar und wird später erneut geprüft. Es gibt keine erzwungene Liquidation, die Limits umgeht.
-- Neue Käufe liegen zwischen $1 und $1.50 sowie 20–30% der beobachteten Equity. Bei unvereinbaren Grenzen wird nicht gehandelt. Bestehende Positionen werden vollständig geschlossen; Reinvestition folgt erst danach.
-- Mindestens 0.003 SOL native Reserve. Vor dem Bau werden zusätzlich Input, Gebühren, erforderliche neue ATA-Rent und konservativ zwei temporäre Token-Account-Rentbeträge reserviert. RPC-Simulation prüft vor der Signatur die projizierten Wallet-/USDC-Bestände. 0.003 SOL ist eine gewählte Betriebsreserve, keine allgemeine Solana-Rentkonstante.
-- Maximal 1.5% gesamte konservative Kosten pro Roundtrip, bezogen auf den ursprünglichen Kaufwert. Priority Fee, Basisgebühr, Slippage, negativer Spread und neue permanente ATA-Rent zählen mit. Der Exit verbraucht nur das verbleibende USD-Kostenbudget, auch bei geändertem SOL-Preis.
-- Rent wird über `getMinimumBalanceForRentExemption` gelesen. Fehlende ATA-Konten werden nicht pauschal als billig oder kostenlos behandelt. Eine neue ATA ist nur bei erfülltem Kostenlimit **und** positivem Netto-Roundtrip zulässig. Bei einem $1-Trade kann schon Rent diesen Test scheitern lassen; dann bleibt der Bot ohne Kauf.
-- Priorität: frische RPC-Stichprobe, auf das verbleibende Budget und die vorhandene Jupiter-Maximalgebühr begrenzt. Anschließend wird `getFeeForMessage` für die tatsächlich gebaute Message geprüft. Leere oder fehlende Daten sind keine Nullgebühr.
-- Slippage maximal 30 bps je Quote. Kein automatisches Erhöhen, kein separater Rent-Reclaim und keine Account-Close-Transaktion im Micro-Executor. Aktuelle Quotes, Preisalter, Identität, Simulation und Kosten müssen vor der Signatur bestehen. Signieren ist noch keine Übermittlung; die Signatur wird vor dem Broadcast dauerhaft gespeichert.
+## Legacy-CLI
 
-Reservierte temporäre Rent ist gebundenes Kapital, nicht automatisch eine endgültig gezahlte Gebühr. Eine Simulation kann trotzdem keine Ausführung garantieren. Fehlgeschlagene gesendete Transaktionen können Kosten verursachen; bei unklarem oder gescheitertem Abschluss wird der Ledger gesperrt und nicht durch neue Käufe fortgesetzt.
+`start-live-test.ps1` und die ausdrücklich als **Legacy** markierten Tasks verwenden weiterhin den lokalen Keypair-Signer. Der Standard ist jetzt 10 USD / 2 USD; 5 USD / 1 USD kann als Parameter gewählt werden. Diese Befehle verbinden keine Browser-Wallet. Der alte SOL-basierte `start-main-live-test.ps1` gehört nicht zu diesem Profil.
 
-## Kill Switch, Neustart und Abgleich
+## Messwerte und VPS-Meilenstein
 
-Unter $3.50 Equity oder unter der nativen Reserve wird LIVE gesperrt. Auch unerklärte Balanceänderungen und offene Transaktions-Intents sperren LIVE. Über den PowerShell-Starter führt Exit-Code 75 zur getrennten Micro-Simulation; das Dashboard auf 3002 folgt der aktiven Datei. Haupt-Dashboard 3000 und Playbook 3001 bleiben eigenständig.
+Kennzahlen entstehen aus beobachteten Balances und bestätigten Fills. Nicht gemessene Analytics bleiben `null`/`--`. Reale Kosten, Positionen und Signaturen bleiben im Ledger erhalten. Der CLI-History-Recorder und die bestehende Telemetrie bleiben verfügbar; die Phantom-Oberfläche zeigt ihren eigenen Live-Ledger über die Session-API.
 
-Ein Stop verkauft keine offene Position. Nach dem Senden kann eine Transaktion trotz Prozessende noch bestätigt werden. `micro-LIVE.json` enthält die Pending-Signatur für den Abgleich gegen RPC/Explorer. Ein beschädigter Ledger, unbekannte Bestände oder ein alter Lock werden **nicht** automatisch gelöscht oder zurückgesetzt. Erst laufende Prozesse und die konkrete Transaktion prüfen; dann kann gezielt abgeglichen werden. Automatisierte Reconciliation/Phantom-Wiederverbindung sind noch offen.
+`CLOUD READY` erfordert mindestens 30 geschlossene Live-Roundtrips, mehr als 20% realisierten Netto-Tradinggewinn, aktuelle Equity mindestens 120% der gemessenen Baseline und keine offene Position, ungeklärte Transaktion, externe Balanceänderung oder bekannte Guardrail-Verletzung. Es ist ein Review-Meilenstein, kein Nachweis statistischen Edges und kein automatisches Deployment.
 
-Wer `npm run micro:live` direkt startet, erhält bei einem Halt Exit-Code 75 und muss die Simulation separat starten. Der automatische Moduswechsel gehört zum PowerShell-Starter. Ein bereits gesperrtes Simulationsbuch wird ebenfalls nicht still zurückgesetzt.
-
-## Messwerte und CLOUD READY
-
-`micro-LIVE.json` und `micro-SIMULATION.json` halten getrennte Positionen, Kosten, bestätigte Signaturen, geschlossene Roundtrips und Performance. Dashboard-Werte entstehen aus Beobachtungen/Buchungen; unbekannte Konfidenz, RPC-Latenz und Safety-Scores bleiben `null`/`--`. Kurs- und Equity-Verläufe sind beobachtete Samples, keine erfundenen historischen Daten. Historische USD-Gewinne werden nicht mit dem neuesten SOL-Kurs rückwirkend umgerechnet.
-
-Quotes, Beobachtungen, Entscheidungen und Fills werden bei aktiviertem `DATA_HISTORY_ENABLED` unter `data-micro/history` aufgezeichnet. Die vorhandenen Größen-/Aufbewahrungsgrenzen gelten. Der kompakte Ledger speichert bis zu 10.000 Fills; dann stoppt das Profil, statt Kennzahlen unbemerkt durch Abschneiden zu verfälschen.
-
-`CLOUD READY` erfordert ausschließlich im LIVE-Ledger:
-
-- mindestens 30 vollständig geschlossene Roundtrips;
-- mehr als 20% realisierten Netto-Tradinggewinn relativ zur tatsächlich gemessenen Start-Equity;
-- aktuelle Equity mindestens $6;
-- keine offene Position, keine ungeklärte Transaktion, keine externe Balanceänderung und keinen bekannten Guardrail-Verstoß.
-
-Das ist ein Review-Meilenstein. Es erfolgt kein Docker/AWS-Deployment. 30 Trades und 20% Rendite belegen allein keinen statistischen Edge. Dafür fehlen unter anderem ausreichend unabhängige Out-of-Sample-Beobachtungen, Robustheit über Marktregime und eine Prüfung von Selektionsbias/Ausführungsrisiken. Das verlinkte Medium-Konzept liefert keinen solchen Nachweis für diese konkrete Solana-Strategie.
-
-## Konsolenausgabe
-
-Zeitstempel + `[CHECK]`, `[START]`, `[SKIP]`, `[BUY]`, `[SELL]`, `[HALT]` oder `[CLOUD READY]`, ergänzt um tatsächlich bekannte Felder. Zugangsdaten werden redigiert. PAPER-Fills werden ausdrücklich als `SIMULATION`/`PAPER` gekennzeichnet.
-
-## Technische Quellen
-
-- Phantom Browser SDK: https://docs.phantom.com/sdks/browser-sdk
-- Solana Gebühren: https://solana.com/docs/core/fees
-- Solana RPC Rent: https://solana.com/docs/rpc/http/getminimumbalanceforrentexemption
-- Jupiter Swap-Vertrag des bestehenden Clients: https://dev.jup.ag/api-reference/swap/swap
+VPS-Plan: [VPS-V2.md](VPS-V2.md).

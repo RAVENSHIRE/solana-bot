@@ -107,6 +107,11 @@ export class JupiterClient {
       throw new DataError('critical-execution-data', 'jupiter', 'quote is stale, copied, or modified');
   }
 
+  expiresAt(quote:JupiterQuote):number {
+    this.assertFresh(quote);
+    return this.issued.get(quote)!.at+(this.cfg.quoteMaxAgeMs??15_000);
+  }
+
   async buildSwap(quote: JupiterQuote, userPublicKey: string, priorityFeeCapLamports = this.cfg.maxPriorityFeeLamports): Promise<JupiterSwapResponse> {
     parse(safeInteger, priorityFeeCapLamports, 'jupiter');
     if (priorityFeeCapLamports > this.cfg.maxPriorityFeeLamports) throw new DataError('critical-execution-data', 'jupiter', 'cannot raise configured priority cap');

@@ -1230,3 +1230,26 @@ b {
 .wallet-table td,.wallet-table th { text-align:left; padding:8px; border-bottom:1px solid var(--border); }
 .wallet-table td:nth-child(n+2),.wallet-table th:nth-child(n+2) { text-align:right; font-variant-numeric:tabular-nums; }
 @media(max-width:720px) { .wallet-heading { align-items:flex-start; flex-direction:column; }.wallet-values { grid-template-columns:1fr; gap:12px; }.wallet-actions { flex-wrap:wrap; } }
+
+/* Wallet-first workspace. Existing charts remain available in Market & simulation. */
+[hidden]{display:none!important}
+.workspace-tabs{display:flex;gap:6px;border-bottom:1px solid var(--border,#e4e5e8);padding-bottom:14px;margin-bottom:24px}
+.workspace-tabs button{border:0;background:transparent;color:#737985;padding:11px 18px;border-radius:10px;font:inherit;cursor:pointer}
+.workspace-tabs button[aria-pressed=true]{background:#15191f;color:white}
+.wallet-workspace{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(300px,1fr);gap:22px;align-items:start}
+.trading-panel{padding:26px}.trading-heading{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.eyebrow{font-size:11px;letter-spacing:.1em;color:#7b8190}.trading-heading h2{font-size:24px;font-weight:600;margin:9px 0}
+.execution-pill{font-size:11px;letter-spacing:.06em;border-radius:30px;padding:7px 10px;background:#edf0f3;color:#687182;white-space:nowrap}.execution-pill.armed{background:#e0f7ed;color:#007b57}
+.trading-intro,.trading-details p,.live-ledger p{font-size:13px;color:#717986;line-height:1.65}
+.trading-limits{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;padding:22px 0}
+.trading-limits div{display:flex;flex-direction:column;gap:7px}.trading-limits span{color:#7b8190;font-size:12px}.trading-limits strong{font-size:19px;font-weight:600}
+.trading-actions{display:flex;gap:9px;flex-wrap:wrap;padding:8px 0 18px}.primary-action,.stop-action{font:inherit;font-size:13px;padding:11px 16px;border-radius:9px;cursor:pointer}
+.primary-action{background:#0c936c;color:white;border:1px solid #0c936c}.stop-action{background:#fff4f3;color:#b33333;border:1px solid #f3d3ce}button:disabled{opacity:.5;cursor:not-allowed}
+.approval-row{border-top:1px solid #e5e7ea;padding:16px 0;display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:13px}.approval-row small{flex-basis:100%;color:#7b8190}
+.readiness-list{border-radius:11px;background:#f3f5f7;padding:12px 16px;font-size:13px;color:#5d6675}.readiness-list:empty{display:none}.readiness-list p{display:flex;gap:9px;line-height:1.6;margin:6px 0}.gate-dot{flex:0 0 6px;height:6px;border-radius:50%;background:#b8974c;margin-top:7px}
+.trading-error{color:#b33333;font-size:13px}.signature-request{background:#e4f7ee;border:1px solid #b0dfc5;border-radius:12px;padding:16px;display:flex;gap:10px;flex-direction:column;font-size:13px}
+.trading-details{margin-top:20px;font-size:13px}.trading-details summary,.live-ledger summary{cursor:pointer;color:#5b6370}.trading-details dl{padding:8px 0}.trading-details dl div{display:flex;justify-content:space-between;gap:20px;padding:7px 0;border-bottom:1px solid #f0f1f3}.trading-details dd{margin:0;text-align:right}.trading-details dt{color:#7b8190}
+.live-ledger{border-top:1px solid #e5e7ea;margin-top:22px;padding-top:18px}.live-ledger h3{font-size:14px;font-weight:500;margin:0}.live-ledger code{overflow-wrap:anywhere}.live-ledger li{font-size:13px;padding:7px 0}.live-ledger a{color:#078060}
+.wallet-workspace .wallet-panel{margin:0;padding:24px}.wallet-workspace .wallet-heading{display:block}.wallet-workspace .wallet-values{grid-template-columns:1fr;gap:20px;padding:20px 0}.wallet-workspace .wallet-values>div{border-bottom:1px solid #e6e8ed;padding-bottom:15px}.section-caption{font-size:12px;color:#7b8190;margin:0 0 16px}
+@media(max-width:1100px){.wallet-workspace{grid-template-columns:1fr}.wallet-workspace .wallet-values{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:650px){.trading-panel{padding:18px}.trading-heading{align-items:flex-start}.trading-heading h2{font-size:21px}.trading-limits{grid-template-columns:repeat(2,minmax(0,1fr))}.wallet-workspace .wallet-values{grid-template-columns:1fr}.workspace-tabs button{padding:10px;font-size:13px}}

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AccountLayout, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { Keypair, PublicKey, SystemProgram, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
-import { MICRO, MicroReject, checkCosts, checkReserve, freshState, observeState, sizeUsd, usdToLamports, validPrices, MicroStateSchema, type Snapshot } from '../src/micro/policy';
+import { MICRO, MicroReject, createProfile, readiness, checkCosts, checkReserve, freshState, observeState, sizeUsd, usdToLamports, validPrices, MicroStateSchema, type Snapshot } from '../src/micro/policy';
 import { MicroGuard } from '../src/micro/guard';
 import { book, recordFailure, options } from '../src/micro/runtime';
 import { dashboard } from '../src/micro/dashboard';
@@ -19,7 +19,7 @@ const wallet=Keypair.fromSeed(new Uint8Array(32).fill(41)),owner=wallet.publicKe
 const log=new Logger('micro-test');
 const snap=(patch:Partial<Snapshot>={}):Snapshot=>({native:50_000_000n,usdc:0n,solUsd:100,usdcUsd:1,
   at:Date.now(),receivedAt:Date.now(),ataExists:true,ataRent:0n,tempRent:4_000_000n,...patch});
-const state=()=>freshState(owner.toBase58(),'LIVE',snap());
+const state=()=>freshState(owner.toBase58(),'LIVE',snap(),createProfile(5));
 const req=():SwapRequest=>({side:'BUY',mint:USDC_MINT,amountRaw:10_000_000n,slippageBps:30});
 const quote=(side='BUY'):JupiterQuote=>({inputMint:side==='BUY'?SOL_MINT:USDC_MINT,outputMint:side==='BUY'?USDC_MINT:SOL_MINT,
   inAmount:side==='BUY'?'10000000':'1000000',outAmount:side==='BUY'?'1003000':'10100000',
@@ -28,7 +28,7 @@ const buyFill=(patch:Partial<SwapFill>={}):SwapFill=>({simulated:false,signature
   inAmountRaw:10_000_000n,outAmountRaw:1_000_000n,quotedOutRaw:1_003_000n,minOutRaw:1_000_000n,
   solDeltaLamports:-10_006_000n,feeLamports:6_000n,rentLamports:0n,priceImpactPct:0,realizedSlippageBps:30,route:'fixture',latencyMs:1,...patch});
 function fixture(patch:Partial<Snapshot>={}) {
-  let s=snap(patch);const st=freshState(owner.toBase58(),'LIVE',s);let fee=6_000,simNative=39_994_000,simToken=1_000_000n;
+  let s=snap(patch);const st=freshState(owner.toBase58(),'LIVE',s,createProfile(5));let fee=6_000,simNative=39_994_000,simToken=1_000_000n;
   let err:unknown=null;let priority=1_000n;let reverse=quote('SELL');let persisted=0;
   const accountData=()=>{
     const data=Buffer.alloc(AccountLayout.span);
@@ -66,9 +66,10 @@ test('1.5% fee cap uses exact integer comparison and counts rent and spread',()=
   assert.throws(()=>checkCosts({...costs,slippage:-1n}),/INVALID_TCA/);
 });
 test('USD sizing uses prices and enforces equity share and kill threshold',()=>{
-  assert.equal(sizeUsd(5),1);assert.equal(sizeUsd(5,1.5),1.5);assert.ok(Math.abs(sizeUsd(6)-1.2)<1e-12);
-  assert.equal(sizeUsd(3.5,1.5),1.05);assert.throws(()=>sizeUsd(3.49999),/EQUITY_KILL/);
-  assert.throws(()=>sizeUsd(8),/SIZING/);assert.throws(()=>sizeUsd(5,NaN),/TRADE_SIZE/);
+  assert.equal(sizeUsd(10),2);assert.equal(sizeUsd(10,3),3);
+  assert.equal(sizeUsd(7,3),2.1);assert.throws(()=>sizeUsd(6.9999),/EQUITY_KILL/);
+  assert.equal(sizeUsd(100),2);assert.throws(()=>sizeUsd(10,NaN),/TRADE_SIZE/);
+  assert.equal(sizeUsd(5,1,createProfile(5)),1);
   assert.equal(usdToLamports(1,snap({solUsd:125})),8_000_000n);
 });
 test('nonfinite, future and stale prices are rejected without stablecoin peg assumptions',()=>{
@@ -79,9 +80,9 @@ test('nonfinite, future and stale prices are rejected without stablecoin peg ass
 });
 test('kill switch latches below 3.50 USD and survives validated state reload',()=>{
   const st=state();observeState(st,snap({solUsd:70}));assert.equal(st.halted,null);
-  observeState(st,snap({solUsd:69.99}));assert.equal(st.halted,'EQUITY_BELOW_3_50_USD');
+  observeState(st,snap({solUsd:69.99}));assert.equal(st.halted,'EQUITY_BELOW_70_PERCENT_BASELINE');
   const restored=MicroStateSchema.parse(JSON.parse(JSON.stringify(st)));
-  observeState(restored,snap());assert.equal(restored.halted,'EQUITY_BELOW_3_50_USD');
+  observeState(restored,snap());assert.equal(restored.halted,'EQUITY_BELOW_70_PERCENT_BASELINE');
 });
 test('pending intent blocks restart and unrecognized cash flows cannot inflate performance',()=>{
   const st=state();st.pending={side:'BUY',at:Date.now(),signature:'known-signature'};
@@ -192,7 +193,7 @@ test('strict dashboard schema accepts observed prices and missing analytics rema
   assert.equal(view.metrics.win_rate_percentage,null);assert.equal(view.metrics.total_trades,0);
 });
 test('micro defaults are limits only and out-of-range configuration fails closed',()=>{
-  assert.equal(options({}).MICRO_BUDGET_USD,5);assert.equal(options({}).MICRO_TRADE_USD,1);
+  assert.equal(options({}).MICRO_BUDGET_USD,10);assert.equal(options({}).MICRO_TRADE_USD,2);
   assert.throws(()=>options({MICRO_BUDGET_USD:'500'}));assert.throws(()=>options({MICRO_TRADE_USD:'NaN'}));
   assert.equal(MICRO.reserveLamports,3_000_000n);
 });
@@ -217,4 +218,42 @@ test('user stop prevents even initial authorization from fetching balances',asyn
   const guard=new MicroGuard({owner,state:state(),stopped:()=>true,snapshot:async()=>{snapshots++;return snap();},
     jupiter:{assertFresh:()=>{}} as any,rpc:{} as any,priority:async()=>0n,persist:async()=>{},configuredPriorityCap:1000n});
   await assert.rejects(guard.beforeBuild(req(),quote()),/STOP_REQUESTED/);assert.equal(snapshots,0);
+});
+
+test('old micro ledger migration preserves pending signature, halts and baseline',()=>{
+  const original=state();original.pending={side:'BUY',at:1,signature:'do-not-retry'};original.halted='RECONCILE';
+  const {profile,...legacy}=original;
+  const migrated=MicroStateSchema.parse({...legacy,version:1});
+  assert.equal(migrated.version,2);assert.equal(migrated.profile.initialBudgetUsd,5);
+  assert.deepEqual(migrated.pending,original.pending);assert.equal(migrated.halted,'RECONCILE');
+});
+test('readiness shows funding and account rent blockers without inventing a live quote',()=>{
+  const missing=readiness(snap({native:100_000_000n,ataExists:false,ataRent:2_000_000n}));
+  assert.equal(missing.liveReady,false);assert.ok(missing.blockers.includes('ATA_RENT_EXCEEDS_FEE_CAP'));
+  const funded=readiness(snap({native:100_000_000n}));assert.equal(funded.status,'QUOTE_REQUIRED');
+  assert.equal(funded.feeCapUsd,.03);assert.equal(funded.killEquityUsd,7);
+});
+
+test('a stop during asynchronous Phantom approval is rechecked before durable signing or broadcast',async()=>{
+  const f=fixture();let stopped=false,sends=0,persisted=0,signs=0;
+  const guard={beforeBuild:async()=>({priorityFeeCapLamports:1000}),beforeSign:async()=>{},
+    beforeSend:async()=>{if(stopped)throw new MicroReject('STOP_REQUESTED');},onSigned:async()=>{persisted++;}};
+  const signer={publicKey:owner,signTransaction:async(tx:VersionedTransaction)=>{signs++;tx.sign([wallet]);stopped=true;return tx;}};
+  const jupiter={quote:async()=>quote(),assertFresh:()=>{},buildSwap:async()=>({
+    swapTransaction:Buffer.from(f.tx.serialize()).toString('base64'),lastValidBlockHeight:1,prioritizationFeeLamports:1000})};
+  const executor=new LiveExecutor({cfg:{execution:{preSimulate:false,maxPriceImpactPct:1}},rpc:{},jupiter,logger:log,owner,guard} as any,
+    signer,{sendAndConfirm:async()=>{sends++;throw new Error('must not send');}} as any);
+  await assert.rejects(executor.swap(req()),/STOP_REQUESTED/);
+  assert.equal(signs,1);assert.equal(sends,0);assert.equal(persisted,0);
+});
+
+test('a stop during durable signature persistence cannot enter the broadcaster',async()=>{
+  const f=fixture();let stopped=false,sends=0;
+  const guard={beforeBuild:async()=>({priorityFeeCapLamports:1000}),beforeSign:async()=>{},beforeSend:async()=>{},
+    onSigned:async()=>{stopped=true;},assertActive:()=>{if(stopped)throw new MicroReject('STOP_REQUESTED');}};
+  const jupiter={quote:async()=>quote(),assertFresh:()=>{},buildSwap:async()=>({
+    swapTransaction:Buffer.from(f.tx.serialize()).toString('base64'),lastValidBlockHeight:1,prioritizationFeeLamports:1000})};
+  const executor=new LiveExecutor({cfg:{execution:{preSimulate:false,maxPriceImpactPct:1}},rpc:{},jupiter,logger:log,owner,guard} as any,
+    wallet,{sendAndConfirm:async()=>{sends++;throw new Error('must not send');}} as any);
+  await assert.rejects(executor.swap(req()),/STOP_REQUESTED/);assert.equal(sends,0);
 });

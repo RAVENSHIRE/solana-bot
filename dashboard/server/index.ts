@@ -7,6 +7,7 @@ import { DashboardStore } from "./dashboard-store";
 import { adaptTelemetry } from "./telemetry-adapter";
 import type { StreamSnapshot } from "../shared/state";
 import { createWalletReader } from "./wallet";
+import { TradingService, engineFactory } from './trading';
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const port = Number(process.env.DASHBOARD_PORT || 3000);
@@ -27,6 +28,7 @@ const store =
       );
 await store.start();
 const walletReader = await createWalletReader(path.resolve(root, '..')).catch(() => null);
+const trading = new TradingService(engineFactory(path.resolve(root, '..')));
 const dev = process.argv.includes("--dev");
 const vite = dev
   ? await (
@@ -58,6 +60,11 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(403).end("Local access only");
     return;
   }
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  if (await trading.handleRequest(req, res)) return;
   if (req.method !== "GET" && req.method !== "HEAD") {
     res.writeHead(405, { Allow: "GET, HEAD" }).end();
     return;
@@ -188,6 +195,7 @@ server.on("error", (error) => {
   void shutdown(1);
 });
 async function shutdown(code = 0) {
+  await trading.close();
   store.stop();
   for (const client of clients) client.end();
   await vite?.close();

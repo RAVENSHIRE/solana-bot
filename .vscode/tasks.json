@@ -2,7 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Solana: Verbindung und Live-Voraussetzungen pruefen",
+      "label": "Solana: Lokalen Keypair vorpruefen (Legacy)",
       "type": "shell",
       "command": "npm.cmd",
       "args": [
@@ -25,7 +25,7 @@
       "args": [
         "-NoProfile",
         "-File",
-        "${workspaceFolder}\\start-live-test.ps1"
+        "${workspaceFolder}\\start-phantom-dashboard.ps1"
       ],
       "options": {
         "cwd": "${workspaceFolder}"
@@ -79,6 +79,28 @@
       "presentation": {
         "reveal": "always",
         "panel": "dedicated"
+      },
+      "runOptions": {
+        "instanceLimit": 1
+      }
+    },
+    {
+      "label": "Solana: Lokaler Keypair Live-Test (Legacy)",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}\\start-live-test.ps1"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true
       },
       "runOptions": {
         "instanceLimit": 1

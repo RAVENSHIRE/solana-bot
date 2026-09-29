@@ -8,7 +8,7 @@ import type { SwapRequest } from '../execution/executor';
 import type { JupiterClient, JupiterQuote, JupiterSwapResponse } from '../execution/jupiter-client';
 import type { ConnectionManager } from '../rpc/connection-manager';
 import { exactNumber, parse, safeInteger } from '../data/core/data-validator';
-import { MICRO, MicroReject, checkCosts, checkReserve, equityUsd, validPrices, type MicroState, type Snapshot } from './policy';
+import { MICRO, MicroReject, checkCosts, checkReserve, equityUsd, validPrices, killThreshold, type MicroState, type Snapshot } from './policy';
 
 type Authorization = { snapshot:Snapshot; priority:bigint; notional:bigint; slip:bigint; spread:bigint;
   priorDrag:bigint; drag:bigint; fee:bigint; message?:string };
@@ -25,6 +25,10 @@ export class MicroGuard implements ExecutionGuard {
   lastRent=0n;
   lastSolUsd=0;
   constructor(private readonly d:GuardDeps) {}
+  assertActive():void {
+    if(this.d.stopped?.())throw new MicroReject('STOP_REQUESTED');
+    if(this.d.state.halted)throw new MicroReject('LIVE_HALTED');
+  }
   async onSigned(tx:VersionedTransaction):Promise<void> {
     if(!this.d.state.pending||!tx.signatures[0])throw new MicroReject('PENDING_INTENT_MISSING');
     this.d.state.pending.signature=bs58.encode(tx.signatures[0]);
@@ -34,7 +38,7 @@ export class MicroGuard implements ExecutionGuard {
     if(this.d.stopped?.())throw new MicroReject('STOP_REQUESTED');
     if(this.d.state.halted) throw new MicroReject('LIVE_HALTED',this.d.state.halted);
     const s=await this.d.snapshot(); validPrices(s);
-    if(equityUsd(s)<MICRO.killUsd || s.native<MICRO.reserveLamports) {
+    if(equityUsd(s)<killThreshold(this.d.state) || s.native<MICRO.reserveLamports) {
       this.d.state.halted='EQUITY_OR_RESERVE_KILL'; await this.d.persist(); throw new MicroReject('LIVE_HALTED');
     }
     if(s.native!==BigInt(this.d.state.expectedNative)||s.usdc!==BigInt(this.d.state.expectedUsdc)) {
@@ -69,7 +73,11 @@ export class MicroGuard implements ExecutionGuard {
     const notional=req.side==='BUY'?req.amountRaw:BigInt(Math.floor(this.d.state.lot!.notionalUsd/s.solUsd*1e9));
     if(req.side==='BUY') {
       const usd=exactNumber(notional)/1e9*s.solUsd,eq=equityUsd(s);
-      if(usd<.999999 || usd>MICRO.maxTradeUsd || usd>eq*.30 || usd+1e-6<eq*.20) throw new MicroReject('POSITION_SIZE_LIMIT');
+      const allocated=Math.min(eq,this.d.state.profile.initialBudgetUsd);
+      // Price movement may change notional after sizing. It must remain in the user's allocation band.
+      const rounding=s.solUsd/1e9;
+      if(usd+rounding<allocated*MICRO.minAllocation || usd>allocated*MICRO.maxAllocation+rounding)
+        throw new MicroReject('POSITION_SIZE_LIMIT');
     }
     const slip=req.side==='BUY'?this.usdcLamports(BigInt(q.outAmount)-BigInt(q.otherAmountThreshold),s):BigInt(q.outAmount)-BigInt(q.otherAmountThreshold);
     const quotedValue=req.side==='BUY'?this.usdcLamports(BigInt(q.outAmount),s,false):BigInt(q.outAmount);
@@ -112,7 +120,7 @@ export class MicroGuard implements ExecutionGuard {
     if(native<MICRO.reserveLamports)throw new MicroReject('PROJECTED_RESERVE_FLOOR');
     if(req.side==='BUY' && (s.native-native>req.amountRaw+a.fee+s.ataRent || usdc-s.usdc<BigInt(q.otherAmountThreshold)))throw new MicroReject('SIMULATED_BUY_MISMATCH');
     if(req.side==='SELL' && (s.usdc-usdc!==req.amountRaw || native-s.native<BigInt(q.otherAmountThreshold)-a.fee))throw new MicroReject('SIMULATED_SELL_MISMATCH');
-    if(equityUsd({...s,native,usdc})<MICRO.killUsd)throw new MicroReject('PROJECTED_EQUITY_KILL');
+    if(equityUsd({...s,native,usdc})<killThreshold(this.d.state))throw new MicroReject('PROJECTED_EQUITY_KILL');
     a.message=Buffer.from(tx.message.serialize()).toString('base64');this.lastDrag=a.drag;this.lastFee=a.fee;
   }
   async beforeSend(req:SwapRequest,q:JupiterQuote,tx:VersionedTransaction):Promise<void> {
