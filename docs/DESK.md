@@ -56,9 +56,17 @@ npx tsx src/scripts/desk-replay.ts --mint <MINT> --entry-at <ISO|ms> --entry-pri
 
 The replay recomputes each trade from GeckoTerminal minute candles under several exit rules (current CRASH rules, no take profit, a 50 % runner, hold) and entry sizes, with a constant-product impact estimate from the pool's depth. Downloaded data is cached (`data-desk/replay-cache`), so reruns give the same numbers. Minute candles hide the order of moves inside a minute; the replay assumes losses first, so it can understate what the 2-second exit loop achieves.
 
+### TEST sleeve cycles (no manual reset needed)
+
+When a TEST sleeve can no longer fund an entry and holds no open position, the desk archives it as a completed cycle (`ledger-PAPER[-CRASH].cycle-<time>.json`) and re-funds it at its planned capital. Trades, realized PnL, stats, the scale ladder, the ledger view and re-entry cooldowns all continue across cycles, also after a restart. LIVE never re-funds anything: the wallet is the budget.
+
+### Why a token was not entered
+
+Each candidate shows, per strategy, why this scan did not enter it: held by the other strategy, re-entry cooldown, the guard's last block and when it is retried, slots in use, or an unfundable sleeve. A candidate that was not re-assessed in the last completed scan is marked **STALE** and is never traded on; held tokens and the watchlist are always assessed first (up to 120 tokens per scan). Telemetry keeps separate windows for scanner outcomes and for signals, orders, positions and PnL, so executions never scroll out behind filter messages.
+
 ### Reset TEST
 
-With TEST stopped, **RESET TEST** archives both paper ledgers (`ledger-PAPER*.archived-<time>.json`, never deleted) and restarts every sleeve at its planned capital. Each new token locks ≈ 0.002 SOL of account rent in TEST exactly as in LIVE, so small sleeves run dry after several trades; reset, or raise `DESK_PLANNED_CAPITAL_USD` / `CRASH_CAPITAL_USD` for long TEST runs (they size TEST sleeves only).
+With TEST stopped, **RESET TEST** archives both paper ledgers and their cycles (`ledger-PAPER*.archived-<time>*.json`, never deleted) and restarts every sleeve and its statistics at the planned capital. Each new token locks ≈ 0.002 SOL of account rent in TEST exactly as in LIVE, so small sleeves run dry after several trades; reset, or raise `DESK_PLANNED_CAPITAL_USD` / `CRASH_CAPITAL_USD` for long TEST runs (they size TEST sleeves only).
 
 ## Pipeline
 

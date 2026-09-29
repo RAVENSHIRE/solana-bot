@@ -1319,6 +1319,8 @@ table.cand{font-size:12px;min-width:1500px}
 table.cand tbody tr{cursor:pointer}
 table.cand tbody tr:hover{background:#f7f8fa}
 table.cand td{vertical-align:top}
+.badge-stale{color:#98a0ad;font-weight:600}
+table.cand tr.stale td{color:#98a0ad}
 .badge-qualified{color:#007b57;font-weight:600}.badge-waiting{color:#8a6a1f;font-weight:600}.badge-watchlist{color:#2f4fb3;font-weight:600}.badge-filtered{color:#b33333}
 .auth-suspicious{color:#b33333}.auth-uncertain{color:#8a6a1f}.auth-likely,.auth-verified{color:#007b57}.auth-unverified{color:#98a0ad}
 .detail-row td{background:#fafbfc;cursor:default}

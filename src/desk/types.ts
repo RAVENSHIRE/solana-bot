@@ -61,6 +61,10 @@ export interface Candidate {
   momentumStreak: number;
   /** CRASH entry checks for this scan; null until computed. */
   crash: CrashSignal | null;
+  /** Status view only: why a strategy did not enter this token (skip, cooldown, slots, sleeve…). */
+  entryNotes?: Partial<Record<StrategyId, string>>;
+  /** Status view only: not re-assessed in the last completed scan; its data is a past snapshot and is never traded on. */
+  stale?: boolean;
 }
 
 export interface CrashSignal { signal: boolean; checks: GateResult[]; summary: string }
@@ -116,6 +120,8 @@ export interface StrategyView {
   capitalUsd: number; entryUsd: number; slippageBps: number; maxDragPct: number; maxOpenPositions: number; positionCheckSec: number;
   exitRules: string[];
   cashUsd: number | null; openPositions: number; realizedPnlUsd: number; unrealizedPnlUsd: number | null; feesUsd: number; halted: string | null;
+  /** TEST: completed sleeve cycles (auto re-funded after running dry); stats and realized PnL include them. */
+  cycles: number;
   stats: StrategyStats; scale: ScaleAdvice;
 }
 

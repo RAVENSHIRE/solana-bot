@@ -532,15 +532,47 @@ test('several coins at once: FAIR fills both slots in one scan while CRASH trade
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-test('drill with an empty TEST sleeve waits instead of requesting quotes', async () => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-drill-empty-')), { shared } = world({ priceChange: { m5: -5, h1: 5 } });
+test('an empty TEST sleeve with nothing open is archived as a cycle and re-funded; stats continue across cycles', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-cycle-')), { w, shared } = world();
+  try {
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    const ledgers = (engine as unknown as { ledgers: Map<string, { state: { paperCashLamports: string } }> }).ledgers;
+    engine.start(); await engine.pulse(); await engine.pulse();
+    w.priceFactor = 1.4; await engine.pulse(); w.priceFactor = 1;
+    assert.equal(engine.status({ connected: false, address: null }).strategies.find(s => s.id === 'FAIR')!.stats.trades, 1);
+    ledgers.get('PAPER')!.state.paperCashLamports = '597000';
+    await engine.pulse();
+    const cycle = (await fs.readdir(dir)).filter(n => n.startsWith('ledger-PAPER.cycle-'));
+    assert.equal(cycle.length, 1, 'the dry sleeve was archived as a cycle');
+    assert.ok(engine.events.list().some(e => /^FAIR · TEST sleeve ran dry with no open position: cycle 1 archived/.test(e.message)));
+    const fair = engine.status({ connected: false, address: null }).strategies.find(s => s.id === 'FAIR')!;
+    assert.equal(fair.cashUsd, 5.45, 're-funded to the planned capital'); assert.equal(fair.cycles, 1);
+    assert.equal(fair.stats.trades, 1, 'the archived trade still counts'); assert.ok(fair.realizedPnlUsd > 0.79);
+    // A restart reloads the cycle history; RESET TEST archives it away.
+    engine.stop(); await engine.settled();
+    const reopened = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    assert.equal(reopened.status({ connected: false, address: null }).strategies.find(s => s.id === 'FAIR')!.stats.trades, 1);
+    await reopened.resetTest();
+    assert.equal((await fs.readdir(dir)).filter(n => n.startsWith('ledger-PAPER.cycle-')).length, 0);
+    assert.equal(reopened.status({ connected: false, address: null }).strategies.find(s => s.id === 'FAIR')!.stats.trades, 0);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('execution events survive a flood of scanner events; candidates show why they were not entered and when they went stale', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-window-')), { shared } = world(YOUNG_PUMP, 'insider');
   try {
     const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
     engine.start(); await engine.pulse();
-    (engine as unknown as { ledgers: Map<string, { state: { paperCashLamports: string } }> }).ledgers.get('PAPER')!.state.paperCashLamports = '597000';
-    engine.drill = true; await engine.pulse(); await engine.pulse();
-    assert.ok(!engine.events.list().some(e => e.stage === 'QUOTE'), 'no quote is requested for an unfundable entry');
-    assert.equal(engine.events.list().filter(e => /^DRILL paused: FAIR · TEST sleeve/.test(e.message)).length, 1, 'logged once');
+    for (let i = 0; i < 1_000; i++) engine.events.add('FILTERED', `noise ${i}`);
+    const view = engine.status({ connected: false, address: null });
+    assert.ok(view.events.some(e => e.stage === 'POSITION' && /CRASH · position opened/.test(e.message)), 'the entry is still in the telemetry window');
+    // FAIR sees the same token as a candidate but CRASH holds it.
+    engine.setStrategy('CRASH', false); await engine.pulse(); await engine.pulse();
+    const c = engine.status({ connected: false, address: null }).candidates.find(x => x.mint === MINT)!;
+    assert.equal(c.stale, false);
+    const internals = engine as unknown as { lastCompletedScanAt: number };
+    internals.lastCompletedScanAt = Date.now() + 1;
+    assert.equal(engine.status({ connected: false, address: null }).candidates.find(x => x.mint === MINT)!.stale, true);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 

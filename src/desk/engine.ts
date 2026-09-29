@@ -19,7 +19,7 @@ import type { Logger } from '../utils/logger';
 import { errorMessage } from '../utils/errors';
 import { DESK, STRATEGY_IDS, strategyProfiles, type DeskCapital, type StrategyProfile } from './config';
 import { EventLog } from './events';
-import { DeskLedger } from './ledger';
+import { DeskLedger, type LedgerState } from './ledger';
 import { discover, pairMetrics, selectPair, tierFor, type Discovered } from './discovery';
 import { creatorHolding, gatherOnchain, type OnchainEvidence } from './onchain';
 import { launchCheck, type LaunchCheck } from './launch';
@@ -62,8 +62,14 @@ export class DeskEngine {
   /** Both strategies run in parallel, each with its own ledger (and TEST sleeve). */
   readonly strategies: Record<StrategyId, StrategyProfile>;
   private drillSkips = new Map<string, number>();
-  /** `${strategy}:${mint}` → when the guard last blocked an entry; skipped for DESK.entrySkipMs. */
-  private entrySkips = new Map<string, number>();
+  /** `${strategy}:${mint}` → when and why the guard last blocked an entry; skipped for DESK.entrySkipMs. */
+  private entrySkips = new Map<string, { at: number; code: string }>();
+  /** `${strategy}:${mint}` → why this scan did not enter a token (shown on the candidate). */
+  private entryNotes = new Map<string, string>();
+  /** TEST: sleeves that ran dry and were re-funded; their trades still count in the strategy stats. */
+  private cycles = new Map<StrategyId, LedgerState[]>();
+  private currentScanAt = 0;
+  private lastCompletedScanAt = 0;
   private notes = new Map<string, string>();
   private creatorChecks = new Map<string, number>();
   private holdLog = new Map<string, { pct: number; at: number }>();
@@ -105,7 +111,7 @@ export class DeskEngine {
   static async create(d: DeskDeps): Promise<DeskEngine> {
     const engine = new DeskEngine(d);
     await engine.events.load();
-    if (d.mode === 'PAPER') for (const id of STRATEGY_IDS) await engine.ledgerFor(id, null);
+    if (d.mode === 'PAPER') for (const id of STRATEGY_IDS) { await engine.ledgerFor(id, null); await engine.loadCycles(id); }
     return engine;
   }
 
@@ -204,7 +210,15 @@ export class DeskEngine {
       if (this.solUsd) fresh.fundPaper(this.strategies[id].capitalUsd, this.solUsd);
       await fresh.save();
     }
-    this.preflights = []; this.entrySkips.clear(); this.drillSkips.clear(); this.holdLog.clear(); this.notes.clear(); this.message = null;
+    for (const id of STRATEGY_IDS) {
+      for (const name of await this.cycleFiles(id)) {
+        const target = name.replace('.cycle-', `.archived-${stamp}.cycle-`);
+        await fs.rename(path.join(this.d.dir, name), path.join(this.d.dir, target));
+        archived.push(target);
+      }
+      this.cycles.delete(id);
+    }
+    this.preflights = []; this.entrySkips.clear(); this.drillSkips.clear(); this.holdLog.clear(); this.notes.clear(); this.entryNotes.clear(); this.message = null;
     this.event('SYSTEM', `TEST reset: ${archived.length ? `archived ${archived.join(', ')}` : 'nothing to archive'}; every sleeve restarts at its planned capital`);
     await this.persist();
     return archived;
@@ -281,13 +295,15 @@ export class DeskEngine {
   private async scan(): Promise<void> {
     const d = this.d, stopped = this.stopper(), started = Date.now();
     this.event('SCANNING', 'Scan started', { detail: { mode: d.mode } });
+    this.currentScanAt = started; this.message = null; this.entryNotes.clear();
     await this.syncWallet();
     const books = this.books();
     if (d.mode === 'LIVE' && !books.length) { this.message = 'Connect Phantom to scan in LIVE mode'; this.event('WAITING', this.message); return; }
     if (this.solUsd) for (const b of books) b.ledger.fundPaper(b.p.capitalUsd, this.solUsd);
     await this.checkPositions(STRATEGY_IDS, stopped);
     if (stopped()) return;
-    for (const skips of [this.drillSkips, this.entrySkips]) for (const [k, at] of skips) if (Date.now() - at > (skips === this.drillSkips ? 15 * 60_000 : DESK.entrySkipMs)) skips.delete(k);
+    for (const [k, at] of this.drillSkips) if (Date.now() - at > 15 * 60_000) this.drillSkips.delete(k);
+    for (const [k, v] of this.entrySkips) if (Date.now() - v.at > DESK.entrySkipMs) this.entrySkips.delete(k);
     const found = await discover(d.dex, d.gecko, this.watchlist());
     this.sources = found.sources;
     const staged = await this.stage(found.tokens);
@@ -304,11 +320,13 @@ export class DeskEngine {
     await this.deepAnalyses(due.filter(s => !s.crashHint));
     await this.launchChecks(staged.list, started);
     const counts = this.finalize(staged.list, staged.filtered, started);
+    this.lastCompletedScanAt = started;
     if (stopped()) return;
     this.event('SCANNING', `Scan finished: ${found.tokens.size} tokens discovered, ${counts.qualified} qualified (FAIR), ${counts.crash} CRASH signal(s), ` +
       `${counts.waiting} waiting, ${counts.watch} on watchlist, ${counts.filtered} filtered`, { detail: { ms: Date.now() - started } });
     const fair = this.ledgerOf('FAIR');
-    if (fair) await this.maybeEnter('FAIR', fair, [...this.candidates.values()].filter(c => c.status === 'QUALIFIED'), stopped);
+    // Only candidates assessed in this scan: a token that dropped out of discovery keeps its last snapshot, which is never traded on.
+    if (fair) await this.maybeEnter('FAIR', fair, [...this.candidates.values()].filter(c => c.status === 'QUALIFIED' && c.updatedAt >= started), stopped);
   }
 
   private watchlist(): string[] {
@@ -335,7 +353,10 @@ export class DeskEngine {
   // ------------------------------------------------------------------ discovery → evidence → gates
 
   private async stage(tokens: Map<string, Discovered>): Promise<{ list: Staged[]; filtered: number }> {
-    const d = this.d, mints = [...tokens.keys()].slice(0, 90);
+    // Held tokens and the watchlist first: they are appended last by discovery and must never be cut by the cap.
+    const d = this.d, held = new Set(this.books().flatMap(b => b.ledger.state.positions.map(p => p.mint))), watched = new Set(this.watchlist());
+    const order = (m: string) => held.has(m) ? 0 : watched.has(m) ? 1 : 2;
+    const mints = [...tokens.keys()].sort((a, b) => order(a) - order(b)).slice(0, DESK.maxStagedPerScan);
     const pairs = mints.length ? await d.dex.getPairsForTokens(mints) : [];
     const list: Staged[] = [];
     let filtered = 0;
@@ -545,26 +566,41 @@ export class DeskEngine {
    * example max drag) is skipped for a few minutes and the next one is tried.
    */
   private async maybeEnter(id: StrategyId, ledger: DeskLedger, list: Candidate[], stopped: () => boolean): Promise<void> {
-    const p = this.strategies[id], s = ledger.state;
+    const p = this.strategies[id];
     if (!p.enabled || !this.execution || stopped() || this.entryAllowance === 0) return;
-    if (s.halted || s.pending) { this.message = s.halted ?? 'TRANSACTION_RECONCILIATION_REQUIRED'; return; }
-    const now = Date.now();
-    const recentExit = (mint: string) => s.entries.some(e => e.mint === mint && e.side === 'SELL' && now - e.at < DESK.reentryCooldownMs);
-    const pool = list.filter(c => !this.heldBy(c.mint) && !recentExit(c.mint) && !this.entrySkips.has(`${id}:${c.mint}`))
-      .sort((a, b) => id === 'CRASH' ? crashRank(b) - crashRank(a) : composite(b) - composite(a));
+    if (ledger.state.halted || ledger.state.pending) { this.message = ledger.state.halted ?? 'TRANSACTION_RECONCILIATION_REQUIRED'; return; }
+    // TEST: a sleeve that ran dry with nothing open becomes a completed cycle and is re-funded, so testing never stalls.
+    if (this.d.mode === 'PAPER' && !ledger.state.positions.length && this.sleeveShort(ledger, p)) ledger = await this.cycleSleeve(id, ledger);
+    const s = ledger.state, now = Date.now(), note = (mint: string, text: string) => this.entryNotes.set(`${id}:${mint}`, text);
+    // Exits in completed TEST cycles count too: a re-funded sleeve never forgets a cooldown.
+    const history = [...(this.d.mode === 'PAPER' ? this.cycles.get(id) ?? [] : []).flatMap(c => c.entries), ...s.entries];
+    const lastExit = (mint: string) => history.filter(e => e.mint === mint && e.side === 'SELL').at(-1)?.at ?? null;
+    const recentExit = (mint: string) => { const at = lastExit(mint); return at !== null && now - at < DESK.reentryCooldownMs; };
+    const pool: Candidate[] = [];
+    for (const c of list) {
+      const holder = this.heldBy(c.mint), exit = lastExit(c.mint), skip = this.entrySkips.get(`${id}:${c.mint}`);
+      if (holder) { if (holder !== id) note(c.mint, `held by ${holder}`); continue; }
+      if (exit !== null && now - exit < DESK.reentryCooldownMs) { note(c.mint, `re-entry cooldown until ${hhmm(exit + DESK.reentryCooldownMs)}`); continue; }
+      if (skip) { note(c.mint, `${skip.code} at ${hhmm(skip.at)}; retry after ${hhmm(skip.at + DESK.entrySkipMs)}`); continue; }
+      pool.push(c);
+    }
+    pool.sort((a, b) => id === 'CRASH' ? crashRank(b) - crashRank(a) : composite(b) - composite(a));
     if (!pool.length) {
       if (id === 'FAIR' && this.drill && this.d.mode === 'PAPER') return this.drillEnter(ledger, stopped, recentExit);
       if (id === 'FAIR') this.message = 'No qualified entry candidate';
       return;
     }
-    let slots = p.maxOpenPositions - s.positions.length;
-    if (slots <= 0) { this.note(id, 'WAITING', `${id} · ${pool.length} candidate(s), but ${s.positions.length}/${p.maxOpenPositions} positions are open`); return; }
-    let attempts = 0;
+    let slots = p.maxOpenPositions - s.positions.length, attempts = 0, halt: string | null = null;
+    if (slots <= 0) this.note(id, 'WAITING', `${id} · ${pool.length} candidate(s), but ${s.positions.length}/${p.maxOpenPositions} positions are open`);
     for (const c of pool) {
-      if (slots <= 0 || attempts >= DESK.maxEntryAttemptsPerScan || stopped() || !this.execution || s.halted || this.entryAllowance === 0) break;
-      const short = this.sleeveShort(ledger, p);
-      if (short) { this.note(id, 'WAITING', short); break; }
-      if (c.onchain.decimals === null) { this.event('WAITING', `${id} · token decimals unknown; entry deferred`, { mint: c.mint, symbol: c.symbol }); continue; }
+      if (!halt) {
+        if (slots <= 0) halt = `all ${p.maxOpenPositions} ${id} slots in use`;
+        else if (attempts >= DESK.maxEntryAttemptsPerScan) halt = `${DESK.maxEntryAttemptsPerScan} entry attempts this scan; next scan`;
+        else if (stopped() || !this.execution || s.halted || this.entryAllowance === 0) halt = 'execution stopped or paused';
+        else { const short = this.sleeveShort(ledger, p); if (short) { this.note(id, 'WAITING', short); halt = 'TEST sleeve cannot fund an entry'; } }
+      }
+      if (halt) { note(c.mint, halt); continue; }
+      if (c.onchain.decimals === null) { note(c.mint, 'token decimals unknown; deferred'); continue; }
       if (this.heldBy(c.mint)) continue;
       attempts++; this.notes.delete(id);
       this.event('QUALIFIED', id === 'CRASH' ? `CRASH entry selected: ${c.crash?.summary ?? ''}` : `FAIR entry candidate selected (composite ${composite(c).toFixed(0)})`,
@@ -576,9 +612,38 @@ export class DeskEngine {
         if (this.entryAllowance !== null) { this.entryAllowance--; if (this.entryAllowance === 0) this.event('SYSTEM', 'Entry allowance used up: no new entries this session; exits continue'); }
         continue;
       }
-      if (code && FUNDS_CODES.has(code)) break;
-      if (code !== 'STOP_REQUESTED') this.entrySkips.set(`${id}:${c.mint}`, Date.now());
+      const reason = code ?? 'ORDER_FAILED';
+      note(c.mint, `blocked: ${reason} at ${hhmm(Date.now())}`);
+      if (FUNDS_CODES.has(reason)) { halt = reason; continue; }
+      this.entrySkips.set(`${id}:${c.mint}`, { at: Date.now(), code: reason });
     }
+  }
+
+  /** TEST: archives a sleeve that ran dry with nothing open as a completed cycle and re-funds it at its planned capital. */
+  private async cycleSleeve(id: StrategyId, ledger: DeskLedger): Promise<DeskLedger> {
+    await this.orders;
+    const key = this.ledgerKey(id, null), stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const target = path.join(this.d.dir, `ledger-${key}.cycle-${stamp}.json`);
+    await ledger.save();
+    await fs.rename(ledger.file, target);
+    this.cycles.set(id, [...(this.cycles.get(id) ?? []), ledger.state]);
+    this.ledgers.delete(key);
+    const fresh = await this.ledgerFor(id, null);
+    if (this.solUsd) fresh.fundPaper(this.strategies[id].capitalUsd, this.solUsd);
+    await fresh.save();
+    this.notes.delete(id);
+    this.event('SYSTEM', `${id} · TEST sleeve ran dry with no open position: cycle ${this.cycles.get(id)!.length} archived (${path.basename(target)}), ` +
+      `sleeve re-funded to $${this.strategies[id].capitalUsd}; stats and realized PnL continue across cycles`, { detail: { strategy: id } });
+    return fresh;
+  }
+  private async cycleFiles(id: StrategyId): Promise<string[]> {
+    const prefix = `ledger-${this.ledgerKey(id, null)}.cycle-`;
+    return (await fs.readdir(this.d.dir).catch(() => [] as string[])).filter(n => n.startsWith(prefix) && n.endsWith('.json')).sort();
+  }
+  private async loadCycles(id: StrategyId): Promise<void> {
+    const states: LedgerState[] = [];
+    for (const name of await this.cycleFiles(id)) states.push((await DeskLedger.open(path.join(this.d.dir, name), 'PAPER', null, Date.now())).state);
+    this.cycles.set(id, states);
   }
 
   /**
@@ -591,7 +656,7 @@ export class DeskEngine {
     const short = this.sleeveShort(ledger, this.strategies.FAIR);
     if (short) { this.note('FAIR', 'WAITING', `DRILL paused: ${short}`); return; }
     const safe = (c: Candidate) => ['mintAuthority', 'freezeAuthority', 'contract', 'liquidity', 'fairLaunch'].every(k => c.gates.find(g => g.key === k)?.status === 'PASS');
-    const pool = [...this.candidates.values()].filter(c => c.tier === 'TRENDING' && c.onchain.decimals !== null && safe(c) &&
+    const pool = [...this.candidates.values()].filter(c => c.updatedAt >= this.currentScanAt && c.tier === 'TRENDING' && c.onchain.decimals !== null && safe(c) &&
       !this.heldBy(c.mint) && !recentExit(c.mint) && !this.drillSkips.has(c.mint)).sort((a, b) => composite(b) - composite(a));
     if (!pool.length) { this.message = 'DRILL: no trending candidate with passing safety gates yet'; return; }
     for (const c of pool.slice(0, 3)) {
@@ -780,7 +845,9 @@ export class DeskEngine {
     const budget = d.mode === 'PAPER' ? paper : native;
     const spendable = budget === null ? null : budget - DESK.reserveLamports > 0n ? budget - DESK.reserveLamports : 0n;
     const cash = d.mode === 'PAPER' ? paper : native;
-    const rows = books.flatMap(b => [...b.ledger.state.entries.slice(-100)].reverse().map(e => ({ ...e, strategy: b.id }))).sort((a, b) => b.at - a.at).slice(0, 100);
+    // TEST: completed sleeve cycles stay in the ledger view; they are part of the same test history.
+    const rows = books.flatMap(b => [...(d.mode === 'PAPER' ? this.cycles.get(b.id) ?? [] : []).flatMap(c => c.entries), ...b.ledger.state.entries].slice(-100).reverse()
+      .map(e => ({ ...e, strategy: b.id }))).sort((a, b) => b.at - a.at).slice(0, 100);
     return {
       mode: d.mode, label: LABEL[d.mode], scanner: this.scanner, execution: this.execution, drill: this.drill, wallet,
       strategies: STRATEGY_IDS.map(id => this.strategyView(id)),
@@ -798,22 +865,26 @@ export class DeskEngine {
       message: this.message, halted: books.find(b => b.ledger.state.halted)?.ledger.state.halted ?? null,
       lastScanAt: this.lastScanAt, nextScanAt: this.nextScanAt, scanning: this.busy,
       events: this.events.list(250).reverse(),
-      candidates: [...this.candidates.values()].sort((a, b) => rank(b) - rank(a) || Number(!!b.crash?.signal) - Number(!!a.crash?.signal) || composite(b) - composite(a)).slice(0, 40),
+      candidates: [...this.candidates.values()].map(c => {
+        const notes = Object.fromEntries(STRATEGY_IDS.flatMap(id => { const n = this.entryNotes.get(`${id}:${c.mint}`); return n ? [[id, n]] : []; }));
+        return { ...c, entryNotes: notes, stale: c.updatedAt < this.lastCompletedScanAt };
+      }).sort((a, b) => Number(a.stale) - Number(b.stale) || rank(b) - rank(a) || Number(!!b.crash?.signal) - Number(!!a.crash?.signal) || composite(b) - composite(a)).slice(0, 40),
       preflights: [...this.preflights].reverse(), positions, ledger: rows,
       sources: this.sources, path: this.pathView(),
     };
   }
 
   private strategyView(id: StrategyId): StrategyView {
-    const p = this.strategies[id], s = this.ledgerOf(id)?.state ?? null, solUsd = this.solUsd;
+    const p = this.strategies[id], s = this.ledgerOf(id)?.state ?? null, solUsd = this.solUsd, past = this.d.mode === 'PAPER' ? this.cycles.get(id) ?? [] : [];
     const positions = s?.positions ?? [];
     const valued = positions.every(x => x.lastValueLamports !== null);
-    const stats = strategyStats(s?.entries ?? []);
+    const stats = strategyStats([...past.flatMap(c => c.entries), ...(s?.entries ?? [])]);
     return {
       id, label: p.label, summary: p.summary, enabled: p.enabled, capitalUsd: p.capitalUsd, entryUsd: p.entryUsd, slippageBps: p.slippageBps,
       maxDragPct: Number(p.maxDragBps) / 100, maxOpenPositions: p.maxOpenPositions, positionCheckSec: p.positionCheckMs / 1000, exitRules: exitRuleText(p),
       cashUsd: this.d.mode === 'PAPER' && s?.paperCashLamports != null && solUsd ? sol(BigInt(s.paperCashLamports)) * solUsd : null,
-      openPositions: positions.length, realizedPnlUsd: s?.realizedPnlUsd ?? 0, feesUsd: s?.feesUsd ?? 0, halted: s?.halted ?? null,
+      openPositions: positions.length, realizedPnlUsd: past.reduce((a, c) => a + c.realizedPnlUsd, s?.realizedPnlUsd ?? 0),
+      feesUsd: past.reduce((a, c) => a + c.feesUsd, s?.feesUsd ?? 0), halted: s?.halted ?? null, cycles: past.length,
       unrealizedPnlUsd: solUsd && valued ? positions.reduce((a, x) => a + sol(BigInt(x.lastValueLamports!)) * solUsd - x.costUsd, 0) : null,
       stats, scale: scaleAdvice(p, stats, this.d.mode),
     };
@@ -840,6 +911,7 @@ export class DeskEngine {
 }
 
 const usd = (n: number | null) => n === null ? 'UNKNOWN' : `${n < 0 ? '-' : ''}$${Math.abs(n).toFixed(4)}`;
+const hhmm = (at: number) => new Date(at).toTimeString().slice(0, 5);
 const rank = (c: Candidate) => ({ QUALIFIED: 4, WAITING: 3, WATCHLIST: 2, FILTERED: 1 })[c.status];
 function composite(c: Candidate): number {
   const v = (k: string) => c.scores.find(s => s.key === k)?.score ?? 0;

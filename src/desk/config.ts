@@ -21,6 +21,8 @@ export const DESK = Object.freeze({
   reentryCooldownMs: 30 * 60_000,
   /** Orders tried per strategy and scan; a candidate blocked by the guard is skipped for entrySkipMs. */
   maxEntryAttemptsPerScan: 4,
+  /** Tokens assessed per scan: held positions and the watchlist first, then fresh discoveries. */
+  maxStagedPerScan: 120,
   entrySkipMs: 5 * 60_000,
   /** Deep (RPC + social + trade-flow) analyses per scan; the rest keep their last evidence. */
   maxDeepAnalysesPerScan: 4,

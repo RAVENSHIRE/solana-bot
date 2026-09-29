@@ -142,7 +142,7 @@ function Strategies({ d, t }: { d: DeskStatus; t: TradingSession }) {
         {row('Entry', `${money(s.entryUsd)} · drag ≤ ${numeric(s.maxDragPct, 1)}%`)}
         {row(test ? 'TEST sleeve' : 'Budget', test ? `${money(s.cashUsd)} of ${money(s.capitalUsd)}` : 'Phantom wallet (shared)')}
         {row('Positions', `${s.openPositions} / ${s.maxOpenPositions} · checked every ${s.positionCheckSec}s`)}
-        {row('Unrealized · realized', `${fine(s.unrealizedPnlUsd)} · ${fine(s.realizedPnlUsd)}`)}
+        {row(s.cycles ? `Unrealized · realized (${s.cycles + 1} cycles)` : 'Unrealized · realized', `${fine(s.unrealizedPnlUsd)} · ${fine(s.realizedPnlUsd)}`)}
         {row('Trades · win rate', `${x.trades} · ${x.winRatePct === null ? '--' : `${x.winRatePct.toFixed(0)}%`}`)}
         {row('Avg return · hold', `${signed(x.avgReturnPct)} · ${x.avgHoldSec === null ? '--' : `${Math.round(x.avgHoldSec)}s`}`)}
         {row('Best · worst', `${signed(x.bestReturnPct)} · ${signed(x.worstReturnPct)}`)}
@@ -178,7 +178,7 @@ function Telemetry({ events }: { events: DeskEvent[] }) {
     <ul className="events">{shown.map(e => <li key={e.id}>
       <time>{ago(e.at)}</time><span className={`tag tag-${e.stage.toLowerCase()}`}>[{e.stage.replace('_', ' ')}]</span>
       <span className="event-token" title={e.mint ?? undefined}>{e.symbol ?? (e.mint ? short(e.mint) : '')}</span><span>{e.message}</span></li>)}
-      {!shown.length && <li>No events yet. Start TEST or a LIVE session.</li>}</ul>
+      {!shown.length && <li>{events.length ? 'No events of this kind in the current window.' : 'No events yet. Start TEST or a LIVE session.'}</li>}</ul>
   </section>;
 }
 
@@ -209,12 +209,13 @@ function Candidates({ list, probe, busy }: { list: Candidate[]; probe: ((mint: s
       <th>Token / CA</th><th>Tier</th><th>FAIR status</th><th>CRASH</th><th>Market cap</th><th>Pool age</th><th>Liquidity</th><th>5m vol</th><th>Buy/sell</th><th>Accel.</th>
       <th>Top-10</th><th>Dev</th><th>Website</th><th>X</th><th>X activity</th><th>Narrative</th><th>Mint / freeze</th><th>Risk flags</th></tr></thead>
       <tbody>{list.map(c => <Fragment key={c.mint}>
-        <tr className={`status-${c.status.toLowerCase()}`} onClick={() => setOpen(open === c.mint ? null : c.mint)} aria-expanded={open === c.mint}>
+        <tr className={`status-${c.status.toLowerCase()}${c.stale ? ' stale' : ''}`} onClick={() => setOpen(open === c.mint ? null : c.mint)} aria-expanded={open === c.mint}>
           <td title={c.mint}><strong>{c.symbol ?? '?'}</strong><br /><small>{short(c.mint)}</small></td>
           <td>{c.tier === 'ULTRA_EARLY' ? 'Ultra-early' : 'Trending'}</td>
-          <td><span className={`badge-${c.status.toLowerCase()}`}>{c.status}</span><br /><small>{c.classification.replace('_', ' ')}</small></td>
-          <td title={c.crash?.summary}>{c.crash?.signal ? <span className="badge-qualified">SIGNAL</span> : <span className="badge-filtered">no</span>}<br />
-            <small>{c.crash ? (c.crash.signal ? 'entry-ready' : c.crash.summary.split(':')[0]) : '--'}</small></td>
+          <td>{c.stale ? <span className="badge-stale" title="Not re-assessed in the last scan; never traded on">STALE · {ago(c.updatedAt)}</span>
+            : <span className={`badge-${c.status.toLowerCase()}`}>{c.status}</span>}<br /><small>{c.entryNotes?.FAIR ?? c.classification.replace('_', ' ')}</small></td>
+          <td title={c.crash?.summary}>{c.stale ? <span className="badge-stale">STALE</span> : c.crash?.signal ? <span className="badge-qualified">SIGNAL</span> : <span className="badge-filtered">no</span>}<br />
+            <small>{c.entryNotes?.CRASH ?? (c.crash ? (c.crash.signal ? 'entry-ready' : c.crash.summary.split(':')[0]) : '--')}</small></td>
           <td>{usdOrUnknown(c.metrics.marketCapUsd)}</td><td>{c.metrics.poolAgeMin === null ? 'UNKNOWN' : `${numeric(c.metrics.poolAgeMin, 0)}m`}</td>
           <td>{usdOrUnknown(c.metrics.liquidityUsd)}</td><td>{usdOrUnknown(c.metrics.volume5mUsd)}</td>
           <td>{c.metrics.buySellRatio5m === null ? 'UNKNOWN' : c.metrics.buySellRatio5m.toFixed(2)}</td>
