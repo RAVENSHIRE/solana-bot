@@ -9,7 +9,8 @@ export interface TradingView {
   pending: { id: string; transactionBase64: string; expiresAt: number } | null;
   mode: DeskMode; desk: DeskStatus | null; deskError: string | null;
 }
-export type DeskAction = 'select-mode' | 'start-test' | 'stop-test' | 'start-live' | 'pause' | 'resume' | 'stop-live' | 'probe' | 'drill-on' | 'drill-off';
+export type DeskAction = 'select-mode' | 'start-test' | 'stop-test' | 'start-live' | 'pause' | 'resume' | 'stop-live' | 'probe' | 'drill-on' | 'drill-off' |
+  'strategy' | 'reset-test';
 interface Session { id: string; address: string }
 const message = (error: unknown) => error instanceof Error ? error.message : 'Local service unavailable';
 

@@ -11,7 +11,10 @@ import type { DeskMode } from '../../src/desk/types';
 
 // Minimal engine double: records control calls; the real pipeline is covered by tests/desk.test.ts.
 function engine(mode: DeskMode) {
-  const e = { mode, scanner: false, execution: false, busy: false, nextScanAt: null as number | null, pulses: 0,
+  const e = { mode, scanner: false, execution: false, busy: false, nextScanAt: null as number | null, pulses: 0, resets: 0,
+    strategies: { FAIR: { enabled: true }, CRASH: { enabled: mode === 'PAPER' } } as Record<string, { enabled: boolean }>,
+    setStrategy(id: string, enabled: boolean) { e.strategies[id]!.enabled = enabled; },
+    resetTest: async () => { if (e.scanner) throw new DeskReject('STOP_TEST_FIRST'); e.resets++; return []; },
     start() { e.scanner = true; e.execution = true; }, stop() { e.scanner = false; e.execution = false; },
     pause() { e.execution = false; }, resume() { if (!e.scanner) throw new DeskReject('SCANNER_OFF'); e.execution = true; },
     pulse: async () => { e.pulses++; }, tick: () => {}, settled: async () => {}, persist: async () => {}, events: { add: () => {} },
@@ -45,6 +48,11 @@ test('desk API: same-origin capability, TEST without signing, LIVE only with a l
     assert.equal((await post('desk', { action: 'start-test' }, { ...headers, Origin: 'https://evil.example' })).status, 403);
     assert.equal((await post('desk', { action: 'start-test' }, headers)).status, 200);
     assert.equal(engines.PAPER.scanner, true); assert.equal(context().wallet('PAPER'), null, 'TEST without Phantom has no wallet, and never a signer');
+    assert.equal((await (await post('desk', { action: 'reset-test' }, headers)).json()).message, 'STOP_TEST_FIRST');
+    assert.equal((await post('desk', { action: 'strategy', strategy: 'CRASH', enabled: false }, headers)).status, 200);
+    assert.equal(engines.PAPER.strategies.CRASH!.enabled, false); assert.equal(engines.LIVE.strategies.CRASH!.enabled, false, 'toggles apply to the selected mode only');
+    assert.equal((await (await post('desk', { action: 'strategy', strategy: 'MOON', enabled: true }, headers)).json()).message, 'INVALID_STRATEGY');
+    assert.equal((await (await post('desk', { action: 'strategy', strategy: 'FAIR', enabled: 'yes' }, headers)).json()).message, 'INVALID_STRATEGY');
     assert.equal((await (await post('desk', { action: 'select-mode', mode: 'LIVE' }, headers)).json()).message, 'STOP_CURRENT_MODE_FIRST');
     assert.equal((await (await post('desk', { action: 'start-live' }, headers)).json()).message, 'SESSION_REQUIRED');
     const s = await (await post('connect', { address }, headers)).json();
@@ -52,7 +60,9 @@ test('desk API: same-origin capability, TEST without signing, LIVE only with a l
     assert.ok(context().wallet('LIVE')!.signer, 'LIVE signs through the Phantom broker');
     assert.equal((await (await post('desk', { action: 'start-live', sessionId: s.sessionId }, headers)).json()).message, 'STOP_TEST_FIRST');
     assert.equal((await post('desk', { action: 'stop-test' }, headers)).status, 200);
+    assert.equal((await post('desk', { action: 'reset-test' }, headers)).status, 200); assert.equal(engines.PAPER.resets, 1);
     assert.equal((await post('desk', { action: 'start-live', sessionId: s.sessionId }, headers)).status, 200);
+    assert.equal((await (await post('desk', { action: 'reset-test' }, headers)).json()).message, 'RESET_TEST_ONLY');
     assert.equal(engines.LIVE.scanner, true);
     const publicView = await (await fetch(`${base}/api/trading`)).json();
     assert.equal(publicView.session, null); assert.equal(publicView.pending, null); assert.equal(publicView.mode, 'LIVE');

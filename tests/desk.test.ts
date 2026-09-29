@@ -16,13 +16,14 @@ import { SigningError, type TransactionSigner } from '../src/execution/transacti
 import { Logger, configureLogger } from '../src/utils/logger';
 import { acquireProcessLock } from '../src/utils/fs';
 import { SOL_MINT, USDC_MINT } from '../src/core/types';
-import { DESK, deskCapital } from '../src/desk/config';
+import { CRASH_DEFAULTS, DESK, deskCapital, strategyProfiles } from '../src/desk/config';
 import { pairMetrics, selectPair, tierFor, type Discovered } from '../src/desk/discovery';
 import { assessAuthenticity, checkWebsite, parseXLink, XClient, type WebsiteCheck } from '../src/desk/social';
 import { analyze } from '../src/desk/analysis';
 import { DeskLedger } from '../src/desk/ledger';
 import { DeskEngine } from '../src/desk/engine';
-import type { DeskEvent } from '../src/desk/types';
+import { crashCheck, exitReason, scaleAdvice, strategyStats } from '../src/desk/strategies';
+import type { DeskEvent, LedgerEntry } from '../src/desk/types';
 
 // Synthetic, deterministic fixtures only. No request leaves the process and nothing is signed or submitted.
 configureLogger({ level: 'error', color: false });
@@ -162,30 +163,39 @@ test('process lock: a crashed owner is recovered; a live or unreadable owner sti
 
 // ---------------------------------------------------------------- full pipeline against a simulated network
 
-function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' = 'fair') {
-  const w = { priceFactor: 1, extraRent: 0, liquidity: 50_000, native: 45_000_000, last: null as null | { side: 'BUY' | 'SELL'; inAmount: bigint; outAmount: bigint }, sends: 0, signRequests: 0 };
+interface Token { mint: string; symbol: string; pool: string; curve: string; patch: Record<string, unknown>; launch: 'fair' | 'insider' }
+function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' = 'fair', more: Array<Omit<Token, 'curve'>> = []) {
+  const tokens: Token[] = [{ mint: MINT, symbol: 'ABC', pool: POOL, curve: SOL_POOL, patch, launch }, ...more.map((t, i) => ({ ...t, curve: key(200 + i).toBase58() }))];
+  const w = { priceFactor: 1, extraRent: 0, liquidity: 50_000, native: 45_000_000, sends: 0, signRequests: 0,
+    last: null as null | { side: 'BUY' | 'SELL'; mint: string; inAmount: bigint; outAmount: bigint } };
+  const holderMint = new Map<string, string>();
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
   const solPair = { chainId: 'solana', dexId: 'orca', pairAddress: SOL_POOL, baseToken: { address: SOL_MINT, symbol: 'SOL' }, quoteToken: { address: USDC_MINT, symbol: 'USDC' },
     priceUsd: '100', liquidity: { usd: 10_000_000 }, marketCap: 5e10, fdv: 6e10, pairCreatedAt: NOW - 1e10, txns: { h1: { buys: 5, sells: 5 } } };
   const fetcher: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     if (url.hostname === 'api.dexscreener.com') {
-      if (url.pathname.startsWith('/token-')) return json([{ chainId: 'solana', tokenAddress: MINT, description: 'Alpha does things', totalAmount: 100,
-        links: [{ type: 'twitter', url: 'https://x.com/alphaproj' }, { label: 'Website', url: 'https://alpha.example' }] }]);
+      if (url.pathname.startsWith('/token-')) return json(tokens.map(t => ({ chainId: 'solana', tokenAddress: t.mint, description: 'Alpha does things', totalAmount: 100,
+        links: [{ type: 'twitter', url: 'https://x.com/alphaproj' }, { label: 'Website', url: 'https://alpha.example' }] })));
       const mints = url.pathname.split('/').pop()!.split(',');
-      return json([...(mints.includes(SOL_MINT) ? [solPair] : []), ...(mints.includes(MINT) ? [pairRaw({ pairCreatedAt: NOW - 2 * 86_400_000, liquidity: { usd: w.liquidity }, ...patch })] : [])]);
+      return json([...(mints.includes(SOL_MINT) ? [solPair] : []), ...tokens.filter(t => mints.includes(t.mint)).map(t => pairRaw({ pairCreatedAt: NOW - 2 * 86_400_000,
+        liquidity: { usd: w.liquidity }, pairAddress: t.pool, baseToken: { address: t.mint, symbol: t.symbol, name: t.symbol }, ...t.patch }))]);
     }
     if (url.hostname === 'api.geckoterminal.com') {
       const created = Math.floor((NOW - 2 * 86_400_000) / 60_000) * 60;
-      const geckoPool = (address: string, dex: string) => ({ id: `solana_${address}`, attributes: { address, name: 'ABC / SOL', base_token_price_usd: '0.0005',
+      const geckoPool = (address: string, dex: string, mint: string) => ({ id: `solana_${address}`, attributes: { address, name: 'ABC / SOL', base_token_price_usd: '0.0005',
         reserve_in_usd: '50000', market_cap_usd: null, fdv_usd: '500000', pool_created_at: new Date(created * 1000).toISOString(), volume_usd: { h1: '1000', h24: '9000' } },
-        relationships: { base_token: { data: { id: `solana_${MINT}` } }, quote_token: { data: { id: `solana_${SOL_MINT}` } }, dex: { data: { id: dex } } } });
-      if (url.pathname.endsWith(`/tokens/${MINT}/pools`)) return json({ data: launch === 'fair' ? [geckoPool(POOL, 'raydium')] : [geckoPool(SOL_POOL, 'pump-fun'), geckoPool(POOL, 'pumpswap')] });
+        relationships: { base_token: { data: { id: `solana_${mint}` } }, quote_token: { data: { id: `solana_${SOL_MINT}` } }, dex: { data: { id: dex } } } });
+      const token = tokens.find(t => url.pathname.endsWith(`/tokens/${t.mint}/pools`));
+      if (token) return json({ data: token.launch === 'fair' ? [geckoPool(token.pool, 'raydium', token.mint)]
+        : [geckoPool(token.curve, 'pump-fun', token.mint), geckoPool(token.pool, 'pumpswap', token.mint)] });
       if (url.pathname.includes('/ohlcv/minute')) {
-        const top = launch === 'fair' ? 0.00002 : 0.00045;
+        const of = tokens.find(t => url.pathname.includes(`/pools/${t.pool}/`) || url.pathname.includes(`/pools/${t.curve}/`));
+        const top = of?.launch !== 'insider' ? 0.00002 : 0.00045;
         return json({ data: { attributes: { ohlcv_list: [[created, 0.00001, top, 0.00001, top, 5000], [created + 60, top, top, top, top, 900]] } } });
       }
-      return url.pathname.includes('/trades') ? json({}, 404) : json({ data: [] });
+      // No recorded trades (an empty list, as the API returns): trade flow stays UNKNOWN without tripping the provider cooldown.
+      return json({ data: [] });
     }
     if (url.pathname.endsWith('/quote')) {
       const inputMint = url.searchParams.get('inputMint')!, outputMint = url.searchParams.get('outputMint')!, amount = BigInt(url.searchParams.get('amount')!);
@@ -199,7 +209,8 @@ function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' =
     if (url.pathname.endsWith('/swap')) {
       const body = JSON.parse(String(init!.body));
       const q = body.quoteResponse as { inputMint: string; inAmount: string; outAmount: string };
-      w.last = { side: q.inputMint === SOL_MINT ? 'BUY' : 'SELL', inAmount: BigInt(q.inAmount), outAmount: BigInt(q.outAmount) };
+      const q2 = body.quoteResponse as { outputMint: string };
+      w.last = { side: q.inputMint === SOL_MINT ? 'BUY' : 'SELL', mint: q.inputMint === SOL_MINT ? q2.outputMint : q.inputMint, inAmount: BigInt(q.inAmount), outAmount: BigInt(q.outAmount) };
       const tx = new VersionedTransaction(new TransactionMessage({ payerKey: new PublicKey(body.userPublicKey), recentBlockhash: SystemProgram.programId.toBase58(), instructions: [] }).compileToV0Message());
       return json({ swapTransaction: Buffer.from(tx.serialize()).toString('base64'), lastValidBlockHeight: 100, prioritizationFeeLamports: 0, computeUnitLimit: 200_000 });
     }
@@ -209,8 +220,14 @@ function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' =
   const conn = {
     getBalance: async () => w.native,
     getTokenSupply: async () => ({ value: { amount: '1000000000000000', decimals: 6 } }),
-    getTokenLargestAccounts: async () => ({ value: [{ address: key(40), amount: '300000000000000' }, ...Array.from({ length: 10 }, (_, i) => ({ address: key(41 + i), amount: '20000000000000' }))] }),
-    getMultipleParsedAccounts: async (keys: PublicKey[]) => ({ value: keys.map((_, i) => ({ data: { parsed: { info: { owner: (i === 0 ? offCurve : key(60 + i)).toBase58(), mint: MINT } } } })) }),
+    getTokenLargestAccounts: async (mint: PublicKey) => {
+      const base = 40 + 11 * Math.max(0, tokens.findIndex(t => t.mint === mint.toBase58()));
+      const rows = [{ address: key(base), amount: '300000000000000' }, ...Array.from({ length: 10 }, (_, i) => ({ address: key(base + 1 + i), amount: '20000000000000' }))];
+      for (const r of rows) holderMint.set(r.address.toBase58(), mint.toBase58());
+      return { value: rows };
+    },
+    getMultipleParsedAccounts: async (keys: PublicKey[]) => ({ value: keys.map((k, i) => ({ data: { parsed: { info: { owner: (i === 0 ? offCurve : key(150 + i)).toBase58(),
+      mint: holderMint.get(k.toBase58()) ?? MINT } } } })) }),
     getParsedAccountInfo: async () => ({ value: { owner: TOKEN_PROGRAM_ID, data: { program: 'spl-token', parsed: { type: 'mint',
       info: { decimals: 6, supply: '1000000000000000', mintAuthority: null, freezeAuthority: null, isInitialized: true } } } } }),
     getAccountInfo: async () => null,
@@ -224,7 +241,7 @@ function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' =
       // The wallet never holds TEST tokens, so a paper exit cannot simulate — exactly like the real chain.
       if (w.last?.side !== 'BUY') return { value: { err: { InstructionError: [2, { Custom: 1 }] }, logs: ['insufficient funds'], accounts: null } };
       const data = Buffer.alloc(AccountLayout.span);
-      AccountLayout.encode({ mint: new PublicKey(MINT), owner, amount: w.last.outAmount, delegateOption: 0, delegate: SystemProgram.programId, state: 1,
+      AccountLayout.encode({ mint: new PublicKey(w.last.mint), owner, amount: w.last.outAmount, delegateOption: 0, delegate: SystemProgram.programId, state: 1,
         isNativeOption: 0, isNative: 0n, delegatedAmount: 0n, closeAuthorityOption: 0, closeAuthority: SystemProgram.programId }, data);
       return { value: { err: null, logs: [], accounts: [
         { owner: SystemProgram.programId.toBase58(), lamports: w.native - Number(w.last.inAmount) - 5_300 - 2_039_280 - w.extraRent, data: ['', 'base64'], executable: false },
@@ -291,6 +308,8 @@ test('TEST probe runs the real pre-flight path, books nothing, and is refused in
     assert.equal(view.ledger.length, 0); assert.equal(view.positions.length, 0); assert.equal(w.sends, 0);
     const live = await DeskEngine.create({ ...shared, mode: 'LIVE', dir, sender: null, wallet: () => ({ owner, signer: null }) });
     await assert.rejects(live.probe(MINT), /PROBE_TEST_ONLY/);
+    assert.equal(live.strategies.CRASH.enabled, false, 'LIVE starts every session with CRASH off');
+    await assert.rejects(live.resetTest(), /RESET_TEST_ONLY/);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
@@ -373,5 +392,137 @@ test('LIVE reaches pre-flight and the Phantom signature request, and nothing is 
     assert.equal(view.execution, false, 'a rejected signature pauses execution'); assert.equal(view.halted, null);
     assert.equal(view.positions.length, 0); assert.equal(view.ledger.length, 0, 'no fabricated LIVE entry');
     assert.match(engine.events.list().find(e => e.stage === 'FAILED')!.message, /blocked at Phantom signature: Phantom: WALLET_SIGNATURE_REJECTED/);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------- CRASH strategy and parallel strategies
+
+const YOUNG_PUMP = { pairCreatedAt: NOW - 10 * 60_000, priceChange: { m5: 25, h1: 40 }, volume: { m5: 25_000, h1: 50_000 } };
+const tokenKey = (n: number) => key(n).toBase58();
+
+test('CRASH rules: +100% take profit, profit lock after a +40% peak, 4-minute time stop, stop loss; FAIR keeps its trailing stop', () => {
+  const p = strategyProfiles({}, deskCapital({}), { takeProfitPct: 30, stopLossPct: 12, trailingActivationPct: 15, trailingStopPct: 8, maxHoldMin: 60 });
+  const c = p.CRASH.exits, f = p.FAIR.exits;
+  assert.equal(p.CRASH.entryUsd, 2); assert.equal(p.CRASH.capitalUsd, CRASH_DEFAULTS.capitalUsd); assert.equal(p.CRASH.maxDragBps, 500n);
+  const x = (pnlPct: number, peakPct = pnlPct, heldMs = 60_000, fromPeakPct = 0) => ({ pnlPct, peakPct, fromPeakPct, heldMs });
+  assert.match(exitReason(c, x(101))!, /^TAKE_PROFIT/, '+100% = $2 unrealized on $2');
+  assert.equal(exitReason(c, x(35, 38)), null, 'below the +40% lock, a pullback is held');
+  assert.match(exitReason(c, x(30, 46))!, /^PROFIT_LOCK \+30\.00% after a \+46\.00% peak/);
+  assert.equal(exitReason(c, x(33, 46)), null);
+  assert.match(exitReason(c, x(5, 5, 4 * 60_000))!, /^MAX_HOLD 4 min/);
+  assert.match(exitReason(c, x(-15.5))!, /^STOP_LOSS/);
+  assert.match(exitReason(f, x(10, 20, 60_000, -9))!, /^TRAILING_STOP/);
+  assert.equal(exitReason(f, x(101)) !== null && exitReason(f, x(29)) === null, true);
+  assert.throws(() => strategyProfiles({ CRASH_SLIPPAGE_BPS: '500' }, deskCapital({}), { takeProfitPct: 30, stopLossPct: 12, trailingActivationPct: 15, trailingStopPct: 8, maxHoldMin: 60 }), /below CRASH_MAX_DRAG_BPS/);
+  assert.equal(strategyProfiles({ CRASH_ENABLED: 'false' }, deskCapital({}), { takeProfitPct: 30, stopLossPct: 12, trailingActivationPct: 15, trailingStopPct: 0, maxHoldMin: 60 }).FAIR.exits.trailing, null);
+});
+
+test('CRASH entry check: a young pump with passing safety signals without a fair launch; an old pool or active mint authority never does', () => {
+  const watch = { firstSeenAt: NOW, observations: 0, lastLiquidityUsd: null, lastPriceUsd: null, momentumStreak: 0 };
+  const safety = { mint: MINT, status: 'verified' as const, meta: normalizeDexPairs([pairRaw()], NOW)[0]!.meta, ok: true, decimals: 6, isToken2022: false,
+    hasMintAuthority: false, hasFreezeAuthority: false, reasons: [], warnings: [] };
+  const onchain = { safety, holders: { supplyRaw: 10n ** 15n, decimals: 6, walletTop10Pct: 20, largestWalletPct: 2, programOwnedPct: 30, accountsInspected: 20 }, developer: null, flow: null, errors: {} };
+  const insider = { launchedAt: NOW - 600_000, poolsChecked: 2, curvePool: SOL_POOL, migratedAfterSec: 0, earlyHighMcUsd: 617_026, firstCandleMultiple: 9, windowMin: 5 };
+  const run = (patch: Record<string, unknown>, o: typeof onchain = onchain) => {
+    const p = pair(patch);
+    return crashCheck(analyze({ found: found(), pair: p, metrics: pairMetrics(p, NOW), tier: 'TRENDING', onchain: o, onchainAt: NOW, social: null, watch, now: NOW, maxWashRatio: 0.45, launch: insider }));
+  };
+  const young = run(YOUNG_PUMP);
+  assert.equal(young.signal, true, young.summary); assert.match(young.summary, /^25\.0% in 5m · pool 10 min/);
+  assert.equal(young.checks.find(g => g.key === 'fairLaunch')!.status, 'FAIL', 'the insider launch is shown…');
+  assert.equal(young.checks.find(g => g.key === 'fairLaunch')!.blocking, false, '…but never required for CRASH');
+  assert.match(run({ ...YOUNG_PUMP, pairCreatedAt: NOW - 3 * 3_600_000 }).summary, /^Pool age: 180 min/);
+  assert.match(run({ ...YOUNG_PUMP, priceChange: { m5: 350 } }).summary, /^5m price change: 350\.0%/, 'a vertical candle is not chased');
+  assert.equal(run(YOUNG_PUMP, { ...onchain, safety: { ...safety, hasMintAuthority: true } }).signal, false);
+  assert.equal(run(YOUNG_PUMP, { ...onchain, safety: null } as never).signal, false, 'unknown safety never signals');
+});
+
+test('strategy stats pair each exit with its entry, exclude drill trades, and scale readiness stays advisory', () => {
+  const row = (side: 'BUY' | 'SELL', at: number, mint: string, net: number | null, note: string | null = null): LedgerEntry => ({ id: `${at}`, at, mode: 'PAPER', txSignature: null,
+    mint, symbol: 'X', router: 'Jupiter', route: 'r', side, quantity: '1000', qtyRaw: '1000000000', entryPriceUsd: 0.002, exitPriceUsd: null, grossPnlUsd: net,
+    networkFeeLamports: '5000', networkFeeUsd: 0, routerFeeUsd: 0, totalFeesUsd: 0, netPnlUsd: net, solDeltaLamports: '0', status: 'PAPER_FILLED', note });
+  const s = strategyStats([row('BUY', 0, 'a', null), row('SELL', 90_000, 'a', 2), row('BUY', 100_000, 'b', null), row('SELL', 160_000, 'b', -0.3),
+    row('BUY', 200_000, 'c', null, 'DRILL — x'), row('SELL', 210_000, 'c', 5, 'DRILL — x')]);
+  assert.equal(s.trades, 2); assert.equal(s.drillTrades, 1); assert.equal(s.wins, 1); assert.equal(s.winRatePct, 50);
+  assert.ok(Math.abs(s.netPnlUsd - 1.7) < 1e-9); assert.equal(s.bestReturnPct, 100); assert.equal(s.avgHoldSec, 75); assert.ok(Math.abs(s.profitFactor! - 2 / 0.3) < 1e-9);
+  const p = strategyProfiles({}, deskCapital({}), { takeProfitPct: 30, stopLossPct: 12, trailingActivationPct: 15, trailingStopPct: 8, maxHoldMin: 60 }).CRASH;
+  const advice = scaleAdvice(p, s, 'PAPER');
+  assert.equal(advice.nextEntryUsd, 10); assert.equal(advice.ready, false); assert.match(advice.checks[0]!.actual, /^2$/);
+  assert.equal(scaleAdvice(p, { ...s, trades: 25, losses: 5, profitFactor: 2 }, 'LIVE').ready, true);
+  assert.equal(scaleAdvice({ ...p, entryUsd: 100 }, s, 'LIVE').nextMinLiquidityUsd, 50_000);
+});
+
+test('CRASH enters a young pump in its first scan (no fair launch needed), exits at +100% on the fast position loop, and TEST can be reset', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-crash-')), { w, shared } = world(YOUNG_PUMP, 'insider');
+  try {
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    engine.setStrategy('CRASH', false); engine.start(); await engine.pulse();
+    assert.equal(engine.status({ connected: true, address: owner.toBase58() }).positions.length, 0, 'a disabled strategy never enters');
+    engine.setStrategy('CRASH', true); await engine.pulse();
+    let view = engine.status({ connected: true, address: owner.toBase58() });
+    assert.equal(view.positions.length, 1); assert.equal(view.positions[0]!.strategy, 'CRASH');
+    assert.equal(view.candidates[0]!.status, 'FILTERED', 'FAIR rejects the insider launch'); assert.equal(view.candidates[0]!.crash!.signal, true);
+    assert.equal(view.preflights[0]!.slippageBps, 250); assert.equal(view.ledger[0]!.strategy, 'CRASH');
+    const crash = view.strategies.find(s => s.id === 'CRASH')!;
+    assert.equal(crash.openPositions, 1); assert.ok(Math.abs(crash.cashUsd! - (10 - 2.00053 - 0.2039280)) < 1e-3, `sleeve ${crash.cashUsd}`);
+    assert.equal(view.strategies.find(s => s.id === 'FAIR')!.cashUsd, 5.45, 'FAIR sleeve untouched');
+    w.priceFactor = 2.05;
+    (engine as unknown as { lastPositionCheckAt: Record<string, number> }).lastPositionCheckAt.CRASH = 0;
+    engine.tick(); await engine.settled();
+    view = engine.status({ connected: true, address: owner.toBase58() });
+    assert.equal(view.positions.length, 0, 'the fast loop took the profit between scans');
+    assert.ok(engine.events.list().some(e => e.stage === 'EXIT' && /^CRASH · exit signal: TAKE_PROFIT 10[45]\.\d+% ≥ 100%/.test(e.message)));
+    const stats = view.strategies.find(s => s.id === 'CRASH')!.stats;
+    assert.equal(stats.trades, 1); assert.equal(stats.wins, 1); assert.ok(stats.netPnlUsd > 2);
+    await fs.access(path.join(dir, 'ledger-PAPER-CRASH.json'));
+    await assert.rejects(engine.resetTest(), /STOP_TEST_FIRST/);
+    engine.stop(); await engine.settled();
+    const archived = await engine.resetTest();
+    assert.equal(archived.length, 1); assert.match(archived[0]!, /^ledger-PAPER-CRASH\.archived-/);
+    await fs.access(path.join(dir, archived[0]!));
+    view = engine.status({ connected: true, address: owner.toBase58() });
+    assert.equal(view.ledger.length, 0); assert.equal(view.strategies.find(s => s.id === 'CRASH')!.cashUsd, 10);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('CRASH locks the profit when a +60% spike fades to +40%', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-lock-')), { w, shared } = world(YOUNG_PUMP, 'insider');
+  try {
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    const check = async () => { (engine as unknown as { lastPositionCheckAt: Record<string, number> }).lastPositionCheckAt.CRASH = 0; engine.tick(); await engine.settled(); };
+    engine.start(); await engine.pulse();
+    w.priceFactor = 1.6; await check();
+    assert.equal(engine.status({ connected: false, address: null }).positions.length, 1, '+60% is below the take profit: held');
+    w.priceFactor = 1.4; await check();
+    assert.equal(engine.status({ connected: false, address: null }).positions.length, 0);
+    assert.ok(engine.events.list().some(e => /CRASH · exit signal: PROFIT_LOCK \+39\.\d+% after a \+59\.\d+% peak/.test(e.message)));
+    assert.ok(engine.status({ connected: false, address: null }).ledger[0]!.netPnlUsd! > 0.7);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('several coins at once: FAIR fills both slots in one scan while CRASH trades in parallel, and a coin is never held by two strategies', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-multi-'));
+  const [M2, M3, M4] = [tokenKey(101), tokenKey(102), tokenKey(103)];
+  const { shared } = world({}, 'fair', [
+    { mint: M2, symbol: 'BBB', pool: tokenKey(111), patch: {}, launch: 'fair' },
+    { mint: M3, symbol: 'CCC', pool: tokenKey(112), patch: {}, launch: 'fair' },
+    // Young pump with a fair launch: CRASH takes it first; FAIR must not buy it as well.
+    { mint: M4, symbol: 'DDD', pool: tokenKey(113), patch: YOUNG_PUMP, launch: 'fair' }]);
+  try {
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    engine.start(); await engine.pulse();
+    let view = engine.status({ connected: true, address: owner.toBase58() });
+    assert.deepEqual(view.positions.map(p => [p.strategy, p.symbol]), [['CRASH', 'DDD']], 'CRASH entered in the first scan');
+    await engine.pulse();
+    view = engine.status({ connected: true, address: owner.toBase58() });
+    const fair = view.positions.filter(p => p.strategy === 'FAIR').map(p => p.symbol).sort();
+    assert.deepEqual(fair, ['ABC', 'BBB'], 'both FAIR slots filled in the same scan');
+    await engine.pulse(); await engine.pulse();
+    view = engine.status({ connected: true, address: owner.toBase58() });
+    assert.equal(view.positions.length, 3);
+    assert.equal(view.positions.filter(p => p.mint === M4).length, 1, 'one coin, one strategy');
+    assert.equal(view.candidates.find(c => c.mint === M4)!.status, 'QUALIFIED', 'FAIR would qualify it, but CRASH already holds it');
+    assert.ok(engine.events.list().some(e => /^FAIR · 1 candidate\(s\), but 2\/2 positions are open$/.test(e.message)));
+    assert.equal(engine.events.list().filter(e => /slots|positions are open/.test(e.message)).length, 1, 'the full-slots note is logged once, not every scan');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });

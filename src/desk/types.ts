@@ -1,5 +1,7 @@
 /** Shared by the desk engine, the local API and the dashboard. Type-only; no runtime dependencies. */
 export type DeskMode = 'PAPER' | 'LIVE';
+/** FAIR: fair-launch trend strategy with momentum confirmation. CRASH: 1–4 minute momentum trades with tight exits. */
+export type StrategyId = 'FAIR' | 'CRASH';
 
 export type Stage = 'SYSTEM' | 'SCANNING' | 'FILTERED' | 'WATCHLIST' | 'WAITING' | 'QUALIFIED' | 'QUOTE' | 'ROUTE' |
   'SIMULATION' | 'PREFLIGHT' | 'AWAITING_SIGNATURE' | 'SUBMITTED' | 'CONFIRMED' | 'FAILED' | 'POSITION' | 'EXIT' | 'PNL';
@@ -57,7 +59,11 @@ export interface Candidate {
   firstSeenAt: number; updatedAt: number; deepAnalyzedAt: number | null; observations: number;
   /** Consecutive scans, including this one, in which every hard gate passed and momentum held. */
   momentumStreak: number;
+  /** CRASH entry checks for this scan; null until computed. */
+  crash: CrashSignal | null;
 }
+
+export interface CrashSignal { signal: boolean; checks: GateResult[]; summary: string }
 
 export type SignatureState = 'NOT_REQUESTED_TEST' | 'AWAITING_PHANTOM' | 'SIGNED' | 'REJECTED' | 'EXPIRED' | 'NOT_REACHED';
 export interface Preflight {
@@ -78,6 +84,8 @@ export interface DeskPosition {
   router: string; route: string; entrySignature: string | null; rentLamports: string; pairAddress: string;
   /** Context at entry for early-warning exits; absent in ledgers written before they existed. */
   entryLiquidityUsd?: number | null; creator?: string | null; creatorPctAtEntry?: number | null;
+  /** Status view only: the strategy whose ledger holds the position. */
+  strategy?: StrategyId;
 }
 
 export interface LedgerEntry {
@@ -86,6 +94,29 @@ export interface LedgerEntry {
   entryPriceUsd: number | null; exitPriceUsd: number | null; grossPnlUsd: number | null;
   networkFeeLamports: string; networkFeeUsd: number | null; routerFeeUsd: number | null; totalFeesUsd: number | null;
   netPnlUsd: number | null; solDeltaLamports: string; status: 'CONFIRMED' | 'PAPER_FILLED' | 'FAILED' | 'UNKNOWN'; note: string | null;
+  /** Status view only: the strategy whose ledger holds the row. */
+  strategy?: StrategyId;
+}
+
+export interface StrategyStats {
+  /** Closed strategy trades; TEST drill trades are counted separately and never included. */
+  trades: number; wins: number; losses: number; winRatePct: number | null; netPnlUsd: number;
+  avgReturnPct: number | null; bestReturnPct: number | null; worstReturnPct: number | null; avgHoldSec: number | null;
+  /** Gross profit ÷ gross loss; null without a losing trade. */
+  profitFactor: number | null; maxDrawdownUsd: number; drillTrades: number; failedOrders: number;
+}
+export interface ScaleCheck { label: string; ok: boolean; actual: string; required: string }
+export interface ScaleAdvice {
+  currentEntryUsd: number; nextEntryUsd: number | null; ready: boolean; checks: ScaleCheck[];
+  /** Pool liquidity needed at the next size to keep price impact near 2 %. */
+  nextMinLiquidityUsd: number | null; note: string;
+}
+export interface StrategyView {
+  id: StrategyId; label: string; summary: string; enabled: boolean;
+  capitalUsd: number; entryUsd: number; slippageBps: number; maxDragPct: number; maxOpenPositions: number; positionCheckSec: number;
+  exitRules: string[];
+  cashUsd: number | null; openPositions: number; realizedPnlUsd: number; unrealizedPnlUsd: number | null; feesUsd: number; halted: string | null;
+  stats: StrategyStats; scale: ScaleAdvice;
 }
 
 export interface DeskCapitalView {
@@ -101,6 +132,7 @@ export interface DeskStatus {
   /** CONFIGURED: TEST is using WALLET_PUBLIC_KEY from .env because Phantom is not connected (address only, never a signer). */
   wallet: { connected: boolean; address: string | null; source?: 'PHANTOM' | 'CONFIGURED' };
   drill: boolean;
+  strategies: StrategyView[];
   capital: DeskCapitalView; message: string | null; halted: string | null;
   lastScanAt: number | null; nextScanAt: number | null; scanning: boolean;
   events: DeskEvent[]; candidates: Candidate[]; preflights: Preflight[];

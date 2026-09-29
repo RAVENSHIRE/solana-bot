@@ -16,7 +16,7 @@ import { TransactionSender } from '../execution/tx-sender';
 import { DeskEngine, type DeskWallet } from './engine';
 import { DeskReject } from './guard';
 import { XClient } from './social';
-import { deskCapital, type DeskCapital } from './config';
+import { deskCapital, strategyProfiles, type DeskCapital } from './config';
 import { PublicKey } from '@solana/web3.js';
 import type { DeskMode } from './types';
 
@@ -27,7 +27,9 @@ import type { DeskMode } from './types';
 const ENV_KEYS = ['RPC_ENDPOINTS', 'RPC_MAX_RPS', 'RPC_TIMEOUT_MS', 'JUPITER_API_KEY', 'JUPITER_API_BASE', 'JUPITER_MAX_RPS', 'JUPITER_QUOTE_MAX_AGE_MS',
   'MAX_PRIORITY_FEE_LAMPORTS', 'PRIORITY_LEVEL', 'MAX_PRICE_IMPACT_PCT', 'TX_CONFIRM_TIMEOUT_MS', 'RS_TAKE_PROFIT_PCT', 'RS_STOP_LOSS_PCT',
   'RS_TRAILING_ACTIVATION_PCT', 'RS_TRAILING_STOP_PCT', 'RS_MAX_HOLD_MIN', 'RS_MAX_WASH_RATIO',
-  'DESK_PLANNED_CAPITAL_USD', 'DESK_BASE_ENTRY_USD', 'DESK_SLIPPAGE_BPS', 'X_BEARER_TOKEN', 'WALLET_PUBLIC_KEY'];
+  'DESK_PLANNED_CAPITAL_USD', 'DESK_BASE_ENTRY_USD', 'DESK_SLIPPAGE_BPS', 'X_BEARER_TOKEN', 'WALLET_PUBLIC_KEY',
+  'CRASH_ENABLED', 'CRASH_CAPITAL_USD', 'CRASH_ENTRY_USD', 'CRASH_SLIPPAGE_BPS', 'CRASH_MAX_DRAG_BPS', 'CRASH_MAX_POSITIONS',
+  'CRASH_TAKE_PROFIT_PCT', 'CRASH_LOCK_PEAK_PCT', 'CRASH_GIVEBACK_PTS', 'CRASH_STOP_LOSS_PCT', 'CRASH_MAX_HOLD_MIN'];
 export async function deskEnvironment(repo: string): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = {};
   try {
@@ -49,7 +51,7 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
   const env = await deskEnvironment(o.envDir);
   if (!env.RPC_ENDPOINTS) throw new DeskReject('RPC_NOT_CONFIGURED');
   if (!env.JUPITER_API_KEY) throw new DeskReject('JUPITER_API_KEY_REQUIRED');
-  const cfg = loadConfig(env, 'PHANTOM'), capital = deskCapital(env), logger = new Logger('Desk');
+  const cfg = loadConfig(env, 'PHANTOM'), capital = deskCapital(env), strategies = strategyProfiles(env, capital, cfg.rs), logger = new Logger('Desk');
   const rpc = new ConnectionManager(cfg.rpc.endpoints, { ...cfg.rpc, logger });
   if (await rpc.execute('desk:genesis', c => c.getGenesisHash()) !== '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d') throw new DeskReject('MAINNET_REQUIRED');
   const data = new DataRuntime(logger, cfg.data);
@@ -59,7 +61,7 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
   try {
     const shared = { cfg, capital, logger, rpc, jupiter: new JupiterClient(cfg.jupiter, logger, data), dex: new DexScreenerClient(logger, data),
       gecko: new GeckoTerminalClient(logger, data), safety: new TokenSafetyChecker(rpc, logger), x: new XClient(env.X_BEARER_TOKEN ?? null),
-      dir: o.dataDir, authorized: context.authorized };
+      dir: o.dataDir, authorized: context.authorized, strategies };
     let configured: PublicKey | null = null;
     try { configured = env.WALLET_PUBLIC_KEY ? new PublicKey(env.WALLET_PUBLIC_KEY.trim()) : null; } catch { configured = null; }
     const sender = new TransactionSender(rpc, logger, { confirmTimeoutMs: cfg.execution.confirmTimeoutMs, pollIntervalMs: 1500, rebroadcastIntervalMs: 2000 });

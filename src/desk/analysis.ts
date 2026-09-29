@@ -254,6 +254,6 @@ export function analyze(i: AnalysisInput): Candidate {
     onchain: { mintAuthority: o?.safety ? o.safety.hasMintAuthority : null, freezeAuthority: o?.safety ? o.safety.hasFreezeAuthority : null,
       token2022: o?.safety ? o.safety.isToken2022 : null, risks: o?.safety?.reasons ?? [], decimals: o?.holders?.decimals ?? (o?.safety ? o.safety.decimals : null) },
     evidence: evidenceList(input), gates: gateList, scores: scoreList, riskFlags,
-    firstSeenAt: i.watch.firstSeenAt, updatedAt: i.now, deepAnalyzedAt: i.onchainAt, observations: i.watch.observations + 1, momentumStreak: streak,
+    firstSeenAt: i.watch.firstSeenAt, updatedAt: i.now, deepAnalyzedAt: i.onchainAt, observations: i.watch.observations + 1, momentumStreak: streak, crash: null,
   };
 }

@@ -13,7 +13,8 @@ export { deskEnvironment as tradingEnvironment, type DeskHandle };
 export type DeskFactory = (context: DeskContext) => Promise<DeskHandle>;
 export const deskFactory = (repo: string): DeskFactory => context => createDesk({ envDir: repo, dataDir: path.join(repo, 'data-desk') }, context);
 
-const DESK_ACTIONS = new Set(['select-mode', 'start-test', 'stop-test', 'start-live', 'pause', 'resume', 'stop-live', 'probe', 'drill-on', 'drill-off']);
+const DESK_ACTIONS = new Set(['select-mode', 'start-test', 'stop-test', 'start-live', 'pause', 'resume', 'stop-live', 'probe', 'drill-on', 'drill-off',
+  'strategy', 'reset-test']);
 
 export class TradingService {
   readonly broker = new SigningBroker({ sessionTtlMs: 900_000 });
@@ -120,6 +121,13 @@ export class TradingService {
         // Never available in LIVE: a probe must not be able to produce a signature request.
         if (this.mode !== 'PAPER' || typeof body.mint !== 'string') throw new DeskReject('PROBE_TEST_ONLY');
         await paper.probe(body.mint); return;
+      case 'strategy':
+        // Applies to the selected mode only; LIVE starts every session with CRASH off.
+        if ((body.strategy !== 'FAIR' && body.strategy !== 'CRASH') || typeof body.enabled !== 'boolean') throw new DeskReject('INVALID_STRATEGY');
+        handle.engines[this.mode].setStrategy(body.strategy, body.enabled); return;
+      case 'reset-test':
+        if (this.mode !== 'PAPER') throw new DeskReject('RESET_TEST_ONLY');
+        await paper.resetTest(); return;
     }
   }
 

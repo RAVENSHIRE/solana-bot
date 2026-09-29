@@ -1,9 +1,10 @@
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { PublicKey } from '@solana/web3.js';
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import type { AppConfig } from '../config/config';
 import type { ConnectionManager } from '../rpc/connection-manager';
-import type { DexScreenerClient } from '../data/dexscreener';
+import type { DexPair, DexScreenerClient } from '../data/dexscreener';
 import type { GeckoTerminalClient } from '../data/geckoterminal';
 import type { TokenSafetyChecker } from '../analysis/token-safety';
 import type { JupiterClient } from '../execution/jupiter-client';
@@ -13,10 +14,10 @@ import { SwapError } from '../execution/executor';
 import { SigningError, type TransactionSigner } from '../execution/transaction-signer';
 import { requestScope } from '../data/core/request-scope';
 import { exactNumber } from '../data/core/data-validator';
-import { BASE_FEE_LAMPORTS, SOL_MINT } from '../core/types';
+import { BASE_FEE_LAMPORTS, SOL_MINT, TOKEN_ACCOUNT_RENT_LAMPORTS } from '../core/types';
 import type { Logger } from '../utils/logger';
 import { errorMessage } from '../utils/errors';
-import { DESK, type DeskCapital } from './config';
+import { DESK, STRATEGY_IDS, strategyProfiles, type DeskCapital, type StrategyProfile } from './config';
 import { EventLog } from './events';
 import { DeskLedger } from './ledger';
 import { discover, pairMetrics, selectPair, tierFor, type Discovered } from './discovery';
@@ -25,7 +26,8 @@ import { launchCheck, type LaunchCheck } from './launch';
 import { assessAuthenticity, checkWebsite, parseXLink, type WebsiteCheck, type XClient } from './social';
 import { analyze, type SocialEvidence, type WatchState } from './analysis';
 import { DeskGuard, DeskReject, PaperExecution, paperSigner } from './guard';
-import type { Candidate, DeskEvent, DeskMode, DeskPosition, DeskStatus, Preflight, Stage } from './types';
+import { crashCheck, crashMarketHint, exitReason, exitRuleText, scaleAdvice, strategyStats } from './strategies';
+import type { Candidate, DeskEvent, DeskMode, DeskPosition, DeskStatus, Preflight, Stage, StrategyId, StrategyView } from './types';
 
 export interface DeskWallet { owner: PublicKey; signer: TransactionSigner | null }
 export interface DeskDeps {
@@ -37,11 +39,14 @@ export interface DeskDeps {
   authorized: () => boolean;
   sender: TransactionSender | null;
   website?: (url: string | null) => Promise<WebsiteCheck>;
+  /** Strategy settings; defaults to strategyProfiles() of the desk capital and RS_* rules. */
+  strategies?: Record<StrategyId, StrategyProfile>;
 }
 
 interface Deep { at: number; onchain: OnchainEvidence; social: SocialEvidence }
+interface Staged { found: Discovered; pair: DexPair; tier: 'TRENDING' | 'ULTRA_EARLY'; metrics: ReturnType<typeof pairMetrics>; crashHint: boolean }
 interface ExecTarget {
-  mint: string; symbol: string | null; decimals: number; pairAddress: string; heldRaw: bigint; token2022?: boolean; drill?: boolean;
+  strategy: StrategyId; mint: string; symbol: string | null; decimals: number; pairAddress: string; heldRaw: bigint; token2022?: boolean; drill?: boolean;
   entry?: { liquidityUsd: number | null; creator: string | null; creatorPct: number | null };
 }
 const LABEL: Record<DeskMode, string> = { PAPER: 'TEST / PAPER — NO REAL TRANSACTIONS', LIVE: 'LIVE — REAL FUNDS' };
@@ -50,12 +55,23 @@ const sol = (l: bigint) => exactNumber(l < 0n ? -l : l) / 1e9 * (l < 0n ? -1 : 1
 export class DeskEngine {
   scanner = false;
   execution = false;
-  /** TEST only: allow drill entries when nothing qualifies. */
+  /** TEST only: allow FAIR drill entries when nothing qualifies. */
   drill = false;
+  /** Both strategies run in parallel, each with its own ledger (and TEST sleeve). */
+  readonly strategies: Record<StrategyId, StrategyProfile>;
   private drillSkips = new Map<string, number>();
+  /** `${strategy}:${mint}` → when the guard last blocked an entry; skipped for DESK.entrySkipMs. */
+  private entrySkips = new Map<string, number>();
+  private notes = new Map<string, string>();
   private creatorChecks = new Map<string, number>();
   private holdLog = new Map<string, { pct: number; at: number }>();
-  private lastPositionCheckAt = 0;
+  private lastPositionCheckAt: Record<StrategyId, number> = { FAIR: 0, CRASH: 0 };
+  /** Position checks run beside the discovery scan, so a slow scan never delays an exit. */
+  private positionWork: Promise<void> | null = null;
+  /** One order at a time across both strategies (paper cash, wallet balance and Phantom requests stay consistent). */
+  private orders: Promise<unknown> = Promise.resolve();
+  /** The latest fast position check including its save, so settled() covers it. */
+  private background: Promise<unknown> = Promise.resolve();
   message: string | null = null;
   lastScanAt: number | null = null;
   nextScanAt: number | null = null;
@@ -76,20 +92,29 @@ export class DeskEngine {
 
   private constructor(private readonly d: DeskDeps) {
     this.events = new EventLog(d.mode, path.join(d.dir, `events-${d.mode}.json`));
+    const base = d.strategies ?? strategyProfiles({}, d.capital, d.cfg.rs);
+    this.strategies = { FAIR: { ...base.FAIR, exits: { ...base.FAIR.exits } }, CRASH: { ...base.CRASH, exits: { ...base.CRASH.exits } } };
+    // Real money: CRASH is switched on explicitly in each LIVE session, never by default.
+    if (d.mode === 'LIVE') this.strategies.CRASH.enabled = false;
   }
 
   static async create(d: DeskDeps): Promise<DeskEngine> {
     const engine = new DeskEngine(d);
     await engine.events.load();
-    if (d.mode === 'PAPER') await engine.ledgerFor(null);
+    if (d.mode === 'PAPER') for (const id of STRATEGY_IDS) await engine.ledgerFor(id, null);
     return engine;
   }
 
   get mode(): DeskMode { return this.d.mode; }
   get busy(): boolean { return this.work !== null; }
 
-  private async ledgerFor(owner: string | null): Promise<DeskLedger> {
-    const key = this.d.mode === 'PAPER' ? 'PAPER' : `LIVE-${owner}`;
+  /** FAIR keeps the original ledger names; CRASH writes ledger-PAPER-CRASH.json / ledger-LIVE-CRASH-<wallet>.json. */
+  private ledgerKey(id: StrategyId, owner: string | null): string {
+    const tag = id === 'FAIR' ? '' : `-${id}`;
+    return this.d.mode === 'PAPER' ? `PAPER${tag}` : `LIVE${tag}-${owner}`;
+  }
+  private async ledgerFor(id: StrategyId, owner: string | null): Promise<DeskLedger> {
+    const key = this.ledgerKey(id, owner);
     let ledger = this.ledgers.get(key);
     if (!ledger) {
       if (this.d.mode === 'LIVE' && !owner) throw new DeskReject('WALLET_REQUIRED');
@@ -98,34 +123,87 @@ export class DeskEngine {
     }
     return ledger;
   }
-  private currentLedger(): DeskLedger | null {
-    return this.d.mode === 'PAPER' ? this.ledgers.get('PAPER') ?? null : this.walletView ? this.ledgers.get(`LIVE-${this.walletView.owner}`) ?? null : null;
+  private ledgerOf(id: StrategyId): DeskLedger | null {
+    if (this.d.mode === 'PAPER') return this.ledgers.get(this.ledgerKey(id, null)) ?? null;
+    return this.walletView ? this.ledgers.get(this.ledgerKey(id, this.walletView.owner)) ?? null : null;
   }
+  private books(): Array<{ id: StrategyId; p: StrategyProfile; ledger: DeskLedger }> {
+    return STRATEGY_IDS.flatMap(id => { const ledger = this.ledgerOf(id); return ledger ? [{ id, p: this.strategies[id], ledger }] : []; });
+  }
+  /** A token is held by at most one strategy at a time. */
+  private heldBy(mint: string): StrategyId | null { return this.books().find(b => b.ledger.position(mint))?.id ?? null; }
 
   private event(stage: Stage, message: string, c: { mint?: string | null; symbol?: string | null; detail?: DeskEvent['detail'] } = {}): void {
     this.events.add(stage, message, c);
+  }
+  /** Repeated identical status lines (e.g. "slots full") are logged once until they change. */
+  private note(key: string, stage: Stage, message: string): void {
+    if (this.notes.get(key) === message) return;
+    this.notes.set(key, message);
+    this.event(stage, message);
+  }
+  private stopper(): () => boolean {
+    const generation = this.generation;
+    return () => !this.scanner || generation !== this.generation || (this.d.mode === 'LIVE' && !this.d.authorized());
   }
 
   // ------------------------------------------------------------------ controls
 
   start(): void {
     if (this.d.mode === 'LIVE' && !this.d.authorized()) throw new DeskReject('WALLET_SESSION_REQUIRED');
-    const ledger = this.currentLedger();
-    if (ledger?.state.halted || ledger?.state.pending) throw new DeskReject('TRANSACTION_RECONCILIATION_REQUIRED');
-    this.scanner = true; this.execution = true; this.generation++; this.nextScanAt = Date.now();
-    this.event('SYSTEM', this.d.mode === 'PAPER' ? 'TEST started: scanner ON, paper execution ENABLED — no signature will ever be requested'
-      : 'LIVE session started: scanner ON, execution ENABLED — every order needs a Phantom signature');
+    if (this.books().some(b => b.ledger.state.halted || b.ledger.state.pending)) throw new DeskReject('TRANSACTION_RECONCILIATION_REQUIRED');
+    this.scanner = true; this.execution = true; this.generation++; this.nextScanAt = Date.now(); this.notes.clear();
+    const on = STRATEGY_IDS.filter(id => this.strategies[id].enabled).join(' + ') || 'none';
+    this.event('SYSTEM', this.d.mode === 'PAPER' ? `TEST started: scanner ON, paper execution ENABLED (strategies: ${on}) — no signature will ever be requested`
+      : `LIVE session started: scanner ON, execution ENABLED (strategies: ${on}) — every order needs a Phantom signature`);
   }
   stop(reason = 'stopped by user'): void {
     if (!this.scanner && !this.execution) return;
     this.scanner = false; this.execution = false; this.generation++; this.nextScanAt = null;
-    this.event('SYSTEM', `${this.d.mode === 'PAPER' ? 'TEST' : 'LIVE session'} stopped (${reason}); telemetry and ledger kept`);
+    this.event('SYSTEM', `${this.d.mode === 'PAPER' ? 'TEST' : 'LIVE session'} stopped (${reason}); telemetry and ledgers kept`);
   }
   pause(): void { if (this.execution) { this.execution = false; this.event('SYSTEM', 'Execution PAUSED: scanner keeps running, no new orders'); } }
   resume(): void {
     if (!this.scanner) throw new DeskReject('SCANNER_OFF');
     if (this.d.mode === 'LIVE' && !this.d.authorized()) throw new DeskReject('WALLET_SESSION_REQUIRED');
     if (!this.execution) { this.execution = true; this.event('SYSTEM', 'Execution RESUMED'); }
+  }
+  /** Disabling a strategy stops its new entries; its open positions keep their exits. */
+  setStrategy(id: StrategyId, enabled: boolean): void {
+    const p = this.strategies[id];
+    if (p.enabled === enabled) return;
+    p.enabled = enabled;
+    this.event('SYSTEM', `${p.label} strategy ${enabled ? 'ENABLED' : 'DISABLED — no new entries; open positions keep their exits'}`, { detail: { strategy: id } });
+  }
+
+  /**
+   * TEST only, with TEST stopped: archives both paper ledgers (kept on disk, never deleted) and restarts each
+   * sleeve at its planned capital. Open paper positions end with the archived ledger.
+   */
+  async resetTest(): Promise<string[]> {
+    if (this.d.mode !== 'PAPER') throw new DeskReject('RESET_TEST_ONLY');
+    if (this.scanner) throw new DeskReject('STOP_TEST_FIRST');
+    // A scan or position check that is still winding down after STOP must finish (and save) before files move.
+    await this.settled();
+    if (this.scanner) throw new DeskReject('STOP_TEST_FIRST');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-'), archived: string[] = [];
+    for (const id of STRATEGY_IDS) {
+      const key = this.ledgerKey(id, null), file = path.join(this.d.dir, `ledger-${key}.json`), old = this.ledgers.get(key);
+      this.ledgers.delete(key);
+      if (old && (old.state.entries.length || old.state.positions.length)) {
+        await old.save();
+        const target = path.join(this.d.dir, `ledger-${key}.archived-${stamp}.json`);
+        await fs.rename(file, target);
+        archived.push(path.basename(target));
+      } else await fs.rm(file, { force: true });
+      const fresh = await this.ledgerFor(id, null);
+      if (this.solUsd) fresh.fundPaper(this.strategies[id].capitalUsd, this.solUsd);
+      await fresh.save();
+    }
+    this.preflights = []; this.entrySkips.clear(); this.drillSkips.clear(); this.holdLog.clear(); this.notes.clear(); this.message = null;
+    this.event('SYSTEM', `TEST reset: ${archived.length ? `archived ${archived.join(', ')}` : 'nothing to archive'}; every sleeve restarts at its planned capital`);
+    await this.persist();
+    return archived;
   }
 
   /**
@@ -139,14 +217,14 @@ export class DeskEngine {
     if (c && c.onchain.decimals === null) return Promise.reject(new DeskReject('EVIDENCE_PENDING'));
     const work = (async () => {
       await this.syncWallet();
-      const ledger = await this.ledgerFor(null);
-      if (this.solUsd) ledger.fundPaper(this.d.capital.plannedStartingCapitalUsd, this.solUsd);
+      const ledger = await this.ledgerFor('FAIR', null);
+      if (this.solUsd) ledger.fundPaper(this.strategies.FAIR.capitalUsd, this.solUsd);
       // Any mint can be probed (e.g. to verify the path on a liquid token); its decimals come from the chain, never a guess.
       const mintInfo = c ? null : await this.d.safety.check(mint, { rejectMintAuthority: false, fresh: true });
       const decimals = c?.onchain.decimals ?? mintInfo!.decimals, token2022 = c ? c.onchain.token2022 === true : mintInfo!.isToken2022;
       this.event('SYSTEM', `PROBE started for ${c?.symbol ?? mint} (${c ? `candidate status ${c.status}` : 'not a strategy candidate'}); nothing will be booked`, { mint, symbol: c?.symbol ?? null });
-      await this.execute('BUY', { mint, symbol: c?.symbol ?? null, decimals, pairAddress: c?.pair.address ?? '', heldRaw: 0n, token2022 }, ledger, () => false, true);
-    })().finally(async () => { this.work = null; await this.persist(); });
+      await this.execute('BUY', { strategy: 'FAIR', mint, symbol: c?.symbol ?? null, decimals, pairAddress: c?.pair.address ?? '', heldRaw: 0n, token2022 }, ledger, () => false, true);
+    })().finally(async () => { await this.persist().catch(() => undefined); this.work = null; });
     this.work = work;
     return work;
   }
@@ -157,58 +235,75 @@ export class DeskEngine {
       this.message = 'SCAN_FAILED';
       this.event('FAILED', `Scan failed: ${errorMessage(error)}`);
     }).finally(async () => {
-      this.work = null; this.lastScanAt = Date.now();
+      this.lastScanAt = Date.now();
       this.nextScanAt = this.scanner ? this.lastScanAt + DESK.scanMs : null;
-      await this.persist();
+      // Cleared only after the save, so settled() and a TEST reset never race a write.
+      await this.persist().catch(error => this.event('FAILED', `Saving desk state failed: ${errorMessage(error)}`));
+      this.work = null;
     });
     this.work = work;
     return work;
   }
-  /** Called every second by the host: a full scan when due, otherwise a fast position check. */
+  /** Called every second by the host: a full scan when due, and position checks at each strategy's own cadence. */
   tick(): void {
-    if (!this.scanner || this.work) return;
-    if ((this.nextScanAt ?? 0) <= Date.now()) { void this.pulse(); return; }
-    const ledger = this.currentLedger();
-    if (!ledger?.state.positions.length || Date.now() - this.lastPositionCheckAt < DESK.exits.positionCheckMs) return;
-    const generation = this.generation;
-    const stopped = () => !this.scanner || generation !== this.generation || (this.d.mode === 'LIVE' && !this.d.authorized());
-    const work = this.managePositions(ledger, stopped).catch(error => { this.event('FAILED', `Position check failed: ${errorMessage(error)}`); })
-      .finally(async () => { this.work = null; await this.persist(); });
-    this.work = work;
+    if (!this.scanner) return;
+    if (!this.work && (this.nextScanAt ?? 0) <= Date.now()) void this.pulse();
+    if (this.positionWork) return;
+    const now = Date.now();
+    const due = STRATEGY_IDS.filter(id => (this.ledgerOf(id)?.state.positions.length ?? 0) > 0 && now - this.lastPositionCheckAt[id] >= this.strategies[id].positionCheckMs);
+    if (!due.length) return;
+    this.background = this.checkPositions(due, this.stopper())
+      .catch(error => this.event('FAILED', `Position check failed: ${errorMessage(error)}`))
+      .then(() => this.persist()).catch(error => this.event('FAILED', `Saving desk state failed: ${errorMessage(error)}`));
   }
 
-  async settled(): Promise<void> { await this.work; }
+  async settled(): Promise<void> {
+    while (this.work || this.positionWork) { await this.work?.catch(() => undefined); await this.positionWork?.catch(() => undefined); }
+    await this.orders; await this.background;
+  }
   async persist(): Promise<void> {
     await this.events.flush();
-    await this.currentLedger()?.save();
+    for (const b of this.books()) await b.ledger.save();
   }
 
   // ------------------------------------------------------------------ scan
 
   private async scan(): Promise<void> {
-    const generation = this.generation, d = this.d;
-    const stopped = () => !this.scanner || generation !== this.generation || (d.mode === 'LIVE' && !d.authorized());
-    const started = Date.now();
+    const d = this.d, stopped = this.stopper(), started = Date.now();
     this.event('SCANNING', 'Scan started', { detail: { mode: d.mode } });
     await this.syncWallet();
-    const ledger = this.currentLedger();
-    if (d.mode === 'LIVE' && !ledger) { this.message = 'Connect Phantom to scan in LIVE mode'; this.event('WAITING', this.message); return; }
-    if (ledger && this.solUsd) ledger.fundPaper(d.capital.plannedStartingCapitalUsd, this.solUsd);
-    if (ledger) await this.managePositions(ledger, stopped);
+    const books = this.books();
+    if (d.mode === 'LIVE' && !books.length) { this.message = 'Connect Phantom to scan in LIVE mode'; this.event('WAITING', this.message); return; }
+    if (this.solUsd) for (const b of books) b.ledger.fundPaper(b.p.capitalUsd, this.solUsd);
+    await this.checkPositions(STRATEGY_IDS, stopped);
     if (stopped()) return;
-    for (const [mint, at] of this.drillSkips) if (Date.now() - at > 15 * 60_000) this.drillSkips.delete(mint);
-    const found = await discover(d.dex, d.gecko, this.watchlist(ledger));
+    for (const skips of [this.drillSkips, this.entrySkips]) for (const [k, at] of skips) if (Date.now() - at > (skips === this.drillSkips ? 15 * 60_000 : DESK.entrySkipMs)) skips.delete(k);
+    const found = await discover(d.dex, d.gecko, this.watchlist());
     this.sources = found.sources;
-    const shortlist = await this.evaluate(found.tokens, started);
+    const staged = await this.stage(found.tokens);
+    // CRASH is time-critical: safety evidence for pumping young pools first, entries right after, and only then
+    // the remaining evidence and the rate-limited launch-history checks that FAIR needs.
+    const due = this.deepDue(staged.list, started);
+    await this.deepAnalyses(due.filter(s => s.crashHint));
+    if (this.strategies.CRASH.enabled && !stopped()) {
+      const signals = staged.list.filter(s => s.crashHint).map(s => this.assess(s, started)).filter(c => c.crash?.signal);
+      const ledger = this.ledgerOf('CRASH');
+      if (ledger && signals.length) await this.maybeEnter('CRASH', ledger, signals, stopped);
+    }
     if (stopped()) return;
-    this.event('SCANNING', `Scan finished: ${found.tokens.size} tokens discovered, ${shortlist.qualified} qualified, ${shortlist.waiting} waiting, ${shortlist.watch} on watchlist, ${shortlist.filtered} filtered`,
-      { detail: { ms: Date.now() - started } });
-    if (ledger) await this.maybeEnter(ledger, stopped);
+    await this.deepAnalyses(due.filter(s => !s.crashHint));
+    await this.launchChecks(staged.list, started);
+    const counts = this.finalize(staged.list, staged.filtered, started);
+    if (stopped()) return;
+    this.event('SCANNING', `Scan finished: ${found.tokens.size} tokens discovered, ${counts.qualified} qualified (FAIR), ${counts.crash} CRASH signal(s), ` +
+      `${counts.waiting} waiting, ${counts.watch} on watchlist, ${counts.filtered} filtered`, { detail: { ms: Date.now() - started } });
+    const fair = this.ledgerOf('FAIR');
+    if (fair) await this.maybeEnter('FAIR', fair, [...this.candidates.values()].filter(c => c.status === 'QUALIFIED'), stopped);
   }
 
-  private watchlist(ledger: DeskLedger | null): string[] {
+  private watchlist(): string[] {
     const keep = [...this.candidates.values()].filter(c => c.status !== 'FILTERED').sort((a, b) => b.updatedAt - a.updatedAt).map(c => c.mint).slice(0, 40);
-    return [...new Set([...(ledger?.state.positions.map(p => p.mint) ?? []), ...keep])];
+    return [...new Set([...this.books().flatMap(b => b.ledger.state.positions.map(p => p.mint)), ...keep])];
   }
 
   private async syncWallet(): Promise<void> {
@@ -223,37 +318,50 @@ export class DeskEngine {
     try {
       const native = await d.rpc.execute('desk:wallet-sync', c => c.getBalance(wallet.owner, 'confirmed'));
       this.walletView = { owner: wallet.owner.toBase58(), native: BigInt(native), at: Date.now() };
-      if (d.mode === 'LIVE') await this.ledgerFor(this.walletView.owner);
+      if (d.mode === 'LIVE') for (const id of STRATEGY_IDS) await this.ledgerFor(id, this.walletView.owner);
     } catch (error) { this.event('FAILED', `Wallet sync failed: ${errorMessage(error)}`); }
   }
 
   // ------------------------------------------------------------------ discovery → evidence → gates
 
-  private async evaluate(tokens: Map<string, Discovered>, now: number): Promise<{ qualified: number; waiting: number; watch: number; filtered: number }> {
+  private async stage(tokens: Map<string, Discovered>): Promise<{ list: Staged[]; filtered: number }> {
     const d = this.d, mints = [...tokens.keys()].slice(0, 90);
     const pairs = mints.length ? await d.dex.getPairsForTokens(mints) : [];
-    const staged: Array<{ found: Discovered; pair: NonNullable<ReturnType<typeof selectPair>>; tier: 'TRENDING' | 'ULTRA_EARLY'; metrics: ReturnType<typeof pairMetrics> }> = [];
+    const list: Staged[] = [];
     let filtered = 0;
     for (const mint of mints) {
       const found = tokens.get(mint)!, pair = selectPair(pairs, mint, Date.now());
       if (!pair) { filtered++; this.transition(mint, null, 'FILTERED', 'No fresh SOL/USDC/USDT pool with a price'); continue; }
       const metrics = pairMetrics(pair, Date.now()), tier = tierFor(metrics);
       if ('filtered' in tier) { filtered++; this.candidates.delete(mint); this.transition(mint, pair.baseToken.symbol ?? null, 'FILTERED', tier.filtered); continue; }
-      staged.push({ found, pair, tier: tier.tier, metrics });
+      list.push({ found, pair, tier: tier.tier, metrics, crashHint: crashMarketHint(metrics) });
     }
-    // Deep evidence (RPC, website, X, trade flow) for the most tradeable-looking tokens first.
-    const priority = (s: typeof staged[number]) => (s.tier === 'TRENDING' ? 1e9 : 0) +
-      ((s.metrics.volume5mUsd ?? 0) > DESK.gates.minVolume5mUsd ? 1e8 : 0) + ((s.metrics.liquidityUsd ?? 0) > DESK.gates.minLiquidityUsd ? 1e7 : 0) + (s.metrics.volume5mUsd ?? 0);
-    const due = staged.filter(s => !this.deep.has(s.found.mint) || now - this.deep.get(s.found.mint)!.at > DESK.deepAnalysisTtlMs)
-      .sort((a, b) => priority(b) - priority(a)).slice(0, DESK.maxDeepAnalysesPerScan);
-    const tradeable = (s: typeof staged[number]) => s.tier === 'TRENDING' && (s.metrics.volume5mUsd ?? 0) > DESK.gates.minVolume5mUsd &&
+    return { list, filtered };
+  }
+
+  private tradeable(s: Staged): boolean {
+    return s.tier === 'TRENDING' && (s.metrics.volume5mUsd ?? 0) > DESK.gates.minVolume5mUsd &&
       (s.metrics.liquidityUsd ?? 0) > DESK.gates.minLiquidityUsd && (s.metrics.buySellRatio5m ?? 0) > DESK.gates.minBuySellRatio;
-    await Promise.all(due.map(s => this.deepAnalysis(s.found, s.pair, tradeable(s)).catch(error =>
+  }
+  /** Deep evidence (RPC, website, X, trade flow) for the most tradeable-looking tokens first; CRASH signals lead. */
+  private deepDue(list: Staged[], now: number): Staged[] {
+    const crash = this.strategies.CRASH.enabled;
+    const priority = (s: Staged) => (crash && s.crashHint ? 2e9 : 0) + (s.tier === 'TRENDING' ? 1e9 : 0) +
+      ((s.metrics.volume5mUsd ?? 0) > DESK.gates.minVolume5mUsd ? 1e8 : 0) + ((s.metrics.liquidityUsd ?? 0) > DESK.gates.minLiquidityUsd ? 1e7 : 0) + (s.metrics.volume5mUsd ?? 0);
+    return list.filter(s => !this.deep.has(s.found.mint) || now - this.deep.get(s.found.mint)!.at > DESK.deepAnalysisTtlMs)
+      .sort((a, b) => priority(b) - priority(a)).slice(0, DESK.maxDeepAnalysesPerScan);
+  }
+  private async deepAnalyses(list: Staged[]): Promise<void> {
+    // Trade flow is rate-limited upstream; a CRASH entry never waits for it.
+    await Promise.all(list.map(s => this.deepAnalysis(s.found, s.pair, this.tradeable(s) && !s.crashHint).catch(error =>
       this.event('FAILED', `Evidence gathering failed: ${errorMessage(error)}`, { mint: s.found.mint, symbol: s.pair.baseToken.symbol ?? null }))));
-    // Launch fairness for trending tokens (at most two per scan: GeckoTerminal is rate-limited); needs supply from the deep evidence.
-    const launchDue = staged.filter(s => s.tier === 'TRENDING' && this.deep.get(s.found.mint)?.onchain.holders &&
+  }
+  /** Launch fairness for trending tokens (at most two per scan: GeckoTerminal is rate-limited); needs supply from the deep evidence. */
+  private async launchChecks(list: Staged[], now: number): Promise<void> {
+    const d = this.d;
+    const launchDue = list.filter(s => s.tier === 'TRENDING' && this.deep.get(s.found.mint)?.onchain.holders &&
       (!this.launches.has(s.found.mint) || (this.launches.get(s.found.mint)!.value === null && now - this.launches.get(s.found.mint)!.at > 600_000)))
-      .sort((a, b) => priority(b) - priority(a)).slice(0, 2);
+      .sort((a, b) => (b.metrics.volume5mUsd ?? 0) - (a.metrics.volume5mUsd ?? 0)).slice(0, 2);
     for (const s of launchDue) {
       const h = this.deep.get(s.found.mint)!.onchain.holders!;
       try { this.launches.set(s.found.mint, { at: now, value: await launchCheck(d.gecko, s.found.mint, exactNumber(h.supplyRaw) / 10 ** h.decimals) }); }
@@ -263,21 +371,32 @@ export class DeskEngine {
       }
     }
     if (this.launches.size > 1_000) this.launches.delete(this.launches.keys().next().value!);
-    const counts = { qualified: 0, waiting: 0, watch: 0, filtered };
-    for (const s of staged) {
-      const mint = s.found.mint, prev = this.watch.get(mint), deep = this.deep.get(mint) ?? null;
-      const watch: WatchState = prev ?? { firstSeenAt: now, observations: 0, lastLiquidityUsd: null, lastPriceUsd: null, momentumStreak: 0 };
-      const candidate = analyze({ found: s.found, pair: s.pair, metrics: s.metrics, tier: s.tier, onchain: deep?.onchain ?? null, onchainAt: deep?.at ?? null,
-        social: deep?.social ?? null, watch, now, maxWashRatio: d.cfg.rs.maxWashRatio, launch: this.launches.get(mint)?.value ?? null });
-      this.watch.set(mint, { ...watch, observations: candidate.observations, lastLiquidityUsd: s.metrics.liquidityUsd, lastPriceUsd: s.metrics.priceUsd,
-        momentumStreak: candidate.momentumStreak });
+  }
+  /** Analysis of one staged token with the evidence known right now; commits nothing. */
+  private assess(s: Staged, now: number): Candidate {
+    const mint = s.found.mint, deep = this.deep.get(mint) ?? null;
+    const watch: WatchState = this.watch.get(mint) ?? { firstSeenAt: now, observations: 0, lastLiquidityUsd: null, lastPriceUsd: null, momentumStreak: 0 };
+    const c = analyze({ found: s.found, pair: s.pair, metrics: s.metrics, tier: s.tier, onchain: deep?.onchain ?? null, onchainAt: deep?.at ?? null,
+      social: deep?.social ?? null, watch, now, maxWashRatio: this.d.cfg.rs.maxWashRatio, launch: this.launches.get(mint)?.value ?? null });
+    c.crash = crashCheck(c);
+    return c;
+  }
+  private finalize(list: Staged[], filtered: number, now: number): { qualified: number; crash: number; waiting: number; watch: number; filtered: number } {
+    const counts = { qualified: 0, crash: 0, waiting: 0, watch: 0, filtered };
+    for (const s of list) {
+      const mint = s.found.mint, candidate = this.assess(s, now);
+      this.watch.set(mint, { firstSeenAt: candidate.firstSeenAt, observations: candidate.observations, lastLiquidityUsd: s.metrics.liquidityUsd,
+        lastPriceUsd: s.metrics.priceUsd, momentumStreak: candidate.momentumStreak });
       this.candidates.set(mint, candidate);
+      if (candidate.crash?.signal) counts.crash++;
       if (candidate.status === 'QUALIFIED') counts.qualified++; else if (candidate.status === 'WAITING') counts.waiting++;
       else if (candidate.status === 'WATCHLIST') counts.watch++; else counts.filtered++;
       this.transition(mint, candidate.symbol, candidate.status, `${candidate.tier === 'ULTRA_EARLY' ? `[${candidate.classification}] ` : ''}${candidate.reasons.join('; ')}`);
     }
     if (this.candidates.size > DESK.maxCandidates) {
-      const drop = [...this.candidates.values()].sort((a, b) => rank(a) - rank(b) || a.updatedAt - b.updatedAt).slice(0, this.candidates.size - DESK.maxCandidates);
+      const held = new Set(this.books().flatMap(b => b.ledger.state.positions.map(p => p.mint)));
+      const drop = [...this.candidates.values()].filter(c => !held.has(c.mint)).sort((a, b) => rank(a) - rank(b) || a.updatedAt - b.updatedAt)
+        .slice(0, this.candidates.size - DESK.maxCandidates);
       for (const c of drop) { this.candidates.delete(c.mint); this.watch.delete(c.mint); this.deep.delete(c.mint); }
     }
     return counts;
@@ -313,17 +432,38 @@ export class DeskEngine {
 
   // ------------------------------------------------------------------ positions & exits
 
+  /** Exclusive: the fast loop and a scan never value or exit the same positions at the same time. */
+  private async checkPositions(ids: readonly StrategyId[], stopped: () => boolean): Promise<void> {
+    while (this.positionWork) await this.positionWork.catch(() => undefined);
+    const work = (async () => {
+      for (const id of ids) {
+        if (stopped()) return;
+        const ledger = this.ledgerOf(id);
+        this.lastPositionCheckAt[id] = Date.now();
+        if (ledger?.state.positions.length) await this.managePositions(id, ledger, stopped);
+      }
+    })();
+    const tracked: Promise<void> = work.finally(() => { if (this.positionWork === tracked) this.positionWork = null; });
+    this.positionWork = tracked;
+    await tracked;
+  }
+
+  /** Current pool liquidity for all held tokens in one request. */
+  private async poolLiquidity(mints: string[]): Promise<Map<string, number | null>> {
+    const out = new Map<string, number | null>();
+    if (!mints.length) return out;
+    try {
+      const pairs = await requestScope.run({ category: 'position' }, () => this.d.dex.getPairsForTokens(mints));
+      for (const mint of mints) out.set(mint, selectPair(pairs, mint, Date.now())?.liquidity?.usd ?? null);
+    } catch { /* market data outage: the executable-quote rules still apply */ }
+    return out;
+  }
+
   /** Early-warning exits: pool liquidity collapsing since entry, or the known creator selling. */
-  private async earlyWarning(p: DeskPosition): Promise<string | null> {
-    const x = DESK.exits;
-    if (p.entryLiquidityUsd) {
-      try {
-        const pair = selectPair(await requestScope.run({ category: 'position' }, () => this.d.dex.getPairsForTokens([p.mint])), p.mint, Date.now());
-        const liq = pair?.liquidity?.usd ?? null;
-        if (liq !== null && liq <= p.entryLiquidityUsd * (1 - x.liquidityDropExitPct / 100))
-          return `LIQUIDITY_DROP $${Math.round(liq).toLocaleString('en-US')} vs $${Math.round(p.entryLiquidityUsd).toLocaleString('en-US')} at entry (−${((1 - liq / p.entryLiquidityUsd) * 100).toFixed(0)}%)`;
-      } catch { /* market data outage: the executable-quote rules below still apply */ }
-    }
+  private async earlyWarning(p: DeskPosition, liquidity: Map<string, number | null>): Promise<string | null> {
+    const x = DESK.exits, liq = liquidity.get(p.mint) ?? null;
+    if (p.entryLiquidityUsd && liq !== null && liq <= p.entryLiquidityUsd * (1 - x.liquidityDropExitPct / 100))
+      return `LIQUIDITY_DROP $${Math.round(liq).toLocaleString('en-US')} vs $${Math.round(p.entryLiquidityUsd).toLocaleString('en-US')} at entry (−${((1 - liq / p.entryLiquidityUsd) * 100).toFixed(0)}%)`;
     const last = this.creatorChecks.get(p.mint) ?? 0;
     if (p.creator && p.creatorPctAtEntry != null && Date.now() - last >= x.creatorCheckMs) {
       this.creatorChecks.set(p.mint, Date.now());
@@ -335,83 +475,106 @@ export class DeskEngine {
     return null;
   }
 
-  private async managePositions(ledger: DeskLedger, stopped: () => boolean): Promise<void> {
-    const rs = this.d.cfg.rs;
-    this.lastPositionCheckAt = Date.now();
-    for (const p of [...ledger.state.positions]) {
+  private async managePositions(id: StrategyId, ledger: DeskLedger, stopped: () => boolean): Promise<void> {
+    const profile = this.strategies[id], positions = [...ledger.state.positions];
+    const liquidity = await this.poolLiquidity(positions.filter(p => p.entryLiquidityUsd).map(p => p.mint));
+    for (const p of positions) {
       if (stopped()) return;
-      const warning = await this.earlyWarning(p);
+      const ctx = { mint: p.mint, symbol: p.symbol, detail: { strategy: id } };
+      const warning = await this.earlyWarning(p, liquidity);
       let value: bigint;
       try {
-        const q = await requestScope.run({ category: 'position' }, () => this.d.jupiter.quote({ inputMint: p.mint, outputMint: SOL_MINT, amountRaw: BigInt(p.qtyRaw), slippageBps: this.d.capital.slippageBps }));
+        const q = await requestScope.run({ category: 'position' }, () => this.d.jupiter.quote({ inputMint: p.mint, outputMint: SOL_MINT, amountRaw: BigInt(p.qtyRaw), slippageBps: profile.slippageBps }));
         value = BigInt(q.outAmount);
       } catch (error) {
-        this.event('WAITING', `Position valuation unavailable: ${errorMessage(error)}; holding, no write-down`, { mint: p.mint, symbol: p.symbol });
+        this.event('WAITING', `${id} · position valuation unavailable: ${errorMessage(error)}; holding, no write-down`, ctx);
         continue;
       }
       p.lastValueLamports = String(value);
       if (value > BigInt(p.peakValueLamports)) p.peakValueLamports = String(value);
       if (this.solUsd && p.decimals >= 0) p.lastPriceUsd = sol(value) * this.solUsd / (exactNumber(BigInt(p.qtyRaw)) / 10 ** p.decimals);
-      const cost = BigInt(p.costLamports), pnlPct = (exactNumber(value) - exactNumber(cost)) / exactNumber(cost) * 100;
-      const peakPct = (exactNumber(BigInt(p.peakValueLamports)) - exactNumber(cost)) / exactNumber(cost) * 100;
-      const fromPeak = (exactNumber(value) / exactNumber(BigInt(p.peakValueLamports)) - 1) * 100;
-      const reason = warning ? warning : pnlPct <= -rs.stopLossPct ? `STOP_LOSS ${pnlPct.toFixed(2)}% ≤ -${rs.stopLossPct}%`
-        : pnlPct >= rs.takeProfitPct ? `TAKE_PROFIT ${pnlPct.toFixed(2)}% ≥ ${rs.takeProfitPct}%`
-        : rs.trailingStopPct > 0 && peakPct >= rs.trailingActivationPct && fromPeak <= -rs.trailingStopPct ? `TRAILING_STOP ${fromPeak.toFixed(2)}% from peak`
-        : Date.now() - p.openedAt >= rs.maxHoldMin * 60_000 ? `MAX_HOLD ${rs.maxHoldMin} min` : null;
+      const cost = exactNumber(BigInt(p.costLamports)), pnlPct = (exactNumber(value) - cost) / cost * 100;
+      const peakPct = (exactNumber(BigInt(p.peakValueLamports)) - cost) / cost * 100;
+      const fromPeakPct = (exactNumber(value) / exactNumber(BigInt(p.peakValueLamports)) - 1) * 100;
+      const reason = warning ?? exitReason(profile.exits, { pnlPct, peakPct, fromPeakPct, heldMs: Date.now() - p.openedAt });
       if (!reason) {
         // Checked every few seconds; logged only when the result moves or once a minute, so telemetry stays readable.
         const prev = this.holdLog.get(p.mint);
         if (!prev || Math.abs(prev.pct - pnlPct) >= 2 || Date.now() - prev.at >= 60_000) {
           this.holdLog.set(p.mint, { pct: pnlPct, at: Date.now() });
-          this.event('POSITION', `Holding: value ${sol(value).toFixed(6)} SOL (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%, peak ${peakPct >= 0 ? '+' : ''}${peakPct.toFixed(2)}%)`, { mint: p.mint, symbol: p.symbol });
+          const unrealized = this.solUsd ? ` · ${usd(sol(value) * this.solUsd - p.costUsd)}` : '';
+          this.event('POSITION', `${id} · holding: value ${sol(value).toFixed(6)} SOL (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%${unrealized}, peak ${peakPct >= 0 ? '+' : ''}${peakPct.toFixed(2)}%)`, ctx);
         }
         continue;
       }
-      if (!this.execution) { this.event('WAITING', `Exit signal ${reason}, but execution is paused`, { mint: p.mint, symbol: p.symbol }); continue; }
-      this.event('EXIT', `Exit signal: ${reason}`, { mint: p.mint, symbol: p.symbol });
-      await this.execute('SELL', { mint: p.mint, symbol: p.symbol, decimals: p.decimals, pairAddress: p.pairAddress, heldRaw: BigInt(p.qtyRaw) }, ledger, stopped);
+      if (!this.execution) { this.event('WAITING', `${id} · exit signal ${reason}, but execution is paused`, ctx); continue; }
+      this.event('EXIT', `${id} · exit signal: ${reason}`, ctx);
+      await this.execute('SELL', { strategy: id, mint: p.mint, symbol: p.symbol, decimals: p.decimals, pairAddress: p.pairAddress, heldRaw: BigInt(p.qtyRaw) }, ledger, stopped);
     }
   }
 
   // ------------------------------------------------------------------ entries
 
-  private async maybeEnter(ledger: DeskLedger, stopped: () => boolean): Promise<void> {
-    const s = ledger.state;
-    if (!this.execution || stopped()) return;
-    if (s.halted || s.pending) { this.message = s.halted ?? 'TRANSACTION_RECONCILIATION_REQUIRED'; return; }
-    const recentExit = (mint: string) => s.entries.some(e => e.mint === mint && e.side === 'SELL' && Date.now() - e.at < DESK.reentryCooldownMs);
-    const qualified = [...this.candidates.values()].filter(c => c.status === 'QUALIFIED' && !ledger.position(c.mint) && !recentExit(c.mint))
-      .sort((a, b) => composite(b) - composite(a));
-    if (!qualified.length) {
-      if (this.drill && this.d.mode === 'PAPER') return this.drillEnter(ledger, stopped, recentExit);
-      this.message = 'No qualified entry candidate'; return;
-    }
-    if (s.positions.length >= DESK.maxOpenPositions) {
-      this.event('WAITING', `${qualified.length} qualified, but ${s.positions.length}/${DESK.maxOpenPositions} positions are open`); return;
-    }
-    const c = qualified[0]!;
-    if (c.onchain.decimals === null) { this.event('WAITING', 'Token decimals unknown; entry deferred', { mint: c.mint, symbol: c.symbol }); return; }
-    this.event('QUALIFIED', `Entry candidate selected (composite ${composite(c).toFixed(0)})`, { mint: c.mint, symbol: c.symbol });
-    await this.execute('BUY', { mint: c.mint, symbol: c.symbol, decimals: c.onchain.decimals, pairAddress: c.pair.address, heldRaw: 0n,
-      token2022: c.onchain.token2022 === true, entry: this.entryContext(c) }, ledger, stopped);
+  /** TEST: whether a sleeve can still fund one entry plus the account-rent budget the guard requires. */
+  private sleeveShort(ledger: DeskLedger, p: StrategyProfile): string | null {
+    if (this.d.mode !== 'PAPER' || !this.solUsd || ledger.state.paperCashLamports === null) return null;
+    const cash = BigInt(ledger.state.paperCashLamports), entry = BigInt(Math.floor(p.entryUsd / this.solUsd * 1e9));
+    if (cash >= entry + 2n * TOKEN_ACCOUNT_RENT_LAMPORTS + 100_000n) return null;
+    return `${p.id} · TEST sleeve ${usd(sol(cash) * this.solUsd)} cannot fund a ${usd(p.entryUsd)} entry plus the account-rent budget; waiting for exits (or Reset TEST)`;
   }
 
   /**
-   * TEST drill: when nothing qualifies, open a paper position in the best trending candidate whose safety gates
+   * Opens up to the strategy's free slots in one scan, best candidate first. A candidate the guard blocks (for
+   * example max drag) is skipped for a few minutes and the next one is tried.
+   */
+  private async maybeEnter(id: StrategyId, ledger: DeskLedger, list: Candidate[], stopped: () => boolean): Promise<void> {
+    const p = this.strategies[id], s = ledger.state;
+    if (!p.enabled || !this.execution || stopped()) return;
+    if (s.halted || s.pending) { this.message = s.halted ?? 'TRANSACTION_RECONCILIATION_REQUIRED'; return; }
+    const now = Date.now();
+    const recentExit = (mint: string) => s.entries.some(e => e.mint === mint && e.side === 'SELL' && now - e.at < DESK.reentryCooldownMs);
+    const pool = list.filter(c => !this.heldBy(c.mint) && !recentExit(c.mint) && !this.entrySkips.has(`${id}:${c.mint}`))
+      .sort((a, b) => id === 'CRASH' ? crashRank(b) - crashRank(a) : composite(b) - composite(a));
+    if (!pool.length) {
+      if (id === 'FAIR' && this.drill && this.d.mode === 'PAPER') return this.drillEnter(ledger, stopped, recentExit);
+      if (id === 'FAIR') this.message = 'No qualified entry candidate';
+      return;
+    }
+    let slots = p.maxOpenPositions - s.positions.length;
+    if (slots <= 0) { this.note(id, 'WAITING', `${id} · ${pool.length} candidate(s), but ${s.positions.length}/${p.maxOpenPositions} positions are open`); return; }
+    let attempts = 0;
+    for (const c of pool) {
+      if (slots <= 0 || attempts >= DESK.maxEntryAttemptsPerScan || stopped() || !this.execution || s.halted) break;
+      const short = this.sleeveShort(ledger, p);
+      if (short) { this.note(id, 'WAITING', short); break; }
+      if (c.onchain.decimals === null) { this.event('WAITING', `${id} · token decimals unknown; entry deferred`, { mint: c.mint, symbol: c.symbol }); continue; }
+      if (this.heldBy(c.mint)) continue;
+      attempts++; this.notes.delete(id);
+      this.event('QUALIFIED', id === 'CRASH' ? `CRASH entry selected: ${c.crash?.summary ?? ''}` : `FAIR entry candidate selected (composite ${composite(c).toFixed(0)})`,
+        { mint: c.mint, symbol: c.symbol, detail: { strategy: id } });
+      const code = await this.execute('BUY', { strategy: id, mint: c.mint, symbol: c.symbol, decimals: c.onchain.decimals, pairAddress: c.pair.address, heldRaw: 0n,
+        token2022: c.onchain.token2022 === true, entry: this.entryContext(c) }, ledger, stopped);
+      if (ledger.position(c.mint)) { slots--; continue; }
+      if (code && FUNDS_CODES.has(code)) break;
+      if (code !== 'STOP_REQUESTED') this.entrySkips.set(`${id}:${c.mint}`, Date.now());
+    }
+  }
+
+  /**
+   * TEST drill (FAIR only): when nothing qualifies, open a paper position in the best trending candidate whose safety gates
    * pass (mint/freeze authority revoked, no dangerous extensions, AMM liquidity, fair launch), bypassing volume, buy-pressure,
    * concentration and momentum gates. The execution guard still applies. Every drill fill is marked in the ledger.
    */
   private async drillEnter(ledger: DeskLedger, stopped: () => boolean, recentExit: (mint: string) => boolean): Promise<void> {
-    if (ledger.state.positions.length >= DESK.maxOpenPositions) return;
+    if (ledger.state.positions.length >= this.strategies.FAIR.maxOpenPositions) return;
     const safe = (c: Candidate) => ['mintAuthority', 'freezeAuthority', 'contract', 'liquidity', 'fairLaunch'].every(k => c.gates.find(g => g.key === k)?.status === 'PASS');
     const pool = [...this.candidates.values()].filter(c => c.tier === 'TRENDING' && c.onchain.decimals !== null && safe(c) &&
-      !ledger.position(c.mint) && !recentExit(c.mint) && !this.drillSkips.has(c.mint)).sort((a, b) => composite(b) - composite(a));
+      !this.heldBy(c.mint) && !recentExit(c.mint) && !this.drillSkips.has(c.mint)).sort((a, b) => composite(b) - composite(a));
     if (!pool.length) { this.message = 'DRILL: no trending candidate with passing safety gates yet'; return; }
     for (const c of pool.slice(0, 3)) {
       if (stopped()) return;
       this.event('QUALIFIED', `DRILL entry (strategy gates bypassed; status ${c.status}: ${c.reasons[0] ?? ''})`, { mint: c.mint, symbol: c.symbol });
-      await this.execute('BUY', { mint: c.mint, symbol: c.symbol, decimals: c.onchain.decimals!, pairAddress: c.pair.address, heldRaw: 0n,
+      await this.execute('BUY', { strategy: 'FAIR', mint: c.mint, symbol: c.symbol, decimals: c.onchain.decimals!, pairAddress: c.pair.address, heldRaw: 0n,
         token2022: c.onchain.token2022 === true, drill: true, entry: this.entryContext(c) }, ledger, stopped);
       if (ledger.position(c.mint)) return;
       // Blocked by the guard (e.g. max drag): skip it for a while and try the next one.
@@ -426,22 +589,31 @@ export class DeskEngine {
 
   // ------------------------------------------------------------------ one order through the production path
 
-  private async execute(side: 'BUY' | 'SELL', t: ExecTarget,
-    ledger: DeskLedger, stopped: () => boolean, probe = false): Promise<void> {
-    const d = this.d, ctx = { mint: t.mint, symbol: t.symbol };
+  /** Orders are serialized across strategies; resolves to the reject code, or null when the order was filled. */
+  private execute(side: 'BUY' | 'SELL', t: ExecTarget, ledger: DeskLedger, stopped: () => boolean, probe = false): Promise<string | null> {
+    const run = this.orders.then(() => this.executeNow(side, t, ledger, stopped, probe));
+    this.orders = run.catch(() => undefined);
+    return run;
+  }
+
+  private async executeNow(side: 'BUY' | 'SELL', t: ExecTarget,
+    ledger: DeskLedger, stopped: () => boolean, probe: boolean): Promise<string | null> {
+    const d = this.d, profile = this.strategies[t.strategy], ctx = { mint: t.mint, symbol: t.symbol };
     const wallet = d.wallet(), solUsd = this.solUsd;
-    if (!wallet) { this.event('WAITING', d.mode === 'PAPER' ? 'No wallet address: connect Phantom or set WALLET_PUBLIC_KEY in .env' : 'Connect Phantom to trade LIVE', ctx); return; }
-    if (!solUsd) { this.event('WAITING', 'SOL price unavailable; order deferred', ctx); return; }
-    if (d.mode === 'LIVE' && (!wallet.signer || !d.sender)) { this.event('WAITING', 'LIVE needs an active Phantom signing session', ctx); return; }
+    if (!probe && stopped()) return 'STOP_REQUESTED';
+    if (side === 'SELL' && !ledger.position(t.mint)) return 'UNTRACKED_POSITION';
+    if (!wallet) { this.event('WAITING', d.mode === 'PAPER' ? 'No wallet address: connect Phantom or set WALLET_PUBLIC_KEY in .env' : 'Connect Phantom to trade LIVE', ctx); return 'WALLET_REQUIRED'; }
+    if (!solUsd) { this.event('WAITING', 'SOL price unavailable; order deferred', ctx); return 'SOL_PRICE_UNAVAILABLE'; }
+    if (d.mode === 'LIVE' && (!wallet.signer || !d.sender)) { this.event('WAITING', 'LIVE needs an active Phantom signing session', ctx); return 'WALLET_SESSION_REQUIRED'; }
     let tokenProgram = t.token2022 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
     if (t.token2022 === undefined) {
       const info = await d.rpc.execute('desk:mint-owner', c => c.getAccountInfo(new PublicKey(t.mint), 'confirmed'));
       if (info?.owner.equals(TOKEN_2022_PROGRAM_ID)) tokenProgram = TOKEN_2022_PROGRAM_ID;
     }
-    const amountRaw = side === 'BUY' ? BigInt(Math.floor(d.capital.baseEntryUsd / solUsd * 1e9)) : t.heldRaw;
+    const amountRaw = side === 'BUY' ? BigInt(Math.floor(profile.entryUsd / solUsd * 1e9)) : t.heldRaw;
     const guard = new DeskGuard({ mode: d.mode, rpc: d.rpc, jupiter: d.jupiter, owner: wallet.owner, mint: t.mint, symbol: t.symbol, decimals: t.decimals,
-      tokenProgram, solUsd, slippageBps: d.capital.slippageBps, maxDragBps: DESK.maxDragBps, reserveLamports: DESK.reserveLamports,
-      configuredPriorityCap: BigInt(d.cfg.jupiter.maxPriorityFeeLamports), baseEntryUsd: d.capital.baseEntryUsd,
+      tokenProgram, solUsd, slippageBps: profile.slippageBps, maxDragBps: profile.maxDragBps, reserveLamports: DESK.reserveLamports,
+      configuredPriorityCap: BigInt(d.cfg.jupiter.maxPriorityFeeLamports), baseEntryUsd: profile.entryUsd,
       paperCashLamports: d.mode === 'PAPER' ? BigInt(ledger.state.paperCashLamports ?? '0') : null, heldRaw: t.heldRaw, stopped,
       enforceDrag: !(t.drill && d.mode === 'PAPER'),
       onSigned: async signature => {
@@ -449,7 +621,7 @@ export class DeskEngine {
         await ledger.save();
         this.event('SUBMITTED', `Signed by Phantom; signature persisted before broadcast: ${signature}`, ctx);
       },
-      event: (stage, message, detail) => this.event(stage, message, { ...ctx, detail }) });
+      event: (stage, message, detail) => this.event(stage, message, { ...ctx, detail: { ...detail, strategy: t.strategy } }) });
     const signer: TransactionSigner = d.mode === 'PAPER' ? paperSigner(wallet.owner) : {
       publicKey: wallet.owner,
       signTransaction: async (tx, context) => {
@@ -468,7 +640,7 @@ export class DeskEngine {
     if (d.mode === 'LIVE') { ledger.state.pending = { side, mint: t.mint, at: Date.now(), signature: null }; await ledger.save(); }
     const record = (p: Preflight | null) => { if (p) { this.preflights.push(p); this.preflights = this.preflights.slice(-20); } };
     try {
-      const fill = await requestScope.run({ category: 'execution' }, () => executor.swap({ side, mint: t.mint, amountRaw, slippageBps: d.capital.slippageBps }));
+      const fill = await requestScope.run({ category: 'execution' }, () => executor.swap({ side, mint: t.mint, amountRaw, slippageBps: profile.slippageBps }));
       const order = guard.lastOrder!;
       const row = ledger.book({ side, mint: t.mint, symbol: t.symbol, decimals: t.decimals, pairAddress: t.pairAddress, inAmountRaw: fill.inAmountRaw,
         outAmountRaw: fill.outAmountRaw, solDeltaLamports: fill.solDeltaLamports, feeLamports: fill.feeLamports, rentLamports: fill.rentLamports,
@@ -476,25 +648,31 @@ export class DeskEngine {
       if (guard.lastPreflight) { guard.lastPreflight.outcome = 'CONFIRMED'; guard.lastPreflight.txSignature = fill.signature; }
       record(guard.lastPreflight);
       this.event('CONFIRMED', `${side} confirmed on-chain: ${fill.signature}`, ctx);
-      this.bookedEvents(side, row, ctx);
+      this.bookedEvents(side, t.strategy, row, ctx);
+      return null;
     } catch (error) {
       record(guard.lastPreflight);
       const cause = error instanceof SwapError ? error.cause : error;
+      const code = cause instanceof DeskReject || cause instanceof SigningError ? cause.code : 'ORDER_FAILED';
       if (probe && cause instanceof PaperExecution) {
         if (guard.lastPreflight) guard.lastPreflight.outcome = 'PROBE_NOT_BOOKED';
         this.event('PREFLIGHT', 'PROBE complete — pre-flight passed; stopped where LIVE would request a Phantom signature. Nothing booked.', ctx);
+        return null;
       } else if (probe) {
         this.event('FAILED', `PROBE stopped: ${cause instanceof DeskReject ? cause.message : errorMessage(error)}`, ctx);
       } else if (d.mode === 'PAPER' && cause instanceof PaperExecution && guard.lastOrder && guard.lastSimulation.status === 'PASSED') {
         this.paperFill(side, t, guard, ledger, solUsd, 'Filled from the passed unsigned RPC simulation');
+        return null;
       } else if (d.mode === 'PAPER' && side === 'SELL' && guard.lastOrder && !(cause instanceof DeskReject && ['STOP_REQUESTED', 'UNTRACKED_POSITION'].includes(cause.code))) {
         // A TEST position is not held on-chain, so its exit cannot be simulated against the wallet.
         guard.lastSimulation = { status: 'NOT_POSSIBLE', detail: 'TEST position is not held by the wallet; exit valued at the executable Jupiter quote', solDelta: null, tokenDelta: null };
         this.event('SIMULATION', `NOT POSSIBLE — ${guard.lastSimulation.detail}`, ctx);
         this.paperFill(side, t, guard, ledger, solUsd, guard.lastSimulation.detail);
+        return null;
       } else {
         this.failed(side, t, guard, ledger, error, solUsd);
       }
+      return cause instanceof PaperExecution ? 'SIMULATION_NOT_PASSED' : code;
     } finally {
       await ledger.save();
     }
@@ -515,22 +693,23 @@ export class DeskEngine {
     const rent = buy ? (-solDelta - BigInt(q.inAmount) - fee > o.rent ? -solDelta - BigInt(q.inAmount) - fee : o.rent) : 0n;
     const pre = guard.lastPreflight;
     if (pre) { pre.outcome = 'PAPER_FILLED'; pre.signature = 'NOT_REQUESTED_TEST'; if (!buy) pre.simulation = { ...pre.simulation, status: guard.lastSimulation.status, detail: guard.lastSimulation.detail }; }
-    this.event('SUBMITTED', 'TEST — no signature requested, nothing submitted; paper execution recorded', ctx);
+    this.event('SUBMITTED', `TEST — no signature requested, nothing submitted; paper execution recorded (${t.strategy})`, ctx);
     const row = ledger.book({ side, mint: t.mint, symbol: t.symbol, decimals: t.decimals, pairAddress: t.pairAddress, inAmountRaw: BigInt(q.inAmount),
       outAmountRaw: buy ? tokens : BigInt(q.outAmount), solDeltaLamports: solDelta, feeLamports: fee, rentLamports: rent, router: 'Jupiter', route: o.route,
       routerFeeUsd: sol(o.routerFee) * solUsd, txSignature: null, solUsd, at: Date.now(), note, entry: t.entry });
-    this.bookedEvents(side, row, ctx);
+    this.bookedEvents(side, t.strategy, row, ctx);
   }
 
-  private bookedEvents(side: 'BUY' | 'SELL', row: ReturnType<DeskLedger['book']>, ctx: { mint: string; symbol: string | null }): void {
-    if (side === 'BUY') this.event('POSITION', `Position opened: ${row.quantity} @ $${row.entryPriceUsd?.toPrecision(6) ?? 'UNKNOWN'} · fee $${row.networkFeeUsd?.toFixed(4)}`, ctx);
+  private bookedEvents(side: 'BUY' | 'SELL', id: StrategyId, row: ReturnType<DeskLedger['book']>, ctx: { mint: string; symbol: string | null }): void {
+    const c = { ...ctx, detail: { strategy: id } };
+    if (side === 'BUY') this.event('POSITION', `${id} · position opened: ${row.quantity} @ $${row.entryPriceUsd?.toPrecision(6) ?? 'UNKNOWN'} · fee $${row.networkFeeUsd?.toFixed(4)}`, c);
     else {
-      this.event('EXIT', `Position closed: ${row.quantity} @ $${row.exitPriceUsd?.toPrecision(6) ?? 'UNKNOWN'}`, ctx);
-      this.event('PNL', `Realized: gross ${usd(row.grossPnlUsd)} · fees ${usd(row.totalFeesUsd)} · net ${usd(row.netPnlUsd)}`, ctx);
+      this.event('EXIT', `${id} · position closed: ${row.quantity} @ $${row.exitPriceUsd?.toPrecision(6) ?? 'UNKNOWN'}`, c);
+      this.event('PNL', `${id} · realized: gross ${usd(row.grossPnlUsd)} · fees ${usd(row.totalFeesUsd)} · net ${usd(row.netPnlUsd)}`, c);
     }
   }
 
-  private failed(side: 'BUY' | 'SELL', t: { mint: string; symbol: string | null }, guard: DeskGuard, ledger: DeskLedger, error: unknown, solUsd: number): void {
+  private failed(side: 'BUY' | 'SELL', t: ExecTarget, guard: DeskGuard, ledger: DeskLedger, error: unknown, solUsd: number): void {
     const ctx = { mint: t.mint, symbol: t.symbol }, s = ledger.state;
     const swap = error instanceof SwapError ? error : null, cause = swap?.cause ?? error;
     const reason = cause instanceof DeskReject ? cause.message : cause instanceof SigningError ? `Phantom: ${cause.code}` : errorMessage(error);
@@ -555,15 +734,15 @@ export class DeskEngine {
     s.pending = null;
     const where = guard.lastPreflight ? (guard.lastPreflight.signature === 'REJECTED' || guard.lastPreflight.signature === 'EXPIRED' ? 'at Phantom signature' : 'at pre-flight')
       : guard.quoted ? 'after quote' : 'before quote';
-    this.event(cause instanceof DeskReject && cause.code === 'FEE_CAP' ? 'FILTERED' : 'FAILED', `${side} blocked ${where}: ${reason}`, ctx);
+    this.event(cause instanceof DeskReject && cause.code === 'FEE_CAP' ? 'FILTERED' : 'FAILED', `${t.strategy} · ${side} blocked ${where}: ${reason}`, { ...ctx, detail: { strategy: t.strategy } });
     if (cause instanceof SigningError) this.pause();
   }
 
   // ------------------------------------------------------------------ view
 
   status(wallet: DeskStatus['wallet']): DeskStatus {
-    const d = this.d, ledger = this.currentLedger(), s = ledger?.state, solUsd = this.solUsd;
-    const positions = s?.positions ?? [];
+    const d = this.d, books = this.books(), solUsd = this.solUsd;
+    const positions: DeskPosition[] = books.flatMap(b => b.ledger.state.positions.map(p => ({ ...p, strategy: b.id })));
     // A position without an executable valuation yet makes totals unknown, never silently $0.
     const valued = positions.every(p => p.lastValueLamports !== null);
     const value = valued ? positions.reduce((a, p) => a + BigInt(p.lastValueLamports!), 0n) : null;
@@ -572,12 +751,16 @@ export class DeskEngine {
     const configured = !wallet.connected && d.mode === 'PAPER' && this.walletView ? this.walletView.owner : null;
     if (configured) wallet = { connected: false, address: configured, source: 'CONFIGURED' };
     const native = this.walletView && this.walletView.owner === wallet.address ? this.walletView.native : null;
-    const paper = s?.paperCashLamports != null ? BigInt(s.paperCashLamports) : null;
+    // TEST cash is the sum of the strategy sleeves; LIVE strategies share the wallet.
+    const sleeves = books.map(b => b.ledger.state.paperCashLamports).filter((x): x is string => x !== null);
+    const paper = d.mode === 'PAPER' && sleeves.length ? sleeves.reduce((a, x) => a + BigInt(x), 0n) : null;
     const budget = d.mode === 'PAPER' ? paper : native;
     const spendable = budget === null ? null : budget - DESK.reserveLamports > 0n ? budget - DESK.reserveLamports : 0n;
     const cash = d.mode === 'PAPER' ? paper : native;
+    const rows = books.flatMap(b => [...b.ledger.state.entries.slice(-100)].reverse().map(e => ({ ...e, strategy: b.id }))).sort((a, b) => b.at - a.at).slice(0, 100);
     return {
       mode: d.mode, label: LABEL[d.mode], scanner: this.scanner, execution: this.execution, drill: this.drill, wallet,
+      strategies: STRATEGY_IDS.map(id => this.strategyView(id)),
       capital: {
         plannedStartingCapitalUsd: d.capital.plannedStartingCapitalUsd, baseEntryUsd: d.capital.baseEntryUsd, reserveSol: sol(DESK.reserveLamports),
         maxDragPct: Number(DESK.maxDragBps) / 100, slippageBps: d.capital.slippageBps,
@@ -586,25 +769,41 @@ export class DeskEngine {
         spendableUsd: spendable !== null && solUsd ? sol(spendable) * solUsd : null,
         paperCashUsd: paper !== null && solUsd ? sol(paper) * solUsd : null, openPositions: positions.length,
         positionsValueUsd: solUsd && value !== null ? sol(value) * solUsd : null, unrealizedPnlUsd: unrealized,
-        realizedPnlUsd: s?.realizedPnlUsd ?? 0, totalFeesUsd: s?.feesUsd ?? 0,
+        realizedPnlUsd: books.reduce((a, b) => a + b.ledger.state.realizedPnlUsd, 0), totalFeesUsd: books.reduce((a, b) => a + b.ledger.state.feesUsd, 0),
         equityUsd: cash !== null && solUsd && value !== null ? sol(cash + value + rent) * solUsd : null, lastWalletSync: this.walletView?.at ?? null,
       },
-      message: this.message, halted: s?.halted ?? null, lastScanAt: this.lastScanAt, nextScanAt: this.nextScanAt, scanning: this.busy,
+      message: this.message, halted: books.find(b => b.ledger.state.halted)?.ledger.state.halted ?? null,
+      lastScanAt: this.lastScanAt, nextScanAt: this.nextScanAt, scanning: this.busy,
       events: this.events.list(250).reverse(),
-      candidates: [...this.candidates.values()].sort((a, b) => rank(b) - rank(a) || composite(b) - composite(a)).slice(0, 40),
-      preflights: [...this.preflights].reverse(), positions: positions.map(p => ({ ...p })), ledger: (s?.entries ?? []).slice(-100).reverse(),
+      candidates: [...this.candidates.values()].sort((a, b) => rank(b) - rank(a) || Number(!!b.crash?.signal) - Number(!!a.crash?.signal) || composite(b) - composite(a)).slice(0, 40),
+      preflights: [...this.preflights].reverse(), positions, ledger: rows,
       sources: this.sources, path: this.pathView(),
+    };
+  }
+
+  private strategyView(id: StrategyId): StrategyView {
+    const p = this.strategies[id], s = this.ledgerOf(id)?.state ?? null, solUsd = this.solUsd;
+    const positions = s?.positions ?? [];
+    const valued = positions.every(x => x.lastValueLamports !== null);
+    const stats = strategyStats(s?.entries ?? []);
+    return {
+      id, label: p.label, summary: p.summary, enabled: p.enabled, capitalUsd: p.capitalUsd, entryUsd: p.entryUsd, slippageBps: p.slippageBps,
+      maxDragPct: Number(p.maxDragBps) / 100, maxOpenPositions: p.maxOpenPositions, positionCheckSec: p.positionCheckMs / 1000, exitRules: exitRuleText(p),
+      cashUsd: this.d.mode === 'PAPER' && s?.paperCashLamports != null && solUsd ? sol(BigInt(s.paperCashLamports)) * solUsd : null,
+      openPositions: positions.length, realizedPnlUsd: s?.realizedPnlUsd ?? 0, feesUsd: s?.feesUsd ?? 0, halted: s?.halted ?? null,
+      unrealizedPnlUsd: solUsd && valued ? positions.reduce((a, x) => a + sol(BigInt(x.lastValueLamports!)) * solUsd - x.costUsd, 0) : null,
+      stats, scale: scaleAdvice(p, stats, this.d.mode),
     };
   }
 
   private pathView(): DeskStatus['path'] {
     const d = this.d, rpc = d.cfg.rpc.endpoints.map(e => { try { return new URL(e).hostname; } catch { return 'configured RPC'; } }).join(', ');
-    const test = d.mode === 'PAPER';
+    const test = d.mode === 'PAPER', f = this.strategies.FAIR, c = this.strategies.CRASH;
     return [
       { layer: 'Market data', provider: 'DexScreener (pairs, boosts, profiles) · GeckoTerminal (trending/new pools, trades)' },
       { layer: 'Scanner', provider: 'Trending / migrated < $1M (priority < $100K) · ultra-early $2K–$10K, monitored to $100K' },
-      { layer: 'Strategy', provider: 'Two-tier early discovery → watchlist → momentum confirmation' },
-      { layer: 'Risk engine', provider: `Hard gates + execution guard (reserve ${sol(DESK.reserveLamports)} SOL, max drag ${Number(DESK.maxDragBps) / 100}%)` },
+      { layer: 'Strategies (parallel)', provider: `FAIR: fair launch + momentum in 2 scans${f.enabled ? '' : ' (OFF)'} · CRASH: young pumping pools, entered in 1 scan, exits within ${c.exits.maxHoldMin} min${c.enabled ? '' : ' (OFF)'}` },
+      { layer: 'Risk engine', provider: `Hard gates + execution guard (reserve ${sol(DESK.reserveLamports)} SOL, max drag FAIR ${Number(f.maxDragBps) / 100}% / CRASH ${Number(c.maxDragBps) / 100}%)` },
       { layer: 'Quote provider', provider: 'Jupiter Swap API /quote' },
       { layer: 'DEX / router', provider: 'Jupiter aggregator — the DEX route is shown per order' },
       { layer: 'Transaction builder', provider: 'Jupiter /swap for the connected wallet address' },
@@ -623,4 +822,8 @@ function composite(c: Candidate): number {
   const v = (k: string) => c.scores.find(s => s.key === k)?.score ?? 0;
   return v('MOMENTUM') * 0.3 + v('MARKET') * 0.2 + v('ONCHAIN') * 0.2 + v('RISK') * 0.15 + v('FUNDAMENTAL') * 0.1 + v('SOCIAL') * 0.05;
 }
+/** CRASH ranks by live flow: 5-minute volume weighted by buy pressure. */
+const crashRank = (c: Candidate) => (c.metrics.volume5mUsd ?? 0) * Math.min(c.metrics.buySellRatio5m ?? 0, 3);
+/** Entry rejections that no other candidate can pass either in this scan. */
+const FUNDS_CODES = new Set(['TEST_CAPITAL_INSUFFICIENT', 'SOL_RESERVE_FLOOR', 'FEE_UNAFFORDABLE', 'WALLET_REQUIRED', 'SOL_PRICE_UNAVAILABLE', 'WALLET_SESSION_REQUIRED', 'STOP_REQUESTED']);
 const unreachableSender = { sendAndConfirm: async () => { throw new Error('TEST never submits a transaction'); } } as unknown as TransactionSender;

@@ -1,5 +1,5 @@
 import { Fragment, useMemo, useState } from 'react';
-import type { Candidate, DeskEvent, DeskStatus, Evidence, Preflight, Stage } from '../../src/desk/types';
+import type { Candidate, DeskEvent, DeskStatus, Evidence, Preflight, Stage, StrategyView } from '../../src/desk/types';
 import type { TradingSession } from './use-trading';
 import { money, numeric, short, time } from './format';
 
@@ -16,6 +16,7 @@ const EXPLAIN: Record<string, string> = {
   TRANSACTION_RECONCILIATION_REQUIRED: 'A transaction outcome is unknown. Check it on Solscan before resuming; nothing is retried automatically.',
   RPC_NOT_CONFIGURED: 'Set RPC_ENDPOINTS in the local .env.', JUPITER_API_KEY_REQUIRED: 'Set JUPITER_API_KEY in the local .env (never in the browser).',
   INSTANCE_LOCK: 'Another dashboard process owns data-desk. Close it first.', SCANNER_OFF: 'Start the scanner first.',
+  RESET_TEST_ONLY: 'Reset is only available in TEST.', INVALID_STRATEGY: 'Unknown strategy.',
 };
 const describe = (code: string | null) => code ? EXPLAIN[code] ?? code.replaceAll('_', ' ') : null;
 const fine = (v: number | null | undefined, d = 4) => v === null || v === undefined || !Number.isFinite(v) ? '--' : `${v < 0 ? '-' : ''}$${Math.abs(v).toFixed(d)}`;
@@ -42,6 +43,7 @@ export function DeskPanel({ t }: { t: TradingSession }) {
     </div>}
     {d && <>
       <Capital d={d} />
+      <Strategies d={d} t={t} />
       <Stages events={d.events} />
       <div className="desk-grid">
         <Telemetry events={d.events} />
@@ -80,6 +82,8 @@ function Controls({ t, d }: { t: TradingSession; d: DeskStatus | null }) {
         <button className="stop-action" disabled={busy || !running} onClick={() => void t.desk('stop-test')}>STOP TEST</button>
         <button className="source-button" disabled={busy} title="Paper entries in the best safe candidate even when strategy gates are not met"
           onClick={() => void t.desk(d?.drill ? 'drill-off' : 'drill-on')}>{d?.drill ? 'TEST DRILL: TURN OFF' : 'TEST DRILL: TURN ON'}</button>
+        <button className="source-button" disabled={busy || running} title="Archive both TEST ledgers and restart every sleeve at its planned capital"
+          onClick={() => { if (window.confirm('Archive both TEST ledgers (kept on disk) and restart every TEST sleeve at its planned capital? Open paper positions end with the archive.')) void t.desk('reset-test'); }}>RESET TEST</button>
       </> : <>
         <button className="primary-action live" disabled={busy || running || !t.connected} onClick={() => void t.desk('start-live')}>START LIVE SESSION</button>
         <button className="stop-action" disabled={busy || !running} onClick={() => void t.desk('stop-live')}>STOP LIVE SESSION</button>
@@ -109,7 +113,7 @@ function Capital({ d }: { d: DeskStatus }) {
       {row('Max drag', `${numeric(c.maxDragPct, 1)}%`, `slippage tolerance ${c.slippageBps} bps counts toward it`)}
     </section>
     <section><h3>{test ? 'TEST capital & PnL' : 'LIVE capital & PnL'}</h3>
-      {test && row('TEST cash', money(c.paperCashUsd), 'starts at planned capital; separate from wallet')}
+      {test && row('TEST cash', money(c.paperCashUsd), 'all strategy sleeves; separate from wallet')}
       {!test && row('Available SOL', c.availableSol === null ? '--' : `${numeric(c.availableSol, 6)} SOL`)}
       {row('Reserved SOL', `${numeric(c.reservedSol, 6)} SOL`, 'native reserve + token-account rent')}
       {row('Spendable capital', money(c.spendableUsd))}
@@ -120,6 +124,38 @@ function Capital({ d }: { d: DeskStatus }) {
       {row('Equity', money(c.equityUsd))}
     </section>
   </div>;
+}
+
+const signed = (v: number | null | undefined, d = 1) => v === null || v === undefined ? '--' : `${v > 0 ? '+' : ''}${v.toFixed(d)}%`;
+
+function Strategies({ d, t }: { d: DeskStatus; t: TradingSession }) {
+  const busy = !!t.busy || !t.online, test = d.mode === 'PAPER';
+  return <div className="strategies" aria-label="Strategies">{d.strategies.map((s: StrategyView) => {
+    const x = s.stats, row = (label: string, value: string) => <div><span>{label}</span><strong>{value}</strong></div>;
+    return <section key={s.id} className={`strategy ${s.enabled ? 'on' : 'off'}`}>
+      <div className="card-head"><h3>{s.label}</h3>
+        <button className={s.enabled ? 'source-button' : 'primary-action'} disabled={busy}
+          onClick={() => void t.desk('strategy', { strategy: s.id, enabled: !s.enabled })}>{s.enabled ? 'ON · turn off' : 'OFF · turn on'}</button></div>
+      <p className="desk-note">{s.summary}{!test && s.id === 'CRASH' ? ' · LIVE: starts OFF every session; fast trades need Phantom Auto-Confirm.' : ''}</p>
+      {s.halted && <p className="trading-error">HALTED: {describe(s.halted)}</p>}
+      <div className="strategy-kpis">
+        {row('Entry', `${money(s.entryUsd)} · drag ≤ ${numeric(s.maxDragPct, 1)}%`)}
+        {row(test ? 'TEST sleeve' : 'Budget', test ? `${money(s.cashUsd)} of ${money(s.capitalUsd)}` : 'Phantom wallet (shared)')}
+        {row('Positions', `${s.openPositions} / ${s.maxOpenPositions} · checked every ${s.positionCheckSec}s`)}
+        {row('Unrealized · realized', `${fine(s.unrealizedPnlUsd)} · ${fine(s.realizedPnlUsd)}`)}
+        {row('Trades · win rate', `${x.trades} · ${x.winRatePct === null ? '--' : `${x.winRatePct.toFixed(0)}%`}`)}
+        {row('Avg return · hold', `${signed(x.avgReturnPct)} · ${x.avgHoldSec === null ? '--' : `${Math.round(x.avgHoldSec)}s`}`)}
+        {row('Best · worst', `${signed(x.bestReturnPct)} · ${signed(x.worstReturnPct)}`)}
+        {row('Profit factor · max DD', `${x.trades && !x.losses ? '∞' : x.profitFactor?.toFixed(2) ?? '--'} · ${fine(x.maxDrawdownUsd, 2)}`)}
+      </div>
+      {(x.drillTrades > 0 || x.failedOrders > 0) && <p className="desk-note">{x.drillTrades} drill trade(s) excluded from stats · {x.failedOrders} failed order(s)</p>}
+      <details><summary>Exit rules</summary><ul>{s.exitRules.map(r => <li key={r}>{r}</li>)}</ul></details>
+      <details><summary>Scale-up ladder $10 → $100 → $1K → $10K: {s.scale.nextEntryUsd === null ? 'top' : s.scale.ready ? `READY to test ${money(s.scale.nextEntryUsd)} entries` : `stay at ${money(s.scale.currentEntryUsd)}`}</summary>
+        <table className="gates"><tbody>{s.scale.checks.map(c => <tr key={c.label}><td>{c.label}</td><td className={c.ok ? 'gate-pass' : 'gate-unknown'}>{c.ok ? 'PASS' : 'NOT YET'}</td>
+          <td>{c.actual}</td><td>{c.required}</td></tr>)}</tbody></table>
+        <p className="desk-note">{s.scale.note} Advisory only: sizes change only when you edit .env.</p></details>
+    </section>;
+  })}</div>;
 }
 
 function Stages({ events }: { events: DeskEvent[] }) {
@@ -170,13 +206,15 @@ function Candidates({ list, probe, busy }: { list: Candidate[]; probe: ((mint: s
   return <section className="panel desk-card" aria-label="Candidates">
     <div className="card-head"><h3>Candidates · what is scanned and why it passed or failed</h3><small>{list.length} shown</small></div>
     <div className="wallet-table"><table className="cand"><thead><tr>
-      <th>Token / CA</th><th>Tier</th><th>Status</th><th>Market cap</th><th>Pool age</th><th>Liquidity</th><th>5m vol</th><th>Buy/sell</th><th>Accel.</th>
+      <th>Token / CA</th><th>Tier</th><th>FAIR status</th><th>CRASH</th><th>Market cap</th><th>Pool age</th><th>Liquidity</th><th>5m vol</th><th>Buy/sell</th><th>Accel.</th>
       <th>Top-10</th><th>Dev</th><th>Website</th><th>X</th><th>X activity</th><th>Narrative</th><th>Mint / freeze</th><th>Risk flags</th></tr></thead>
       <tbody>{list.map(c => <Fragment key={c.mint}>
         <tr className={`status-${c.status.toLowerCase()}`} onClick={() => setOpen(open === c.mint ? null : c.mint)} aria-expanded={open === c.mint}>
           <td title={c.mint}><strong>{c.symbol ?? '?'}</strong><br /><small>{short(c.mint)}</small></td>
           <td>{c.tier === 'ULTRA_EARLY' ? 'Ultra-early' : 'Trending'}</td>
           <td><span className={`badge-${c.status.toLowerCase()}`}>{c.status}</span><br /><small>{c.classification.replace('_', ' ')}</small></td>
+          <td title={c.crash?.summary}>{c.crash?.signal ? <span className="badge-qualified">SIGNAL</span> : <span className="badge-filtered">no</span>}<br />
+            <small>{c.crash ? (c.crash.signal ? 'entry-ready' : c.crash.summary.split(':')[0]) : '--'}</small></td>
           <td>{usdOrUnknown(c.metrics.marketCapUsd)}</td><td>{c.metrics.poolAgeMin === null ? 'UNKNOWN' : `${numeric(c.metrics.poolAgeMin, 0)}m`}</td>
           <td>{usdOrUnknown(c.metrics.liquidityUsd)}</td><td>{usdOrUnknown(c.metrics.volume5mUsd)}</td>
           <td>{c.metrics.buySellRatio5m === null ? 'UNKNOWN' : c.metrics.buySellRatio5m.toFixed(2)}</td>
@@ -187,9 +225,9 @@ function Candidates({ list, probe, busy }: { list: Candidate[]; probe: ((mint: s
           <td>{c.onchain.mintAuthority === null ? 'UNKNOWN' : `${c.onchain.mintAuthority ? 'ACTIVE' : 'revoked'} / ${c.onchain.freezeAuthority ? 'ACTIVE' : 'revoked'}`}</td>
           <td>{c.riskFlags.length ? c.riskFlags.slice(0, 2).join('; ') : '—'}</td>
         </tr>
-        {open === c.mint && <tr className="detail-row"><td colSpan={17}><CandidateDetail c={c} probe={probe} busy={busy} /></td></tr>}
+        {open === c.mint && <tr className="detail-row"><td colSpan={18}><CandidateDetail c={c} probe={probe} busy={busy} /></td></tr>}
       </Fragment>)}
-      {!list.length && <tr><td colSpan={17}>No candidates yet. The first scan starts with TEST or a LIVE session.</td></tr>}</tbody></table></div>
+      {!list.length && <tr><td colSpan={18}>No candidates yet. The first scan starts with TEST or a LIVE session.</td></tr>}</tbody></table></div>
   </section>;
 }
 
@@ -202,8 +240,10 @@ function CandidateDetail({ c, probe, busy }: { c: Candidate; probe: ((mint: stri
     <p className="reasons">{c.reasons.join(' · ')}</p>
     {c.social.authenticityFlags.some(f => f.includes('MISMATCH')) && <p className="warn">⚠ SOCIAL AGE MISMATCH — {c.social.authenticityFlags.find(f => f.includes('MISMATCH'))}</p>}
     <div className="detail-grid">
-      <div><h4>Hard gates</h4><table className="gates"><tbody>{c.gates.map(g => <tr key={g.key}><td>{g.label}</td>
+      <div><h4>Hard gates (FAIR)</h4><table className="gates"><tbody>{c.gates.map(g => <tr key={g.key}><td>{g.label}</td>
         <td className={`gate-${g.status.toLowerCase()}`}>{g.status}{!g.blocking && g.status !== 'PASS' ? ' (flag)' : ''}</td><td>{g.actual}</td><td>{g.required}</td></tr>)}</tbody></table>
+        {c.crash && <><h4>CRASH entry checks · {c.crash.signal ? 'SIGNAL' : 'no signal'}</h4><table className="gates"><tbody>{c.crash.checks.map(g => <tr key={g.key}><td>{g.label}</td>
+          <td className={`gate-${g.status.toLowerCase()}`}>{g.status}{!g.blocking && g.status !== 'PASS' ? ' (flag)' : ''}</td><td>{g.actual}</td><td>{g.required}</td></tr>)}</tbody></table></>}
         <p className="desk-note">Analytical scores, not guarantees of future performance. Fundamentals never override a failed gate.</p></div>
       <div><h4>Component scores</h4>{c.scores.map(s => <details key={s.key}><summary><span>{s.key}</span><strong>{s.score}</strong></summary>
         <ul>{s.factors.map(f => <li key={f.label}>{f.label}: {f.points}/{f.max} <small>({f.basis})</small></li>)}</ul></details>)}</div>
@@ -219,28 +259,28 @@ function Positions({ d }: { d: DeskStatus }) {
   const solUsd = d.capital.solUsd;
   return <section className="panel desk-card" aria-label="Open positions">
     <div className="card-head"><h3>Open positions · {d.mode === 'PAPER' ? 'TEST' : 'LIVE'}</h3></div>
-    <div className="wallet-table"><table><thead><tr><th>Token</th><th>Quantity (raw)</th><th>Entry price</th><th>Current price</th><th>Cost</th><th>Value</th><th>Unrealized</th><th>Route</th><th>Opened</th></tr></thead>
+    <div className="wallet-table"><table><thead><tr><th>Strategy</th><th>Token</th><th>Quantity (raw)</th><th>Entry price</th><th>Current price</th><th>Cost</th><th>Value</th><th>Unrealized</th><th>Route</th><th>Opened</th></tr></thead>
       <tbody>{d.positions.map(p => {
         const value = p.lastValueLamports && solUsd ? Number(p.lastValueLamports) / 1e9 * solUsd : null;
-        return <tr key={p.id}><td title={p.mint}>{p.symbol ?? short(p.mint)}</td><td>{p.qtyRaw}</td><td>{p.entryPriceUsd?.toPrecision(6) ?? '--'}</td>
+        return <tr key={p.id}><td>{p.strategy ?? 'FAIR'}</td><td title={p.mint}>{p.symbol ?? short(p.mint)}</td><td>{p.qtyRaw}</td><td>{p.entryPriceUsd?.toPrecision(6) ?? '--'}</td>
           <td>{p.lastPriceUsd?.toPrecision(6) ?? '--'}</td><td>{fine(p.costUsd)}</td><td>{fine(value)}</td><td>{fine(value === null ? null : value - p.costUsd)}</td>
           <td>{p.route}</td><td>{ago(p.openedAt)}</td></tr>;
-      })}{!d.positions.length && <tr><td colSpan={9}>No open positions.</td></tr>}</tbody></table></div>
+      })}{!d.positions.length && <tr><td colSpan={10}>No open positions.</td></tr>}</tbody></table></div>
   </section>;
 }
 
 function Ledger({ d }: { d: DeskStatus }) {
   return <section className="panel desk-card" aria-label="Ledger">
-    <div className="card-head"><h3>{d.mode === 'PAPER' ? 'TEST ledger' : 'LIVE ledger'} · persistent</h3><small>Router fees are already inside the quoted output; net PnL does not subtract them twice.</small></div>
-    <div className="wallet-table"><table><thead><tr><th>Time</th><th>Tx signature</th><th>Token / CA</th><th>DEX / route</th><th>Side</th><th>Quantity</th><th>Entry</th><th>Exit</th>
+    <div className="card-head"><h3>{d.mode === 'PAPER' ? 'TEST ledgers' : 'LIVE ledgers'} · persistent · one per strategy</h3><small>Router fees are already inside the quoted output; net PnL does not subtract them twice.</small></div>
+    <div className="wallet-table"><table><thead><tr><th>Time</th><th>Strategy</th><th>Tx signature</th><th>Token / CA</th><th>DEX / route</th><th>Side</th><th>Quantity</th><th>Entry</th><th>Exit</th>
       <th>Gross PnL</th><th>Network fee</th><th>Router fee</th><th>Total fees</th><th>Net PnL</th><th>Status</th></tr></thead>
-      <tbody>{d.ledger.map(e => <tr key={e.id}><td>{ago(e.at)}</td>
+      <tbody>{d.ledger.map(e => <tr key={`${e.strategy}-${e.id}`}><td>{ago(e.at)}</td><td>{e.strategy ?? 'FAIR'}</td>
         <td>{e.txSignature ? <a href={`https://solscan.io/tx/${encodeURIComponent(e.txSignature)}`} target="_blank" rel="noreferrer">{short(e.txSignature)}</a> : 'TEST — none'}</td>
         <td title={e.mint}>{e.symbol ?? ''} <small>{short(e.mint)}</small></td><td>{e.router} · {e.route}</td><td>{e.side}</td><td>{e.quantity}</td>
         <td>{e.entryPriceUsd?.toPrecision(6) ?? '--'}</td><td>{e.exitPriceUsd?.toPrecision(6) ?? '--'}</td><td>{fine(e.grossPnlUsd)}</td>
         <td>{fine(e.networkFeeUsd)}</td><td>{fine(e.routerFeeUsd)}</td><td>{fine(e.totalFeesUsd)}</td><td>{fine(e.netPnlUsd)}</td>
         <td title={e.note ?? undefined}>{e.status.replace('_', ' ')}</td></tr>)}
-        {!d.ledger.length && <tr><td colSpan={14}>No executions recorded. Nothing is ever back-filled.</td></tr>}</tbody></table></div>
+        {!d.ledger.length && <tr><td colSpan={15}>No executions recorded. Nothing is ever back-filled.</td></tr>}</tbody></table></div>
   </section>;
 }
 

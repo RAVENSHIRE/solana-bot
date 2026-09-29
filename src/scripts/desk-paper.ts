@@ -3,6 +3,7 @@
  * reads a private key; the wallet address is only used to build and simulate transactions.
  *
  *   npm run desk:paper -- --address <PUBLIC_KEY> [--scans 6] [--env <dir containing .env>] [--data <dir>] [--probe] [--probe-mint <MINT>] [--status-out <file>] [--drill]
+ *     [--no-crash] [--no-fair]
  */
 import path from 'node:path';
 import { writeFile } from 'node:fs/promises';
@@ -29,11 +30,16 @@ async function main(): Promise<void> {
   const flushEvents = () => { for (const e of engine.events.list().filter(e => e.id > printed)) console.log(line(e)); printed = engine.events.list().at(-1)?.id ?? printed; };
   try {
     console.log(`TEST / PAPER — NO REAL TRANSACTIONS · wallet ${owner.toBase58()} · planned $${desk.capital.plannedStartingCapitalUsd} · base entry $${desk.capital.baseEntryUsd}`);
+    if (process.argv.includes('--no-crash')) engine.setStrategy('CRASH', false);
+    if (process.argv.includes('--no-fair')) engine.setStrategy('FAIR', false);
     engine.start();
     if (process.argv.includes('--drill')) engine.drill = true;
     for (let i = 0; i < scans; i++) {
       await engine.pulse(); flushEvents();
-      if (i < scans - 1) await new Promise(r => setTimeout(r, DESK.scanMs));
+      // Between scans the positions keep their own (faster) exit cadence, exactly like the dashboard.
+      const until = Date.now() + (i < scans - 1 ? DESK.scanMs : 0);
+      while (Date.now() < until) { engine.tick(); await new Promise(r => setTimeout(r, 1000)); flushEvents(); }
+      await engine.settled(); flushEvents();
     }
     engine.stop('headless run finished');
     const view = () => engine.status({ connected: true, address: owner.toBase58() });
@@ -56,9 +62,12 @@ async function main(): Promise<void> {
       `simulation ${p.simulation.status} (${p.simulation.detail}) · signature ${p.signature} · outcome ${p.outcome}`);
     if (!s.preflights.length) console.log('  none');
     console.log('\nLEDGER (TEST)');
-    for (const e of s.ledger) console.log(`  ${clock(e.at)} ${e.side} ${e.symbol} ${e.quantity} entry ${e.entryPriceUsd ?? '-'} exit ${e.exitPriceUsd ?? '-'} net ${e.netPnlUsd ?? '-'} ${e.status}`);
+    for (const e of s.ledger) console.log(`  ${clock(e.at)} ${e.strategy ?? ''} ${e.side} ${e.symbol} ${e.quantity} entry ${e.entryPriceUsd ?? '-'} exit ${e.exitPriceUsd ?? '-'} net ${e.netPnlUsd ?? '-'} ${e.status}`);
     if (!s.ledger.length) console.log('  none');
     const c = s.capital;
+    console.log('\nSTRATEGIES');
+    for (const x of s.strategies) console.log(`  ${x.label.padEnd(12)} ${x.enabled ? 'ON ' : 'OFF'} entry $${x.entryUsd} · sleeve ${x.cashUsd?.toFixed(2) ?? '--'} USD · positions ${x.openPositions}/${x.maxOpenPositions} · ` +
+      `trades ${x.stats.trades} · win ${x.stats.winRatePct?.toFixed(0) ?? '--'}% · net ${x.stats.netPnlUsd.toFixed(4)} · avg ${x.stats.avgReturnPct?.toFixed(1) ?? '--'}% · ${x.scale.note.split('.')[0]}`);
     console.log(`\nCAPITAL  wallet ${c.walletSol ?? '--'} SOL (${c.walletUsd?.toFixed(2) ?? '--'} USD) · TEST cash ${c.paperCashUsd?.toFixed(2) ?? '--'} USD · positions ${c.openPositions} · realized ${c.realizedPnlUsd.toFixed(4)} · fees ${c.totalFeesUsd.toFixed(4)}`);
     console.log(`SOURCES  ${Object.entries(s.sources).map(([k, v]) => `${k}: ${v}`).join(' | ')}`);
   } finally { await desk.close(); }
