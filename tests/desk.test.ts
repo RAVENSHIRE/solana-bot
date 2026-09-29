@@ -158,7 +158,7 @@ test('process lock: a crashed owner is recovered; a live or unreadable owner sti
 // ---------------------------------------------------------------- full pipeline against a simulated network
 
 function world(patch: Record<string, unknown> = {}) {
-  const w = { priceFactor: 1, native: 45_000_000, last: null as null | { side: 'BUY' | 'SELL'; inAmount: bigint; outAmount: bigint }, sends: 0, signRequests: 0 };
+  const w = { priceFactor: 1, extraRent: 0, native: 45_000_000, last: null as null | { side: 'BUY' | 'SELL'; inAmount: bigint; outAmount: bigint }, sends: 0, signRequests: 0 };
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
   const solPair = { chainId: 'solana', dexId: 'orca', pairAddress: SOL_POOL, baseToken: { address: SOL_MINT, symbol: 'SOL' }, quoteToken: { address: USDC_MINT, symbol: 'USDC' },
     priceUsd: '100', liquidity: { usd: 10_000_000 }, marketCap: 5e10, fdv: 6e10, pairCreatedAt: NOW - 1e10, txns: { h1: { buys: 5, sells: 5 } } };
@@ -211,7 +211,7 @@ function world(patch: Record<string, unknown> = {}) {
       AccountLayout.encode({ mint: new PublicKey(MINT), owner, amount: w.last.outAmount, delegateOption: 0, delegate: SystemProgram.programId, state: 1,
         isNativeOption: 0, isNative: 0n, delegatedAmount: 0n, closeAuthorityOption: 0, closeAuthority: SystemProgram.programId }, data);
       return { value: { err: null, logs: [], accounts: [
-        { owner: SystemProgram.programId.toBase58(), lamports: w.native - Number(w.last.inAmount) - 5_300 - 2_039_280, data: ['', 'base64'], executable: false },
+        { owner: SystemProgram.programId.toBase58(), lamports: w.native - Number(w.last.inAmount) - 5_300 - 2_039_280 - w.extraRent, data: ['', 'base64'], executable: false },
         { owner: TOKEN_PROGRAM_ID.toBase58(), lamports: 2_039_280, data: [data.toString('base64'), 'base64'], executable: false }] } };
     },
   };
@@ -291,6 +291,21 @@ test('TEST drill opens a marked paper position when nothing qualifies; without d
     assert.equal(view.wallet.source, 'CONFIGURED'); assert.equal(view.wallet.address, owner.toBase58());
     assert.equal(view.preflights[0]!.signature, 'NOT_REQUESTED_TEST');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('venue account rent within the reserved budget passes and is booked; beyond it the simulation is rejected', async () => {
+  for (const [extra, fills] of [[1_300_000, true], [3_000_000, false]] as const) {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-rent-')), { w, shared } = world();
+    try {
+      w.extraRent = extra;
+      const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+      engine.start(); await engine.pulse(); await engine.pulse();
+      const view = engine.status({ connected: true, address: owner.toBase58() });
+      assert.equal(view.positions.length, fills ? 1 : 0);
+      if (fills) assert.equal(view.ledger[0]!.solDeltaLamports, String(-(20_000_000 + 5_300 + 2_039_280 + extra)));
+      else assert.ok(engine.events.list().some(e => /SIMULATED_BUY_MISMATCH/.test(e.message)));
+    } finally { await fs.rm(dir, { recursive: true, force: true }); }
+  }
 });
 
 test('LIVE reaches pre-flight and the Phantom signature request, and nothing is submitted without a signature', async () => {

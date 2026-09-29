@@ -436,12 +436,15 @@ export class DeskEngine {
     const fee = o.fee > 0n ? o.fee : BASE_FEE_LAMPORTS + o.priority;
     const buy = side === 'BUY';
     const tokens = buy ? guard.lastSimulation.tokenDelta ?? BigInt(q.outAmount) : BigInt(q.inAmount);
-    const solDelta = buy ? -(BigInt(q.inAmount) + fee + o.rent) : BigInt(q.outAmount) - fee;
+    // BUY: the SOL change measured by the unsigned simulation (swap, fees and every account rent it creates).
+    const simulated = buy ? guard.lastSimulation.solDelta : null;
+    const solDelta = buy ? (simulated !== null && -simulated >= BigInt(q.inAmount) ? simulated : -(BigInt(q.inAmount) + fee + o.rent)) : BigInt(q.outAmount) - fee;
+    const rent = buy ? (-solDelta - BigInt(q.inAmount) - fee > o.rent ? -solDelta - BigInt(q.inAmount) - fee : o.rent) : 0n;
     const pre = guard.lastPreflight;
     if (pre) { pre.outcome = 'PAPER_FILLED'; pre.signature = 'NOT_REQUESTED_TEST'; if (!buy) pre.simulation = { ...pre.simulation, status: guard.lastSimulation.status, detail: guard.lastSimulation.detail }; }
     this.event('SUBMITTED', 'TEST — no signature requested, nothing submitted; paper execution recorded', ctx);
     const row = ledger.book({ side, mint: t.mint, symbol: t.symbol, decimals: t.decimals, pairAddress: t.pairAddress, inAmountRaw: BigInt(q.inAmount),
-      outAmountRaw: buy ? tokens : BigInt(q.outAmount), solDeltaLamports: solDelta, feeLamports: fee, rentLamports: o.rent, router: 'Jupiter', route: o.route,
+      outAmountRaw: buy ? tokens : BigInt(q.outAmount), solDeltaLamports: solDelta, feeLamports: fee, rentLamports: rent, router: 'Jupiter', route: o.route,
       routerFeeUsd: sol(o.routerFee) * solUsd, txSignature: null, solUsd, at: Date.now(), note });
     this.bookedEvents(side, row, ctx);
   }

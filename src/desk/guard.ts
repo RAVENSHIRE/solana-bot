@@ -191,7 +191,9 @@ export class DeskGuard implements ExecutionGuard {
       tokenAfter = decoded.amount;
     }
     const solDelta = native - s.native, tokenDelta = tokenAfter - s.tokenRaw;
-    if (buy && (-solDelta > req.amountRaw + a.fee + s.ataRent || tokenDelta < BigInt(q.otherAmountThreshold)))
+    // Venues may create extra per-user accounts on a first trade (e.g. PumpSwap's volume accumulator); their rent
+    // may use the temporary-account budget already reserved in checkFunds, and is booked from the measured delta.
+    if (buy && (-solDelta > req.amountRaw + a.fee + s.ataRent + s.tempRent || tokenDelta < BigInt(q.otherAmountThreshold)))
       fail('SIMULATED_BUY_MISMATCH', `SOL ${sol(solDelta)}, tokens +${tokenDelta} (minimum ${q.otherAmountThreshold})`);
     if (!buy && (-tokenDelta !== req.amountRaw || solDelta < BigInt(q.otherAmountThreshold) - a.fee))
       fail('SIMULATED_SELL_MISMATCH', `tokens ${tokenDelta}, SOL ${sol(solDelta)}`);
