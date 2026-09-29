@@ -72,8 +72,12 @@ const server = http.createServer(async (req, res) => {
     try {
       if (!walletReader) throw new Error('WALLET_CONFIG_UNAVAILABLE');
       const selected = new URL(req.url!, 'http://localhost').searchParams.get('address');
-      res.writeHead(200).end(JSON.stringify(await walletReader.read(selected)));
+      // Resolve the read before sending headers; rejected RPC/address requests need an error status.
+      const payload = JSON.stringify(await walletReader.read(selected));
+      if (!res.destroyed) res.writeHead(200).end(payload);
     } catch (error) {
+      if (res.destroyed) return;
+      if (res.headersSent) { res.destroy(); return; }
       const invalid = error instanceof Error && error.message === 'INVALID_ADDRESS';
       res.writeHead(invalid ? 400 : 503).end(JSON.stringify({
         balance: null, message: invalid ? 'Invalid Solana address.' : 'Wallet data unavailable. Check local RPC configuration and connectivity.',

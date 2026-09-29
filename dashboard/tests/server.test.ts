@@ -64,6 +64,10 @@ test(
       const response = await fetch(`${url}/api/state`);
       assert.equal(response.status, 200);
       assert.equal((await response.json()).status, "ready");
+      const invalidWallet = await fetch(`${url}/api/wallet?address=invalid`);
+      assert.equal(invalidWallet.status, 400);
+      assert.equal((await invalidWallet.json()).balance, null);
+      assert.equal((await fetch(`${url}/api/state`)).status, 200, "wallet failure must not stop the server");
       assert.equal(
         (await fetch(`${url}/api/state`, { method: "POST" })).status,
         405,
