@@ -86,12 +86,13 @@ export function useTradingSession() {
       autoRef.current = false; setAuto(false); seen.current.clear(); setRevision(v => v + 1);
     } catch (e) { setError(message(e)); } finally { setBusy(null); }
   };
-  const desk = async (action: DeskAction, extra: Record<string, unknown> = {}) => {
+  /** Resolves true when the desk accepted the action. */
+  const desk = async (action: DeskAction, extra: Record<string, unknown> = {}): Promise<boolean> => {
     // Stopping ends auto-signing even if the request itself fails. Pause only stops entries: exits must stay signable.
     if (action === 'stop-live' || action === 'stop-test') { autoRef.current = false; setAuto(false); generation.current++; }
     setBusy(action); setError(null);
-    try { await post('desk', { action, ...extra, ...(sessionRef.current ? { sessionId: sessionRef.current.id } : {}) }); setRevision(v => v + 1); }
-    catch (e) { setError(message(e)); }
+    try { await post('desk', { action, ...extra, ...(sessionRef.current ? { sessionId: sessionRef.current.id } : {}) }); setRevision(v => v + 1); return true; }
+    catch (e) { setError(message(e)); return false; }
     finally { setBusy(null); if (action === 'stop-live') void sdk.current?.disableAutoConfirm().catch(() => {}); }
   };
   const enableAuto = async () => {

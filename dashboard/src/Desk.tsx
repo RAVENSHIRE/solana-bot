@@ -85,7 +85,8 @@ function Controls({ t, d }: { t: TradingSession; d: DeskStatus | null }) {
         <button className="source-button" disabled={busy || running} title="Archive both TEST ledgers and restart every sleeve at its planned capital"
           onClick={() => { if (window.confirm('Archive both TEST ledgers (kept on disk) and restart every TEST sleeve at its planned capital? Open paper positions end with the archive.')) void t.desk('reset-test'); }}>RESET TEST</button>
       </> : <>
-        <button className="primary-action live" disabled={busy || running || !t.connected} onClick={() => void t.desk('start-live')}>START LIVE SESSION</button>
+        <button className="primary-action live" disabled={busy || running || !t.connected}
+          onClick={() => void (async () => { if (await t.desk('start-live') && !t.auto) await t.enableAuto(); })()}>START LIVE SESSION</button>
         <button className="stop-action" disabled={busy || !running} onClick={() => void t.desk('stop-live')}>STOP LIVE SESSION</button>
       </>}
       <button className="source-button" disabled={busy || !running || !d?.execution} title="No new entries; open positions keep their exits"
@@ -94,6 +95,9 @@ function Controls({ t, d }: { t: TradingSession; d: DeskStatus | null }) {
       {live && t.connected && !t.auto && <button className="source-button" disabled={busy} onClick={() => void t.enableAuto()}>Enable Auto-Confirm</button>}
       {live && t.auto && <span className="chip on">Auto-Confirm granted in Phantom</span>}
     </div>
+    {live && running && !t.auto && <p className="trading-error" role="alert">
+      Auto-Confirm is OFF: every LIVE order waits at most 15 s for your approval in Phantom, and a missed approval pauses entries.
+      Click <strong>Enable Auto-Confirm</strong> and accept the permission in Phantom once for this session.</p>}
     <p className="desk-note">{d?.message ? `Last result: ${describe(d.message)} · ` : ''}Last scan {ago(d?.lastScanAt)}{d?.nextScanAt ? ` · next ${ago(d.nextScanAt)}` : ''}. Stopping keeps all telemetry and ledger data.</p>
   </div>;
 }
