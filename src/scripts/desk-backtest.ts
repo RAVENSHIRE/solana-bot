@@ -6,7 +6,7 @@
  *
  *   npm run desk:backtest -- [--env-dir .] [--hours 18] [--cache data-desk/backtest-cache] [--size 2]
  *     [--fixed-usd 0.02] [--current-fixed-usd 0.22] [--out backtest.json] [--refresh-pools] [--mints A,B]
- *     [--gecko-ms 6000] [--max-pools N]
+ *     [--gecko-ms 6000] [--max-pools N] [--cached-only]
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -25,6 +25,8 @@ const currentFixedUsd = Number(arg('current-fixed-usd') ?? 0.22);
 /** GeckoTerminal's public limit is shared with a running desk on the same IP: stay well below it. */
 const geckoMs = Number(arg('gecko-ms') ?? 6_000);
 const maxPools = Number(arg('max-pools') ?? Infinity);
+/** Analyse only what is already downloaded (no candle requests): a preview while another run is still fetching. */
+const cachedOnly = process.argv.includes('--cached-only');
 const MINUTE = 60_000;
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -104,6 +106,7 @@ async function candles(p: PoolInfo, spanMin: number, latest = false): Promise<VC
   const before = Math.floor((latest ? now : Math.min(p.createdAt + spanMin * MINUTE, now)) / 1000), limit = Math.min(1000, spanMin + 5);
   const file = path.join(cacheDir, 'ohlcv', `${p.pool}-${before}-${limit}.json`);
   let list = await readJson<number[][]>(file);
+  if (!list && cachedOnly) return [];
   if (!list) {
     for (let attempt = 0; !list; attempt++) {
       await sleep(Math.max(0, lastGecko + geckoMs - Date.now())); lastGecko = Date.now();
