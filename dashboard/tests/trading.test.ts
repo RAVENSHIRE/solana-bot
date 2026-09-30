@@ -6,6 +6,7 @@ import path from 'node:path';
 import { Keypair } from '@solana/web3.js';
 import { TradingService, tradingEnvironment, deskFactory, type DeskFactory, type DeskHandle } from '../server/trading';
 import { DeskReject } from '../../src/desk/guard';
+import { deskOperational } from '../../src/desk/config';
 import type { DeskEngine } from '../../src/desk/engine';
 import type { DeskMode } from '../../src/desk/types';
 
@@ -16,17 +17,19 @@ function engine(mode: DeskMode) {
     setStrategy(id: string, enabled: boolean) { e.strategies[id]!.enabled = enabled; }, drill: false, setDrill(on: boolean) { e.drill = on; },
     exits: [] as string[], requestExit(mint: string) { e.exits.push(mint); },
     resetTest: async () => { if (e.scanner) throw new DeskReject('STOP_TEST_FIRST'); e.resets++; return []; },
+    prepared: 0, async prepareStart() { e.prepared++; },
     start() { e.scanner = true; e.execution = true; }, stop() { e.scanner = false; e.execution = false; },
     pause() { e.execution = false; }, resume() { if (!e.scanner) throw new DeskReject('SCANNER_OFF'); e.execution = true; },
     pulse: async () => { e.pulses++; }, tick: () => {}, settled: async () => {}, persist: async () => {}, events: { add: () => {} },
     status: (wallet: { connected: boolean; address: string | null }) => ({ mode, scanner: e.scanner, execution: e.execution, wallet }) };
   return e;
 }
-function service(liveSigner: DeskHandle['liveSigner'] = 'PHANTOM') {
+function service(liveSigner: DeskHandle['liveSigner'] = 'PHANTOM', locked = false) {
   const engines = { PAPER: engine('PAPER'), LIVE: engine('LIVE') };
   let wallets: Parameters<DeskFactory>[0] | null = null;
   const factory: DeskFactory = async context => { wallets = context;
     return { engines: engines as unknown as Record<DeskMode, DeskEngine>, capital: { plannedStartingCapitalUsd: 5.45, baseEntryUsd: 2, slippageBps: 100 }, liveSigner,
+      operational: locked ? deskOperational({}) : undefined,
       close: async () => {} } as DeskHandle; };
   return { trading: new TradingService(factory), engines, context: () => wallets! };
 }
@@ -82,6 +85,21 @@ test('desk API: same-origin capability, TEST without signing, LIVE only with a l
     assert.equal((await post('disconnect', { sessionId: s.sessionId }, headers)).status, 200);
     assert.equal(engines.LIVE.scanner, false, 'disconnecting Phantom stops LIVE');
     assert.equal((await post('desk', { action: 'resume', sessionId: s.sessionId }, headers)).status, 400);
+  } finally { await close(); }
+});
+
+test('locked deployment blocks UI overrides but preserves emergency stop; LIVE prepares before start', async () => {
+  const { trading, engines } = service('LOCAL_KEY', true);
+  const { base, post, close } = await serve(trading);
+  try {
+    const { capability } = await (await fetch(`${base}/api/trading/bootstrap`)).json();
+    const headers = { 'X-Local-Capability': capability };
+    assert.equal((await (await post('desk', { action: 'strategy', strategy: 'CRASH', enabled: false }, headers)).json()).message, 'CONFIG_LOCKED');
+    assert.equal(engines.PAPER.strategies.CRASH!.enabled, true);
+    assert.equal((await post('desk', { action: 'start-live' }, headers)).status, 200);
+    assert.equal(engines.LIVE.prepared, 1);
+    assert.equal((await post('desk', { action: 'stop-live' }, headers)).status, 200);
+    assert.equal(engines.LIVE.scanner, false);
   } finally { await close(); }
 });
 

@@ -50,10 +50,10 @@ export class TradingService {
   private ensureDesk(): Promise<DeskHandle> {
     if (this.desk) return Promise.resolve(this.desk);
     this.opening ??= this.factory({ wallet: this.wallet, authorized: this.authorized }).then(handle => {
-      if (this.closed) { void handle.close(); throw new DeskReject('SERVICE_CLOSED'); }
+      if (this.closed) return handle.close().then(() => { throw new DeskReject('SERVICE_CLOSED'); });
       this.desk = handle; this.deskError = null; return handle;
     }).catch(error => {
-      this.deskError = error instanceof DeskReject ? error.code : error instanceof Error ? error.message.slice(0, 160) : 'DESK_UNAVAILABLE';
+      this.deskError = error instanceof DeskReject ? error.code : 'DESK_UNAVAILABLE';
       throw error;
     }).finally(() => { this.opening = null; });
     return this.opening;
@@ -90,6 +90,8 @@ export class TradingService {
 
   private async deskAction(action: string, body: Record<string, unknown>, handle: DeskHandle): Promise<void> {
     const { PAPER: paper, LIVE: live } = handle.engines;
+    if (handle.operational?.deploymentMode === 'LOCKED' && ['strategy', 'drill-on', 'drill-off', 'reset-test'].includes(action))
+      throw new DeskReject('CONFIG_LOCKED');
     const requireSession = () => {
       if (typeof body.sessionId !== 'string') throw new DeskReject('SESSION_REQUIRED');
       this.broker.status(body.sessionId);
@@ -111,7 +113,8 @@ export class TradingService {
         // Still same-origin and capability-checked; the local key only removes the need for a Phantom session.
         if (!this.localKey()) requireSession();
         if (paper.scanner) throw new DeskReject('STOP_TEST_FIRST');
-        this.mode = 'LIVE'; live.start(); return;
+        if (live.scanner) throw new DeskReject('ALREADY_RUNNING');
+        await live.prepareStart?.(); this.mode = 'LIVE'; live.start(); return;
       case 'stop-live': live.stop(); this.broker.cancel(); return;
       // Pause stops new entries only; a pending request may be an exit, which must still be signable.
       case 'pause': handle.engines[this.mode].pause(); return;
@@ -149,6 +152,15 @@ export class TradingService {
       if (req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(String(req.headers['sec-fetch-site']))) throw new DeskReject('LOCAL_ORIGIN_REQUIRED');
       if (req.method === 'GET' && url.pathname === '/api/trading/bootstrap') { this.json(res, 200, { capability: this.capability }); return true; }
       const supplied = req.headers['x-local-capability'];
+      if (req.method === 'GET' && url.pathname === '/api/trading/health') {
+        if (!this.validCapability(supplied)) throw new DeskReject('CAPABILITY_REQUIRED');
+        const engine = this.desk?.engines[this.mode];
+        const state = engine?.status({ connected: this.broker.connection().connected, address: this.broker.connection().address });
+        const stale = !!state?.scanner && (!state.lastScanAt || Date.now() - state.lastScanAt > 50_000);
+        const issue = this.deskError ?? state?.halted ?? (stale ? 'SCAN_STALE' : null);
+        this.json(res, issue ? 503 : 200, { ready: !!state && !issue, mode: this.mode, scanner: state?.scanner ?? false,
+          execution: state?.execution ?? false, lastScanAt: state?.lastScanAt ?? null, issue }); return true;
+      }
       if (req.method === 'GET' && url.pathname === '/api/trading') {
         const sid = req.headers['x-wallet-session'];
         if (sid && (!this.validCapability(supplied) || typeof sid !== 'string')) throw new DeskReject('CAPABILITY_REQUIRED');

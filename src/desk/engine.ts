@@ -18,7 +18,7 @@ import { BASE_FEE_LAMPORTS, SOL_MINT, TOKEN_ACCOUNT_RENT_LAMPORTS } from '../cor
 import type { Logger } from '../utils/logger';
 import { errorMessage } from '../utils/errors';
 import { atomicWriteFile } from '../utils/fs';
-import { DESK, STRATEGY_IDS, strategyProfiles, type DeskCapital, type LiveSignerKind, type StrategyProfile } from './config';
+import { DESK, STRATEGY_IDS, strategyProfiles, type DeskCapital, type DeskOperational, type LiveSignerKind, type StrategyProfile } from './config';
 import { EventLog } from './events';
 import { DeskLedger, type LedgerState } from './ledger';
 import { discover, pairMetrics, selectPair, tierFor, type Discovered } from './discovery';
@@ -44,6 +44,7 @@ export interface DeskDeps {
   website?: (url: string | null) => Promise<WebsiteCheck>;
   /** Strategy settings; defaults to strategyProfiles() of the desk capital and RS_* rules. */
   strategies?: Record<StrategyId, StrategyProfile>;
+  operational?: DeskOperational;
   /** LIVE: who signs (default PHANTOM) and how many new entries one LIVE session may open. */
   signerKind?: LiveSignerKind;
   liveMaxEntries?: number;
@@ -113,20 +114,20 @@ export class DeskEngine {
   private generation = 0;
   private solUsd: number | null = null;
   private walletView: { owner: string; native: bigint; at: number } | null = null;
+  private preparedOwner: string | null = null;
 
   private constructor(private readonly d: DeskDeps) {
     this.events = new EventLog(d.mode, path.join(d.dir, `events-${d.mode}.json`));
     this.graduations = new GraduationFeed(d.rpc);
     const base = d.strategies ?? strategyProfiles({}, d.capital, d.cfg.rs);
     this.strategies = { FAIR: { ...base.FAIR, exits: { ...base.FAIR.exits } }, CRASH: { ...base.CRASH, exits: { ...base.CRASH.exits } } };
-    // Real money: CRASH is off in LIVE until the owner switches it on; that choice is then saved (settings-LIVE.json).
-    if (d.mode === 'LIVE') this.strategies.CRASH.enabled = false;
+    for (const id of STRATEGY_IDS) this.strategies[id].enabled = d.operational?.strategyEnabled[d.mode][id] ?? (d.mode === 'LIVE' && id === 'CRASH' ? false : this.strategies[id].enabled);
   }
 
   static async create(d: DeskDeps): Promise<DeskEngine> {
     const engine = new DeskEngine(d);
     await engine.events.load();
-    await engine.loadSettings();
+    if (d.operational?.deploymentMode !== 'LOCKED') await engine.loadSettings();
     if (d.mode === 'PAPER') for (const id of STRATEGY_IDS) { await engine.ledgerFor(id, null); await engine.loadCycles(id); }
     return engine;
   }
@@ -177,6 +178,7 @@ export class DeskEngine {
 
   start(): void {
     if (this.d.mode === 'LIVE' && !this.d.authorized()) throw new DeskReject('WALLET_SESSION_REQUIRED');
+    if (this.d.mode === 'LIVE' && (!this.preparedOwner || this.d.wallet()?.owner.toBase58() !== this.preparedOwner)) throw new DeskReject('LIVE_RECONCILIATION_REQUIRED');
     if (this.books().some(b => b.ledger.state.halted || b.ledger.state.pending)) throw new DeskReject('TRANSACTION_RECONCILIATION_REQUIRED');
     this.scanner = true; this.execution = true; this.generation++; this.nextScanAt = Date.now(); this.notes.clear();
     // Each LIVE session may open a limited number of new positions; exits are never capped.
@@ -186,6 +188,30 @@ export class DeskEngine {
       : `LIVE session started: scanner ON, execution ENABLED (strategies: ${on}) — ` + (this.localKey
         ? `orders are signed automatically by the local key; at most ${this.entryAllowance ?? 'unlimited'} new entries this session`
         : 'every order needs a Phantom signature'));
+  }
+  /** Fail closed on unresolved orders or a mismatch between tracked LIVE positions and actual token holdings. */
+  async prepareStart(): Promise<void> {
+    if (this.d.mode !== 'LIVE') return;
+    this.preparedOwner = null;
+    if (!this.d.authorized()) throw new DeskReject('WALLET_SESSION_REQUIRED');
+    const wallet = this.d.wallet();
+    if (!wallet) throw new DeskReject('WALLET_REQUIRED');
+    const owner = wallet.owner.toBase58();
+    for (const id of STRATEGY_IDS) await this.ledgerFor(id, owner);
+    const native = await this.d.rpc.execute('desk:wallet-sync', c => c.getBalance(wallet.owner, 'confirmed'));
+    this.walletView = { owner, native: BigInt(native), at: Date.now() };
+    if (this.books().some(b => b.ledger.state.halted || b.ledger.state.pending)) throw new DeskReject('TRANSACTION_RECONCILIATION_REQUIRED');
+    const held = new Map<string, bigint>();
+    for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+      const accounts = await this.d.rpc.execute('desk:holdings', c => c.getParsedTokenAccountsByOwner(wallet.owner, { programId }, 'confirmed'));
+      for (const a of accounts.value) {
+        const info = a.account.data.parsed.info as { mint: string; tokenAmount: { amount: string } };
+        held.set(info.mint, (held.get(info.mint) ?? 0n) + BigInt(info.tokenAmount.amount));
+      }
+    }
+    for (const b of this.books()) for (const p of b.ledger.state.positions)
+      if ((held.get(p.mint) ?? 0n) !== BigInt(p.qtyRaw)) throw new DeskReject('LIVE_HOLDINGS_MISMATCH');
+    this.preparedOwner = owner;
   }
   private get localKey(): boolean { return this.d.mode === 'LIVE' && this.d.signerKind === 'LOCAL_KEY'; }
   stop(reason = 'stopped by user'): void {
@@ -198,6 +224,7 @@ export class DeskEngine {
   resume(): void {
     if (!this.scanner) throw new DeskReject('SCANNER_OFF');
     if (this.d.mode === 'LIVE' && !this.d.authorized()) throw new DeskReject('WALLET_SESSION_REQUIRED');
+    if (this.books().some(b => b.ledger.state.halted || b.ledger.state.pending)) throw new DeskReject('TRANSACTION_RECONCILIATION_REQUIRED');
     if (!this.execution) { this.execution = true; this.event('SYSTEM', 'Entries RESUMED'); }
   }
   /** Disabling a strategy stops its new entries; its open positions keep their exits. The choice survives restarts. */
@@ -674,13 +701,21 @@ export class DeskEngine {
     const s = ledger.state, now = Date.now(), note = (mint: string, text: string) => this.entryNotes.set(`${id}:${mint}`, text);
     // Exits in completed TEST cycles count too: a re-funded sleeve never forgets a cooldown.
     const history = [...(this.d.mode === 'PAPER' ? this.cycles.get(id) ?? [] : []).flatMap(c => c.entries), ...s.entries];
-    const lastExit = (mint: string) => history.filter(e => e.mint === mint && e.side === 'SELL').at(-1)?.at ?? null;
-    const recentExit = (mint: string) => { const at = lastExit(mint); return at !== null && now - at < p.reentryCooldownMs; };
+    const lastExit = (mint: string) => history.filter(e => e.mint === mint && e.side === 'SELL' && (e.status === 'CONFIRMED' || e.status === 'PAPER_FILLED')).at(-1) ?? null;
+    const blockedExit = (mint: string, observedAt: number) => {
+      const e = lastExit(mint);
+      if (!e) return null;
+      const cooldown = e.netPnlUsd !== null && e.netPnlUsd < 0 ? Math.max(p.reentryCooldownMs, this.d.operational?.lossCooldownMs[id] ?? p.reentryCooldownMs) : p.reentryCooldownMs;
+      if (now - e.at < cooldown) return `re-entry cooldown until ${hhmm(e.at + cooldown)}`;
+      if ((this.d.operational?.freshSignal[id] ?? true) && observedAt <= e.at + DESK.scanMs) return 'fresh post-exit signal required';
+      return null;
+    };
+    const recentExit = (mint: string) => blockedExit(mint, this.candidates.get(mint)?.updatedAt ?? 0) !== null;
     const pool: Candidate[] = [];
     for (const c of list) {
-      const holder = this.heldBy(c.mint), exit = lastExit(c.mint), skip = this.entrySkips.get(`${id}:${c.mint}`);
+      const holder = this.heldBy(c.mint), exitBlock = blockedExit(c.mint, c.updatedAt), skip = this.entrySkips.get(`${id}:${c.mint}`);
       if (holder) { if (holder !== id) note(c.mint, `held by ${holder}`); continue; }
-      if (exit !== null && now - exit < p.reentryCooldownMs) { note(c.mint, `re-entry cooldown until ${hhmm(exit + p.reentryCooldownMs)}`); continue; }
+      if (exitBlock) { note(c.mint, exitBlock); continue; }
       if (skip) { note(c.mint, `${skip.code} at ${hhmm(skip.at)}; retry after ${hhmm(skip.at + DESK.entrySkipMs)}`); continue; }
       pool.push(c);
     }
@@ -983,6 +1018,7 @@ export class DeskEngine {
     return {
       mode: d.mode, label: this.localKey ? `${LABEL.LIVE} · SIGNED BY THE LOCAL KEY` : LABEL[d.mode], scanner: this.scanner, execution: this.execution, drill: this.drill, wallet,
       signer: d.mode === 'LIVE' ? (this.localKey ? 'LOCAL_KEY' : 'PHANTOM') : null, entriesLeft: d.mode === 'LIVE' ? this.entryAllowance : null,
+      operational: d.operational,
       strategies: STRATEGY_IDS.map(id => this.strategyView(id)),
       capital: {
         plannedStartingCapitalUsd: d.capital.plannedStartingCapitalUsd, baseEntryUsd: d.capital.baseEntryUsd, reserveSol: sol(DESK.reserveLamports),
@@ -1015,6 +1051,7 @@ export class DeskEngine {
     return {
       id, label: p.label, summary: p.summary, enabled: p.enabled, capitalUsd: p.capitalUsd, entryUsd: p.entryUsd, slippageBps: p.slippageBps,
       maxDragPct: Number(p.maxDragBps) / 100, maxOpenPositions: p.maxOpenPositions, positionCheckSec: p.positionCheckMs / 1000, exitRules: exitRuleText(p),
+      reentryCooldownMin: p.reentryCooldownMs / 60_000,
       cashUsd: this.d.mode === 'PAPER' && s?.paperCashLamports != null && solUsd ? sol(BigInt(s.paperCashLamports)) * solUsd : null,
       openPositions: positions.length, realizedPnlUsd: past.reduce((a, c) => a + c.realizedPnlUsd, s?.realizedPnlUsd ?? 0),
       feesUsd: past.reduce((a, c) => a + c.feesUsd, s?.feesUsd ?? 0), halted: s?.halted ?? null, cycles: past.length,

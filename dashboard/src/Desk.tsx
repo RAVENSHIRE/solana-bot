@@ -67,7 +67,7 @@ export function DeskPanel({ t }: { t: TradingSession }) {
 }
 
 function Controls({ t, d }: { t: TradingSession; d: DeskStatus | null }) {
-  const v = t.view, live = v?.mode === 'LIVE', running = !!d?.scanner, busy = !!t.busy || !t.online, localKey = live && d?.signer === 'LOCAL_KEY';
+  const v = t.view, live = v?.mode === 'LIVE', running = !!d?.scanner, busy = !!t.busy || !t.online, localKey = live && d?.signer === 'LOCAL_KEY', locked = d?.operational?.deploymentMode === 'LOCKED';
   const chip = (on: boolean, yes: string, no: string) => <span className={`chip ${on ? 'on' : 'off'}`}>{on ? yes : no}</span>;
   return <div className="desk-controls">
     <div className="mode-switch" role="radiogroup" aria-label="Environment">
@@ -82,6 +82,7 @@ function Controls({ t, d }: { t: TradingSession; d: DeskStatus | null }) {
         ? <span className="chip on">WALLET: .env ADDRESS {short(d.wallet.address)} (TEST, no signing)</span> : chip(false, '', 'WALLET: DISCONNECTED')}
       {live && running && d?.entriesLeft !== null && d?.entriesLeft !== undefined && <span className="chip on">NEW ENTRIES LEFT: {d.entriesLeft}</span>}
       {!live && chip(!!d?.drill, 'DRILL: ON', 'DRILL: OFF')}
+      {d?.operational && <span className="chip on">CONFIG: {d.operational.deploymentMode}</span>}
       {d?.scanning && <span className="chip on">SCANNING…</span>}
     </div>
     <div className="trading-actions">
@@ -90,9 +91,9 @@ function Controls({ t, d }: { t: TradingSession; d: DeskStatus | null }) {
       {!live ? <>
         <button className="primary-action" disabled={busy || running} onClick={() => void t.desk('start-test')}>START TEST</button>
         <button className="stop-action" disabled={busy || !running} onClick={() => void t.desk('stop-test')}>STOP TEST</button>
-        <button className="source-button" disabled={busy} title="Paper entries in the best safe candidate even when strategy gates are not met"
+        <button className="source-button" disabled={busy || locked} title={locked ? 'Fixed at startup' : 'Paper entries in the best safe candidate even when strategy gates are not met'}
           onClick={() => void t.desk(d?.drill ? 'drill-off' : 'drill-on')}>{d?.drill ? 'TEST DRILL: TURN OFF' : 'TEST DRILL: TURN ON'}</button>
-        <button className="source-button" disabled={busy || running} title="Archive both TEST ledgers and restart every sleeve at its planned capital"
+        <button className="source-button" disabled={busy || running || locked} title={locked ? 'Fixed at startup' : 'Archive both TEST ledgers and restart every sleeve at its planned capital'}
           onClick={() => { if (window.confirm('Archive both TEST ledgers (kept on disk) and restart every TEST sleeve at its planned capital? Open paper positions end with the archive.')) void t.desk('reset-test'); }}>RESET TEST</button>
       </> : <>
         <button className="primary-action live" disabled={busy || running || (!t.connected && !localKey)}
@@ -117,6 +118,7 @@ function Controls({ t, d }: { t: TradingSession; d: DeskStatus | null }) {
       {t.autoUnsupported ? ' Phantom offers Auto-Confirm only to domains it has approved, not to this local dashboard: approve each order in Phantom.'
         : <> Click <strong>Enable Auto-Confirm</strong> and accept the permission in Phantom once for this session.</>}</p>}
     <p className="desk-note">{d?.message ? `Last result: ${describe(d.message)} · ` : ''}Last scan {ago(d?.lastScanAt)}{d?.nextScanAt ? ` · next ${ago(d.nextScanAt)}` : ''}. Stopping keeps all telemetry and ledger data.</p>
+    {locked && <p className="desk-note">Strategies and TEST drill are fixed at startup. Pause and Stop stay available.</p>}
   </div>;
 }
 
@@ -159,9 +161,9 @@ function Strategies({ d, t }: { d: DeskStatus; t: TradingSession }) {
     const x = s.stats, row = (label: string, value: string) => <div><span>{label}</span><strong>{value}</strong></div>;
     return <section key={s.id} className={`strategy ${s.enabled ? 'on' : 'off'}`}>
       <div className="card-head"><h3>{s.label}</h3>
-        <button className={s.enabled ? 'source-button' : 'primary-action'} disabled={busy}
+        <button className={s.enabled ? 'source-button' : 'primary-action'} disabled={busy || d.operational?.deploymentMode === 'LOCKED'}
           onClick={() => void t.desk('strategy', { strategy: s.id, enabled: !s.enabled })}>{s.enabled ? 'ON · turn off' : 'OFF · turn on'}</button></div>
-      <p className="desk-note">{s.summary}{!test && s.id === 'CRASH' ? ' · LIVE: starts OFF every session; fast trades need Phantom Auto-Confirm.' : ''}</p>
+      <p className="desk-note">{s.summary}{!test && s.id === 'CRASH' && !d.operational ? ' · LIVE: starts OFF by default.' : ''}{d.operational ? ` · Re-entry ${s.reentryCooldownMin ?? '--'} min; after loss at least ${d.operational.lossCooldownMs[s.id] / 60000} min` : ''}</p>
       {s.halted && <p className="trading-error">HALTED: {describe(s.halted)}</p>}
       <div className="strategy-kpis">
         {row('Entry', `${money(s.entryUsd)} · drag ≤ ${numeric(s.maxDragPct, 1)}%`)}

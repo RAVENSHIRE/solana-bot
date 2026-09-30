@@ -122,7 +122,7 @@ export interface ScaleAdvice {
 export interface StrategyView {
   id: StrategyId; label: string; summary: string; enabled: boolean;
   capitalUsd: number; entryUsd: number; slippageBps: number; maxDragPct: number; maxOpenPositions: number; positionCheckSec: number;
-  exitRules: string[];
+  exitRules: string[]; reentryCooldownMin?: number;
   cashUsd: number | null; openPositions: number; realizedPnlUsd: number; unrealizedPnlUsd: number | null; feesUsd: number; halted: string | null;
   /** TEST: completed sleeve cycles (auto re-funded after running dry); stats and realized PnL include them. */
   cycles: number;
@@ -139,6 +139,7 @@ export interface DeskCapitalView {
 
 export interface DeskStatus {
   mode: DeskMode; label: string; scanner: boolean; execution: boolean;
+  operational?: import('./config').DeskOperational;
   /** CONFIGURED: TEST is using WALLET_PUBLIC_KEY from .env because Phantom is not connected (address only, never a signer). */
   wallet: { connected: boolean; address: string | null; source?: 'PHANTOM' | 'CONFIGURED' | 'LOCAL_KEY' };
   drill: boolean;

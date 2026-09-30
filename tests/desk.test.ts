@@ -406,6 +406,7 @@ test('LIVE reaches pre-flight and the Phantom signature request, and nothing is 
     const signer: TransactionSigner = { publicKey: owner, signTransaction: async () => { w.signRequests++; throw new SigningError('WALLET_SIGNATURE_REJECTED'); } };
     const sender = { sendAndConfirm: async () => { w.sends++; throw new Error('must not send'); } };
     const engine = await DeskEngine.create({ ...shared, mode: 'LIVE', dir, sender: sender as never, wallet: () => ({ owner, signer }) });
+    await engine.prepareStart();
     engine.start();
     await engine.pulse(); await engine.pulse();
     const events = stages(engine.events.list());
@@ -417,6 +418,27 @@ test('LIVE reaches pre-flight and the Phantom signature request, and nothing is 
     assert.equal(view.execution, false, 'a rejected signature pauses execution'); assert.equal(view.halted, null);
     assert.equal(view.positions.length, 0); assert.equal(view.ledger.length, 0, 'no fabricated LIVE entry');
     assert.match(engine.events.list().find(e => e.stage === 'FAILED')!.message, /blocked at Phantom signature: Phantom: WALLET_SIGNATURE_REJECTED/);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('LIVE restart refuses unresolved orders and token holdings missing from the connected wallet', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-restart-')), { shared } = world();
+  try {
+    const file = path.join(dir, `ledger-LIVE-${owner.toBase58()}.json`);
+    const ledger = await DeskLedger.open(file, 'LIVE', owner.toBase58(), NOW);
+    ledger.state.pending = { side: 'BUY', mint: MINT, at: NOW, signature: null }; await ledger.save();
+    const args = { ...shared, mode: 'LIVE' as const, dir, sender: null, wallet: () => ({ owner, signer: null }) };
+    const pending = await DeskEngine.create(args);
+    await assert.rejects(() => pending.prepareStart(), /TRANSACTION_RECONCILIATION_REQUIRED/);
+    assert.throws(() => pending.start(), /LIVE_RECONCILIATION_REQUIRED/);
+    ledger.state.pending = null;
+    ledger.book({ side: 'BUY', mint: MINT, symbol: 'ABC', decimals: 6, pairAddress: POOL, router: 'Jupiter', route: 'Raydium',
+      routerFeeUsd: null, txSignature: 'fixture-confirmed', solUsd: 100, at: NOW, note: null,
+      inAmountRaw: 20_000_000n, outAmountRaw: 1_000_000n, solDeltaLamports: -20_005_000n, feeLamports: 5_000n, rentLamports: 0n });
+    await ledger.save();
+    const missing = await DeskEngine.create(args);
+    await assert.rejects(() => missing.prepareStart(), /LIVE_HOLDINGS_MISMATCH/);
+    assert.throws(() => missing.start(), /LIVE_RECONCILIATION_REQUIRED/);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
@@ -813,7 +835,7 @@ test('LIVE with the local key signs without any approval, persists the signature
     const sender = { sendAndConfirm: async () => { w.sends++; throw new Error('RPC unreachable'); } };
     const engine = await DeskEngine.create({ ...shared, mode: 'LIVE', dir, sender: sender as never, signerKind: 'LOCAL_KEY', liveMaxEntries: 2,
       authorized: () => true, wallet: () => ({ owner: kp.publicKey, signer }) });
-    engine.setStrategy('CRASH', true); engine.start();
+    engine.setStrategy('CRASH', true); await engine.prepareStart(); engine.start();
     let view = engine.status({ connected: false, address: null });
     assert.equal(view.signer, 'LOCAL_KEY'); assert.equal(view.entriesLeft, 2); assert.equal(view.wallet.source, 'LOCAL_KEY');
     assert.match(view.label, /SIGNED BY THE LOCAL KEY/);

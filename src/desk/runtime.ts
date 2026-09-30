@@ -16,7 +16,7 @@ import { TransactionSender } from '../execution/tx-sender';
 import { DeskEngine, type DeskWallet } from './engine';
 import { DeskReject } from './guard';
 import { XClient } from './social';
-import { deskCapital, liveSignerSettings, strategyProfiles, type DeskCapital, type LiveSignerKind } from './config';
+import { deskCapital, deskOperational, liveSignerSettings, strategyProfiles, type DeskCapital, type DeskOperational, type LiveSignerKind } from './config';
 import { localKeySigner } from './local-signer';
 import { PublicKey } from '@solana/web3.js';
 import type { DeskMode } from './types';
@@ -33,7 +33,9 @@ const ENV_KEYS = ['RPC_ENDPOINTS', 'RPC_MAX_RPS', 'RPC_TIMEOUT_MS', 'JUPITER_API
   'CRASH_ENABLED', 'CRASH_CAPITAL_USD', 'CRASH_ENTRY_USD', 'CRASH_SLIPPAGE_BPS', 'CRASH_EXIT_SLIPPAGE_BPS', 'CRASH_MAX_DRAG_BPS', 'CRASH_MAX_POSITIONS',
   'CRASH_TAKE_PROFIT_PCT', 'CRASH_LOCK_PEAK_PCT', 'CRASH_GIVEBACK_PTS', 'CRASH_STOP_LOSS_PCT', 'CRASH_MAX_HOLD_MIN',
   'CRASH_EXIT_MODE', 'CRASH_TRAIL_ACTIVATION_PCT', 'CRASH_TRAIL_STOP_PCT', 'CRASH_RIDE_MAX_HOLD_MIN', 'CRASH_REENTRY_MIN',
-  'DESK_LIVE_SIGNER', 'DESK_LIVE_MAX_ENTRIES'];
+  'DESK_LIVE_SIGNER', 'DESK_LIVE_MAX_ENTRIES', 'DESK_DEPLOYMENT_MODE', 'DESK_PAPER_FAIR_ENABLED', 'DESK_PAPER_CRASH_ENABLED',
+  'DESK_LIVE_FAIR_ENABLED', 'DESK_LIVE_CRASH_ENABLED', 'DESK_FAIR_LOSS_REENTRY_MIN', 'DESK_CRASH_LOSS_REENTRY_MIN',
+  'DESK_FAIR_FRESH_SIGNAL', 'DESK_CRASH_FRESH_SIGNAL'];
 export async function deskEnvironment(repo: string): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = {};
   try {
@@ -49,6 +51,7 @@ export async function deskEnvironment(repo: string): Promise<NodeJS.ProcessEnv> 
 
 export interface DeskHandle {
   engines: Record<DeskMode, DeskEngine>; capital: DeskCapital; close: () => Promise<void>;
+  operational?: DeskOperational;
   /** PHANTOM: every LIVE order is approved in the browser. LOCAL_KEY: signed by WALLET_PRIVATE_KEY, no browser needed. */
   liveSigner?: LiveSignerKind;
 }
@@ -59,7 +62,7 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
   const env = await deskEnvironment(o.envDir);
   if (!env.RPC_ENDPOINTS) throw new DeskReject('RPC_NOT_CONFIGURED');
   if (!env.JUPITER_API_KEY) throw new DeskReject('JUPITER_API_KEY_REQUIRED');
-  const cfg = loadConfig(env, 'PHANTOM'), capital = deskCapital(env), strategies = strategyProfiles(env, capital, cfg.rs), logger = new Logger('Desk');
+  const cfg = loadConfig(env, 'PHANTOM'), capital = deskCapital(env), strategies = strategyProfiles(env, capital, cfg.rs), operational = deskOperational(env), logger = new Logger('Desk');
   const live = liveSignerSettings(env);
   // Opt-in only: the key is read here, for the LIVE engine, and never enters the environment or the TEST engine.
   const localSigner = live.signer === 'LOCAL_KEY' ? await localKeySigner(o.envDir) : null;
@@ -72,7 +75,7 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
   try {
     const shared = { cfg, capital, logger, rpc, jupiter: new JupiterClient(cfg.jupiter, logger, data), dex: new DexScreenerClient(logger, data),
       gecko: new GeckoTerminalClient(logger, data), safety: new TokenSafetyChecker(rpc, logger), x: new XClient(env.X_BEARER_TOKEN ?? null),
-      dir: o.dataDir, authorized: context.authorized, strategies };
+      dir: o.dataDir, authorized: context.authorized, strategies, operational };
     let configured: PublicKey | null = null;
     try { configured = env.WALLET_PUBLIC_KEY ? new PublicKey(env.WALLET_PUBLIC_KEY.trim()) : null; } catch { configured = null; }
     // TEST only ever gets an address (never a signer).
@@ -87,7 +90,7 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
         ...(localSigner ? { authorized: () => true, wallet: () => ({ owner: localSigner.publicKey, signer: localSigner }) }
           : { wallet: () => context.wallet('LIVE') }) }),
     };
-    return { engines, capital, liveSigner: live.signer, close: async () => {
+    return { engines, capital, operational, liveSigner: live.signer, close: async () => {
       for (const e of Object.values(engines)) { e.stop('shutdown'); await e.settled(); await e.persist(); }
       await data.flush(); await lock.close(); await fs.unlink(lockPath);
     } };

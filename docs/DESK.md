@@ -12,6 +12,14 @@ The dashboard's **Trading desk** tab runs one pipeline in two environments:
 
 TEST and LIVE never run at the same time and never share data. Stopping keeps all telemetry and ledgers.
 
+## Operational controls and restart
+
+Dashboard operation defaults to `DESK_DEPLOYMENT_MODE=LOCKED`: strategy toggles, TEST drill and TEST reset are fixed at startup and rejected by the server. Pause, Stop and EXIT NOW remain available. Set `DESK_DEPLOYMENT_MODE=EDITABLE` in `.env` and restart to use the interactive toggles and their saved per-mode settings. The startup flags are `DESK_PAPER_FAIR_ENABLED`, `DESK_PAPER_CRASH_ENABLED`, `DESK_LIVE_FAIR_ENABLED`, `DESK_LIVE_CRASH_ENABLED`; LIVE CRASH defaults to false. All keys are allowlisted and validated at startup.
+
+FAIR and CRASH retain their separate normal cooldowns. `DESK_FAIR_LOSS_REENTRY_MIN` (default 60) and `DESK_CRASH_LOSS_REENTRY_MIN` (default 30) set a minimum cooldown after a confirmed loss. `DESK_FAIR_FRESH_SIGNAL` and `DESK_CRASH_FRESH_SIGNAL` default to true: a post-exit observation is required even when the clock has elapsed. Completed TEST cycles still count toward cooldowns.
+
+Before each LIVE start, the selected wallet's saved ledgers are loaded and checked for unresolved orders. Tracked token quantities must match the wallet's SPL and Token-2022 accounts; failed inventory or a mismatch refuses the start. `GET /api/trading/health` requires the local capability and reports scan staleness or a blocking issue without provider credentials.
+
 ## Capital
 
 One source (`src/desk/config.ts`, overridable in `.env`):

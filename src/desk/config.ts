@@ -132,6 +132,31 @@ export interface StrategyProfile {
 }
 export const STRATEGY_IDS: readonly StrategyId[] = ['FAIR', 'CRASH'];
 
+export interface DeskOperational {
+  version: 1;
+  deploymentMode: 'LOCKED' | 'EDITABLE';
+  strategyEnabled: Record<'PAPER' | 'LIVE', Record<StrategyId, boolean>>;
+  lossCooldownMs: Record<StrategyId, number>;
+  freshSignal: Record<StrategyId, boolean>;
+}
+/** Allowlisted settings are validated at startup; the UI cannot override a locked deployment. */
+export function deskOperational(env: NodeJS.ProcessEnv = {}): DeskOperational {
+  const bool = z.enum(['true', 'false']);
+  const minutes = z.coerce.number().int().min(1).max(1_440);
+  const e = z.object({
+    DESK_DEPLOYMENT_MODE: z.enum(['LOCKED', 'EDITABLE']).default('LOCKED'),
+    DESK_PAPER_FAIR_ENABLED: bool.default('true'), DESK_PAPER_CRASH_ENABLED: bool.default('true'),
+    DESK_LIVE_FAIR_ENABLED: bool.default('true'), DESK_LIVE_CRASH_ENABLED: bool.default('false'),
+    DESK_FAIR_LOSS_REENTRY_MIN: minutes.default(60), DESK_CRASH_LOSS_REENTRY_MIN: minutes.default(30),
+    DESK_FAIR_FRESH_SIGNAL: bool.default('true'), DESK_CRASH_FRESH_SIGNAL: bool.default('true'),
+  }).parse(env);
+  return { version: 1, deploymentMode: e.DESK_DEPLOYMENT_MODE,
+    strategyEnabled: { PAPER: { FAIR: e.DESK_PAPER_FAIR_ENABLED === 'true', CRASH: e.DESK_PAPER_CRASH_ENABLED === 'true' },
+      LIVE: { FAIR: e.DESK_LIVE_FAIR_ENABLED === 'true', CRASH: e.DESK_LIVE_CRASH_ENABLED === 'true' } },
+    lossCooldownMs: { FAIR: e.DESK_FAIR_LOSS_REENTRY_MIN * 60_000, CRASH: e.DESK_CRASH_LOSS_REENTRY_MIN * 60_000 },
+    freshSignal: { FAIR: e.DESK_FAIR_FRESH_SIGNAL === 'true', CRASH: e.DESK_CRASH_FRESH_SIGNAL === 'true' } };
+}
+
 const money = (fallback: number) => z.coerce.number().finite().positive().max(100_000).default(fallback);
 export function deskCapital(env: NodeJS.ProcessEnv = process.env): DeskCapital {
   const e = z.object({ DESK_PLANNED_CAPITAL_USD: money(DESK_DEFAULTS.plannedStartingCapitalUsd),
