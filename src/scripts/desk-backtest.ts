@@ -6,6 +6,7 @@
  *
  *   npm run desk:backtest -- [--env-dir .] [--hours 18] [--cache data-desk/backtest-cache] [--size 2]
  *     [--fixed-usd 0.02] [--current-fixed-usd 0.22] [--out backtest.json] [--refresh-pools] [--mints A,B]
+ *     [--gecko-ms 6000] [--max-pools N]
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -21,6 +22,9 @@ const cacheDir = path.resolve(arg('cache') ?? 'data-desk/backtest-cache');
 const sizeUsd = Number(arg('size') ?? 2);
 const fixedUsd = Number(arg('fixed-usd') ?? 0.02);
 const currentFixedUsd = Number(arg('current-fixed-usd') ?? 0.22);
+/** GeckoTerminal's public limit is shared with a running desk on the same IP: stay well below it. */
+const geckoMs = Number(arg('gecko-ms') ?? 6_000);
+const maxPools = Number(arg('max-pools') ?? Infinity);
 const MINUTE = 60_000;
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -95,18 +99,22 @@ async function pools(mints: string[]): Promise<PoolInfo[]> {
 let lastGecko = 0;
 /** Minute candles from pool creation until every entry window and hold could have ended. */
 async function candles(p: PoolInfo, spanMin: number, latest = false): Promise<VCandle[]> {
-  const before = Math.floor((latest ? Math.floor(Date.now() / 600_000) * 600_000 : Math.min(p.createdAt + spanMin * MINUTE, Date.now())) / 1000), limit = Math.min(1000, spanMin + 5);
+  // Rounded to 10 minutes, so reruns hit the same cache entries.
+  const now = Math.floor(Date.now() / 600_000) * 600_000;
+  const before = Math.floor((latest ? now : Math.min(p.createdAt + spanMin * MINUTE, now)) / 1000), limit = Math.min(1000, spanMin + 5);
   const file = path.join(cacheDir, 'ohlcv', `${p.pool}-${before}-${limit}.json`);
   let list = await readJson<number[][]>(file);
   if (!list) {
-    list = await retry('geckoterminal', async () => {
-      await sleep(Math.max(0, lastGecko + 2_200 - Date.now())); lastGecko = Date.now();
+    for (let attempt = 0; !list; attempt++) {
+      await sleep(Math.max(0, lastGecko + geckoMs - Date.now())); lastGecko = Date.now();
       const res = await fetch(`https://api.geckoterminal.com/api/v2/networks/solana/pools/${p.pool}/ohlcv/minute?aggregate=1&limit=${limit}&currency=usd&token=base&before_timestamp=${before}&include_empty_intervals=false`,
-        { headers: { accept: 'application/json' } });
-      if (res.status === 404) return [];
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return (await res.json() as { data: { attributes: { ohlcv_list: number[][] } } }).data.attributes.ohlcv_list;
-    });
+        { headers: { accept: 'application/json' } }).catch(() => null);
+      if (res?.status === 404) list = [];
+      else if (res?.ok) list = (await res.json() as { data: { attributes: { ohlcv_list: number[][] } } }).data.attributes.ohlcv_list;
+      // Rate limited: back off for a while instead of spending the shared budget on retries.
+      else if (attempt >= 8) throw new Error(`geckoterminal: HTTP ${res?.status ?? 'network error'} for ${p.pool}`);
+      else await sleep(res?.status === 429 ? 20_000 * (attempt + 1) : 5_000);
+    }
     await writeJson(file, list);
   }
   return list.map(([t, o, h, l, c, v]) => ({ t: t! * 1000, o: o!, h: h!, l: l!, c: c!, v: v ?? 0 })).filter(k => k.t >= p.createdAt - MINUTE).sort((a, b) => a.t - b.t);
@@ -167,7 +175,10 @@ async function main(): Promise<void> {
   const watch = (arg('mints') ?? '').split(',').map(m => m.trim()).filter(Boolean);
   const info = await pools([...new Set([...grads.map(g => g.mint), ...watch])]);
   // A CRASH signal needs ≥ $20K in five minutes, so a token below that in 24 h could never have signalled (no survivorship filter).
-  const active = info.filter(p => p.volume24hUsd >= CRASH_ENTRY.minVolume5mUsd && p.createdAt >= Date.now() - (hours + 1) * 3_600_000);
+  // A fixed pseudo-random order (by pool address hash): a run cut short by --max-pools is still an unbiased sample.
+  const hash = (a: string) => [...a].reduce((h, ch) => Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0, 2166136261);
+  const active = info.filter(p => p.volume24hUsd >= CRASH_ENTRY.minVolume5mUsd && p.createdAt >= Date.now() - (hours + 1) * 3_600_000)
+    .sort((a, b) => hash(a.pool) - hash(b.pool)).slice(0, maxPools);
   console.log(`pools: ${info.length} graduated tokens with a pool, ${active.length} with ≥ $${CRASH_ENTRY.minVolume5mUsd / 1000}K 24h volume; loading candles…`);
   const spanMin = 60 + 95;
   const series: PoolSeries[] = [];
