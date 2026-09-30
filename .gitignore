@@ -21,3 +21,6 @@ solana-playbook-update/
 /data-live-test/
 
 /data-desk/
+
+# Local Claude Code settings
+/.claude/settings.local.json
