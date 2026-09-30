@@ -232,7 +232,7 @@ function Candidates({ list, probe, busy }: { list: Candidate[]; probe: ((mint: s
     <div className="card-head"><h3>Candidates · what is scanned and why it passed or failed</h3><small>{list.length} shown</small></div>
     <div className="wallet-table"><table className="cand"><thead><tr>
       <th>Token / CA</th><th>Tier</th><th>FAIR status</th><th>CRASH</th><th>Market cap</th><th>Pool age</th><th>Liquidity</th><th>5m vol</th><th>Buy/sell</th><th>Accel.</th>
-      <th>Top-10</th><th>Dev</th><th>Website</th><th>X</th><th>X activity</th><th>Narrative</th><th>Mint / freeze</th><th>Risk flags</th></tr></thead>
+      <th title="Owners with a balance · share of the 10 largest wallets (pools and curves excluded)">Holders</th><th>Dev</th><th>Website</th><th>X</th><th>X activity</th><th>Narrative</th><th>Mint / freeze</th><th>Risk flags</th></tr></thead>
       <tbody>{list.map(c => <Fragment key={c.mint}>
         <tr className={`status-${c.status.toLowerCase()}${c.stale ? ' stale' : ''}`} onClick={() => setOpen(open === c.mint ? null : c.mint)} aria-expanded={open === c.mint}>
           <td title={c.mint}><strong>{c.symbol ?? '?'}</strong><br /><small>{short(c.mint)}</small></td>
@@ -245,7 +245,7 @@ function Candidates({ list, probe, busy }: { list: Candidate[]; probe: ((mint: s
           <td>{usdOrUnknown(c.metrics.liquidityUsd)}</td><td>{usdOrUnknown(c.metrics.volume5mUsd)}</td>
           <td>{c.metrics.buySellRatio5m === null ? 'UNKNOWN' : c.metrics.buySellRatio5m.toFixed(2)}</td>
           <td>{c.metrics.volumeAcceleration === null ? 'UNKNOWN' : `${c.metrics.volumeAcceleration.toFixed(2)}×`}</td>
-          <td>{pct(c.metrics.top10WalletPct)}</td><td>{pct(c.metrics.developerPct, 2)}</td><td>{c.social.websiteStatus}</td>
+          <td>{holderCount(c.holders)}<br /><small>top-10 {pct(c.metrics.top10WalletPct)}</small></td><td>{pct(c.metrics.developerPct, 2)}</td><td>{c.social.websiteStatus}</td>
           <td>{c.social.x.kind === 'NONE' ? 'none' : `${c.social.x.kind}${c.social.x.handle ? ` @${c.social.x.handle}` : ''}`}<br /><small className={`auth-${c.social.authenticity.toLowerCase()}`}>{c.social.authenticity}</small></td>
           <td>{c.social.xPosts7d === null ? 'UNKNOWN' : `${c.social.xPosts7d} posts/7d`}</td><td>{c.social.narrativeVelocity}</td>
           <td>{c.onchain.mintAuthority === null ? 'UNKNOWN' : `${c.onchain.mintAuthority ? 'ACTIVE' : 'revoked'} / ${c.onchain.freezeAuthority ? 'ACTIVE' : 'revoked'}`}</td>
@@ -257,6 +257,27 @@ function Candidates({ list, probe, busy }: { list: Candidate[]; probe: ((mint: s
   </section>;
 }
 
+const holderCount = (h: Candidate['holders']) => !h ? 'UNKNOWN' : h.count === null ? '?' : `${h.count.toLocaleString('en-US')}${h.countCapped ? '+' : ''}`;
+
+/** The largest holders, so wallets can be checked without opening each one elsewhere. */
+function Holders({ c }: { c: Candidate }) {
+  const h = c.holders, kind = { WALLET: 'wallet', PROGRAM: 'pool / curve / program', DEV: 'DEV (creator)' } as const;
+  return <div className="holders">
+    <h4>Holders · {holderCount(h)} {h?.countNote ? <small>({h.countNote})</small> : null}</h4>
+    <p className="desk-note">
+      <a href={`https://fomo.family/tokens/solana/${encodeURIComponent(c.mint)}`} target="_blank" rel="noreferrer">FOMO ↗</a> ·{' '}
+      <a href={`https://solscan.io/token/${encodeURIComponent(c.mint)}#holders`} target="_blank" rel="noreferrer">Solscan holders ↗</a>
+      {h && <> · top-10 wallets {h.top10WalletPct.toFixed(1)}% · largest wallet {h.largestWalletPct.toFixed(1)}% · pools/curves {h.programOwnedPct.toFixed(1)}% · read {ago(h.at)}</>}
+    </p>
+    {h ? <table className="gates"><thead><tr><th>#</th><th>Owner</th><th>Share of supply</th><th>Type</th></tr></thead><tbody>
+      {h.top.map((x, i) => <tr key={x.owner} className={x.kind === 'DEV' ? 'holder-dev' : undefined}><td>{i + 1}</td>
+        <td className="mono"><a href={`https://solscan.io/account/${encodeURIComponent(x.owner)}`} target="_blank" rel="noreferrer" title={x.owner}>{short(x.owner)} ↗</a></td>
+        <td>{x.pct.toFixed(2)}%</td><td>{kind[x.kind]}</td></tr>)}
+      {!h.top.length && <tr><td colSpan={4}>No holder accounts returned.</td></tr>}</tbody></table>
+      : <p className="desk-note">Not read yet: the largest holders of the most active candidates are refreshed every few minutes.</p>}
+  </div>;
+}
+
 function CandidateDetail({ c, probe, busy }: { c: Candidate; probe: ((mint: string) => void) | null; busy: boolean }) {
   const groups: Array<[Evidence['kind'], string]> = [['OBSERVED', 'Observed'], ['DERIVED', 'Derived'], ['INFERRED', 'Inferred']];
   return <div className="cand-detail">
@@ -264,6 +285,7 @@ function CandidateDetail({ c, probe, busy }: { c: Candidate; probe: ((mint: stri
       <small>Real quote, route, transaction build and RPC simulation for your wallet address. Nothing is booked and no signature is requested.</small></div>}
     <p><strong>{c.name ?? c.symbol}</strong> · <span className="mono">{c.mint}</span> · <a href={c.pair.url} target="_blank" rel="noreferrer">{c.pair.dex} pool ↗</a> · sources: {c.sources.join(', ')}</p>
     <p className="reasons">{c.reasons.join(' · ')}</p>
+    <Holders c={c} />
     {c.social.authenticityFlags.some(f => f.includes('MISMATCH')) && <p className="warn">⚠ SOCIAL AGE MISMATCH — {c.social.authenticityFlags.find(f => f.includes('MISMATCH'))}</p>}
     <div className="detail-grid">
       <div><h4>Hard gates (FAIR)</h4><table className="gates"><tbody>{c.gates.map(g => <tr key={g.key}><td>{g.label}</td>

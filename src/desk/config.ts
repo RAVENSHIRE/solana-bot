@@ -62,6 +62,11 @@ export const DESK = Object.freeze({
   momentum: { minObservations: 2, minAcceleration: 1, minPriceChange5mPct: 0 },
   /** Candidates kept in memory and on the status API. */
   maxCandidates: 60,
+  /**
+   * Holders for more candidates than the deep analyses reach: the largest accounts every few minutes (standard RPC
+   * calls), and the holder count less often (DAS getTokenAccounts, 1,000 accounts per page, capped).
+   */
+  holders: { perScan: 8, ttlMs: 180_000, countPerScan: 3, countTtlMs: 600_000, countPages: 2 },
   maxEvents: 400,
 });
 

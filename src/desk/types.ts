@@ -61,6 +61,8 @@ export interface Candidate {
   momentumStreak: number;
   /** CRASH entry checks for this scan; null until computed. */
   crash: CrashSignal | null;
+  /** Largest holders and holder count; null until first read. */
+  holders: HolderView | null;
   /** Status view only: why a strategy did not enter this token (skip, cooldown, slots, sleeve…). */
   entryNotes?: Partial<Record<StrategyId, string>>;
   /** Status view only: not re-assessed in the last completed scan; its data is a past snapshot and is never traded on. */
@@ -68,6 +70,13 @@ export interface Candidate {
 }
 
 export interface CrashSignal { signal: boolean; checks: GateResult[]; summary: string }
+
+/** Holder snapshot for the dashboard. DEV = the pump.fun creator; PROGRAM = pool vault, bonding curve or locker. */
+export interface HolderView {
+  count: number | null; countCapped: boolean; countNote: string | null;
+  top10WalletPct: number; largestWalletPct: number; programOwnedPct: number;
+  top: Array<{ owner: string; pct: number; kind: 'WALLET' | 'PROGRAM' | 'DEV' }>; at: number;
+}
 
 export type SignatureState = 'NOT_REQUESTED_TEST' | 'AWAITING_PHANTOM' | 'SIGNED' | 'REJECTED' | 'EXPIRED' | 'NOT_REACHED';
 export interface Preflight {

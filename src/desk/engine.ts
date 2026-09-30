@@ -22,7 +22,7 @@ import { DESK, STRATEGY_IDS, strategyProfiles, type DeskCapital, type LiveSigner
 import { EventLog } from './events';
 import { DeskLedger, type LedgerState } from './ledger';
 import { discover, pairMetrics, selectPair, tierFor, type Discovered } from './discovery';
-import { creatorHolding, gatherOnchain, type OnchainEvidence } from './onchain';
+import { creatorHolding, gatherOnchain, holderCount, holders as readHolders, type Holders, type OnchainEvidence } from './onchain';
 import { launchCheck, type LaunchCheck } from './launch';
 import { GraduationFeed } from './migrations';
 import { reclaimRent } from './rent';
@@ -83,6 +83,10 @@ export class DeskEngine {
   private lastPositionCheckAt: Record<StrategyId, number> = { FAIR: 0, CRASH: 0 };
   /** Mints the owner asked to sell now (EXIT NOW); kept until the position is gone, so a failed sell is retried. */
   private manualExits = new Set<string>();
+  /** Holder snapshots from the light holder pass (and deep analyses), newest wins in assess(). */
+  private holderInfo = new Map<string, Holders>();
+  /** Set when the RPC has no DAS getTokenAccounts: holder counts are then not requested again. */
+  private holderCountUnsupported: string | null = null;
   /** LIVE with the local key: empty token accounts left by earlier desk trades are closed once per session. */
   private rentSwept = false;
   /** Position checks run beside the discovery scan, so a slow scan never delays an exit. */
@@ -398,6 +402,7 @@ export class DeskEngine {
       if (ledger && signals.length) await this.maybeEnter('CRASH', ledger, signals, stopped);
     }
     if (stopped()) return;
+    await this.refreshHolders(staged.list, started);
     await this.slowPath(staged.list, due.filter(s => !s.crashHint), started);
     const counts = this.finalize(staged.list, staged.filtered, started);
     this.lastCompletedScanAt = started;
@@ -501,11 +506,54 @@ export class DeskEngine {
     }
     if (this.launches.size > 1_000) this.launches.delete(this.launches.keys().next().value!);
   }
+  /** The newest holder snapshot for a token, from the holder pass or a deep analysis. */
+  private latestHolders(mint: string): Holders | null {
+    const a = this.holderInfo.get(mint) ?? null, b = this.deep.get(mint)?.onchain.holders ?? null;
+    const newest = !a ? b : !b ? a : a.at >= b.at ? a : b;
+    // A count from an earlier snapshot is kept until a newer count replaces it.
+    const counted = [a, b].filter((h): h is Holders => !!h && h.countAt !== null).sort((x, y) => y.countAt! - x.countAt!)[0];
+    return newest && counted && newest.countAt === null ? { ...newest, count: counted.count, countCapped: counted.countCapped, countNote: counted.countNote, countAt: counted.countAt } : newest;
+  }
+
+  /**
+   * Largest holders for the most active candidates the deep analyses did not refresh recently, and the holder count
+   * for a few of them. Failures leave the previous snapshot; they never block the scan.
+   */
+  private async refreshHolders(list: Staged[], now: number): Promise<void> {
+    const h = DESK.holders, rank = (s: Staged) => (s.crashHint ? 2e9 : 0) + (s.tier === 'TRENDING' ? 1e9 : 0) + (s.metrics.volume5mUsd ?? 0);
+    const due = list.filter(s => {
+      const last = this.latestHolders(s.found.mint);
+      return !last || now - last.at > h.ttlMs || (!this.holderCountUnsupported && (last.countAt === null || now - last.countAt > h.countTtlMs));
+    }).sort((a, b) => rank(b) - rank(a)).slice(0, h.perScan);
+    let counts = 0;
+    await Promise.all(due.map(async s => {
+      const mint = s.found.mint, last = this.latestHolders(mint);
+      try {
+        const next: Holders = last && now - last.at <= h.ttlMs ? { ...last } : await readHolders(this.d.rpc, mint);
+        const countDue = !this.holderCountUnsupported && (!last || last.countAt === null || now - last.countAt > h.countTtlMs);
+        if (countDue && counts < h.countPerScan) {
+          counts++;
+          try {
+            const r = await holderCount(this.d.rpc, mint, h.countPages);
+            Object.assign(next, { count: r.count, countCapped: r.capped, countNote: null, countAt: Date.now() });
+          } catch (error) {
+            const message = errorMessage(error);
+            if (/method not found|not supported|unknown method|-32601/i.test(message)) this.holderCountUnsupported = 'RPC has no DAS getTokenAccounts (holder count needs e.g. Helius)';
+            Object.assign(next, { countNote: this.holderCountUnsupported ?? `count failed: ${message.slice(0, 80)}` });
+          }
+        } else if (last && last.countAt !== null) Object.assign(next, { count: last.count, countCapped: last.countCapped, countNote: last.countNote, countAt: last.countAt });
+        else if (this.holderCountUnsupported) next.countNote = this.holderCountUnsupported;
+        this.holderInfo.set(mint, next);
+      } catch { /* RPC outage: the previous snapshot stays */ }
+    }));
+  }
+
   /** Analysis of one staged token with the evidence known right now; commits nothing. */
   private assess(s: Staged, now: number): Candidate {
-    const mint = s.found.mint, deep = this.deep.get(mint) ?? null;
+    const mint = s.found.mint, deep = this.deep.get(mint) ?? null, held = this.latestHolders(mint);
     const watch: WatchState = this.watch.get(mint) ?? { firstSeenAt: now, observations: 0, lastLiquidityUsd: null, lastPriceUsd: null, momentumStreak: 0 };
-    const c = analyze({ found: s.found, pair: s.pair, metrics: s.metrics, tier: s.tier, onchain: deep?.onchain ?? null, onchainAt: deep?.at ?? null,
+    const onchain: OnchainEvidence | null = deep ? { ...deep.onchain, holders: held } : held ? { safety: null, holders: held, developer: null, flow: null, errors: {} } : null;
+    const c = analyze({ found: s.found, pair: s.pair, metrics: s.metrics, tier: s.tier, onchain, onchainAt: deep?.at ?? held?.at ?? null,
       social: deep?.social ?? null, watch, now, maxWashRatio: this.d.cfg.rs.maxWashRatio, launch: this.launches.get(mint)?.value ?? null });
     c.crash = crashCheck(c);
     return c;
@@ -533,7 +581,7 @@ export class DeskEngine {
       const held = new Set(this.books().flatMap(b => b.ledger.state.positions.map(p => p.mint)));
       const drop = [...this.candidates.values()].filter(c => !held.has(c.mint)).sort((a, b) => rank(a) - rank(b) || a.updatedAt - b.updatedAt)
         .slice(0, this.candidates.size - DESK.maxCandidates);
-      for (const c of drop) { this.candidates.delete(c.mint); this.watch.delete(c.mint); this.deep.delete(c.mint); }
+      for (const c of drop) { this.candidates.delete(c.mint); this.watch.delete(c.mint); this.deep.delete(c.mint); this.holderInfo.delete(c.mint); }
     }
     return counts;
   }

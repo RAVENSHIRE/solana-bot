@@ -181,6 +181,7 @@ function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' =
   const w = { priceFactor: 1, extraRent: 0, liquidity: 50_000, native: 45_000_000, sends: 0, signRequests: 0,
     graduations: [] as Array<{ signature: string; mint: string; ok: boolean; migrate: boolean; broken?: boolean }>,
     priorityCaps: [] as Array<{ side: 'BUY' | 'SELL'; maxLamports: number; notional: bigint }>,
+    dasUnsupported: false,
     last: null as null | { side: 'BUY' | 'SELL'; mint: string; inAmount: bigint; outAmount: bigint } };
   const holderMint = new Map<string, string>();
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -252,8 +253,12 @@ function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' =
     getFeeForMessage: async () => ({ value: 5_300 }),
     getMultipleAccountsInfo: async () => [],
     getSignaturesForAddress: async () => w.graduations.map(g => ({ signature: g.signature, blockTime: Math.floor(Date.now() / 1000) - 30, err: g.ok ? null : { InstructionError: [0, 'x'] } })),
-    _rpcRequest: async (method: string, [sig, config]: [string, { maxSupportedTransactionVersion?: number }]) => {
+    _rpcRequest: async (method: string, args: unknown) => {
+      // DAS holder count: two owners with a balance (one of them with two accounts) and an emptied account.
+      if (method === 'getTokenAccounts') return w.dasUnsupported ? { error: { code: -32601, message: 'Method not found' } }
+        : { result: { token_accounts: [{ owner: key(160).toBase58(), amount: 5 }, { owner: key(161).toBase58(), amount: 0 }, { owner: key(160).toBase58(), amount: 3 }, { owner: key(162).toBase58(), amount: '7' }] } };
       if (method !== 'getTransaction') throw new Error(`unexpected ${method}`);
+      const [sig, config] = args as [string, { maxSupportedTransactionVersion?: number }];
       const g = w.graduations.find(x => x.signature === sig)!, lp = key(222).toBase58();
       // Migrations may be version 1 transactions: a client that asks for version 0 at most is refused, like the real RPC.
       if ((config.maxSupportedTransactionVersion ?? -1) < 1) return { error: { message: 'Transaction version (1) is not supported by the requesting client' } };
@@ -762,6 +767,22 @@ test('rent reclaim closes only empty desk-token accounts, simulates first, and n
   assert.equal(await reclaimRent({ ...d, mints: [OTHER.slice(0, 5)] }), null, 'nothing to close');
   gain = 3_000_000;
   await assert.rejects(reclaimRent({ ...d, mints: [SOLD] }), /RENT_SIMULATION_MISMATCH/); assert.equal(signed, 1, 'not signed');
+});
+
+test('holders: count of owners with a balance, largest holders marked wallet/program, and a clear note when the RPC cannot count', async () => {
+  for (const unsupported of [false, true]) {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-holders-')), { w, shared } = world(YOUNG_PUMP, 'insider');
+    w.dasUnsupported = unsupported;
+    try {
+      const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+      engine.start(); await engine.pulse();
+      const h = engine.status({ connected: false, address: null }).candidates.find(c => c.mint === MINT)!.holders!;
+      assert.equal(h.top[0]!.kind, 'PROGRAM', 'the pool vault (off-curve owner) is shown but not counted as a whale'); assert.equal(h.top[0]!.pct, 30);
+      assert.equal(h.top.filter(x => x.kind === 'WALLET').length, 10); assert.equal(h.top10WalletPct, 20);
+      if (!unsupported) { assert.equal(h.count, 2, 'distinct owners with a non-zero balance'); assert.equal(h.countCapped, false); }
+      else { assert.equal(h.count, null); assert.match(h.countNote!, /DAS getTokenAccounts/); }
+    } finally { await fs.rm(dir, { recursive: true, force: true }); }
+  }
 });
 
 test('strategy and drill toggles survive a restart; LIVE keeps CRASH off until the owner switches it on', async () => {

@@ -104,6 +104,10 @@ Reads every pump.fun graduation of the last hours from the chain (the whole univ
 
 When a TEST sleeve can no longer fund an entry and holds no open position, the desk archives it as a completed cycle (`ledger-PAPER[-CRASH].cycle-<time>.json`) and re-funds it at its planned capital. Trades, realized PnL, stats, the scale ladder, the ledger view and re-entry cooldowns all continue across cycles, also after a restart. LIVE never re-funds anything: the wallet is the budget.
 
+### Holders
+
+Each candidate shows its holder count and the share of the 10 largest wallets; its detail view lists the largest holders (from the 20 largest token accounts) with their share of supply, marked **wallet**, **pool / curve / program** (off-curve owners such as the PumpSwap vault or the bonding curve, which are excluded from concentration) or **DEV** (the pump.fun creator), each linked to Solscan, plus links to the token on FOMO and Solscan. The largest holders are refreshed every 3 minutes for the 8 most active candidates per scan (standard RPC calls); the holder count every 10 minutes for 3 per scan, through the DAS `getTokenAccounts` method (Helius and compatible RPCs, up to 2,000 owners, shown as "2,000+" beyond). An RPC without DAS shows the count as "?" with the reason.
+
 ### Why a token was not entered
 
 Each candidate shows, per strategy, why this scan did not enter it: held by the other strategy, re-entry cooldown, the guard's last block and when it is retried, slots in use, or an unfundable sleeve. A candidate that was not re-assessed in the last completed scan is marked **STALE** and is never traded on; held tokens and the watchlist are always assessed first (up to 120 tokens per scan). Telemetry keeps separate windows for scanner outcomes and for signals, orders, positions and PnL, so executions never scroll out behind filter messages.
