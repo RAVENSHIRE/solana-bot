@@ -1,4 +1,4 @@
-import { PublicKey } from '@solana/web3.js';
+import { PublicKey, type ParsedTransactionWithMeta } from '@solana/web3.js';
 import type { ConnectionManager } from '../rpc/connection-manager';
 import { SOL_MINT } from '../core/types';
 
@@ -6,6 +6,16 @@ import { SOL_MINT } from '../core/types';
 export const PUMP_MIGRATION_AUTHORITY = new PublicKey('39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg');
 
 export interface Graduation { mint: string; signature: string; at: number }
+
+/** The graduating token of a migration transaction (MigrateV2 → CreatePool), or null for any other transaction. */
+export function graduatedMint(tx: ParsedTransactionWithMeta | null): string | null {
+  const logs = tx?.meta?.logMessages ?? [];
+  if (!tx || tx.meta?.err || !logs.some(l => /Instruction: Migrate/.test(l)) || !logs.some(l => /Instruction: CreatePool/.test(l))) return null;
+  // The graduating token already existed before this transaction; the LP mint it creates did not.
+  const before = new Set((tx.meta?.preTokenBalances ?? []).map(b => b.mint));
+  const mints = [...new Set((tx.meta?.postTokenBalances ?? []).map(b => b.mint))].filter(m => m !== SOL_MINT);
+  return mints.find(m => before.has(m)) ?? (mints.length === 1 ? mints[0]! : null);
+}
 
 /**
  * Every pump.fun graduation, read from the chain: the migration authority's recent signatures, then each new
@@ -25,12 +35,7 @@ export class GraduationFeed {
     for (const s of fresh) {
       const tx = await this.rpc.execute('desk:graduation-tx', c => c.getParsedTransaction(s.signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' }));
       this.seen.add(s.signature);
-      const logs = tx?.meta?.logMessages ?? [];
-      if (!tx || tx.meta?.err || !logs.some(l => /Instruction: Migrate/.test(l)) || !logs.some(l => /Instruction: CreatePool/.test(l))) continue;
-      // The graduating token already existed before this transaction; the LP mint it creates did not.
-      const before = new Set((tx.meta?.preTokenBalances ?? []).map(b => b.mint));
-      const mints = [...new Set((tx.meta?.postTokenBalances ?? []).map(b => b.mint))].filter(m => m !== SOL_MINT);
-      const mint = mints.find(m => before.has(m)) ?? (mints.length === 1 ? mints[0] : undefined);
+      const mint = graduatedMint(tx);
       if (mint) this.recent.set(mint, { mint, signature: s.signature, at: s.blockTime! * 1000 });
     }
     for (const [mint, g] of this.recent) if (now - g.at > this.windowMs) this.recent.delete(mint);
