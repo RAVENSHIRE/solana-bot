@@ -100,6 +100,8 @@ export interface LedgerEntry {
   entryPriceUsd: number | null; exitPriceUsd: number | null; grossPnlUsd: number | null;
   networkFeeLamports: string; networkFeeUsd: number | null; routerFeeUsd: number | null; totalFeesUsd: number | null;
   netPnlUsd: number | null; solDeltaLamports: string; status: 'CONFIRMED' | 'PAPER_FILLED' | 'FAILED' | 'UNKNOWN'; note: string | null;
+  /** SELL: token-account rent charged to this trade and not yet returned by closing the account. */
+  rentOutstandingLamports?: string;
   /** Status view only: the strategy whose ledger holds the row. */
   strategy?: StrategyId;
 }

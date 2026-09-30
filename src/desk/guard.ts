@@ -11,6 +11,9 @@ import type { ConnectionManager } from '../rpc/connection-manager';
 import { exactNumber, parse, safeInteger } from '../data/core/data-validator';
 import type { DeskMode, Preflight, SignatureState, Stage } from './types';
 
+/** Priority-fee budget of a sell, relative to what the sell returns. */
+export const EXIT_PRIORITY = Object.freeze({ bps: 100n, floorLamports: 50_000n });
+
 /** Stops a TEST order exactly where a LIVE order would ask Phantom for a signature. */
 export class PaperExecution extends Error {
   constructor() { super('PAPER_EXECUTION_NO_SIGNATURE_REQUESTED'); this.name = 'PaperExecution'; }
@@ -137,7 +140,11 @@ export class DeskGuard implements ExecutionGuard {
     const capped = buy && d.enforceDrag !== false;
     if (buy && remainder < 0n && !capped) d.event('PREFLIGHT', `DRILL: drag above ${Number(d.maxDragBps) / 100}% accepted in TEST (slippage ${sol(slip)} + impact ${sol(impact)} + router ${sol(routerFee)})`);
     if (capped && remainder < 0n) throw new DeskReject('FEE_CAP', `slippage ${sol(slip)} + impact ${sol(impact)} + router ${sol(routerFee)} + base fee exceed ${Number(d.maxDragBps) / 100}% (${sol(budget)})`);
-    const maxPriority = !capped || remainder >= d.configuredPriorityCap ? d.configuredPriorityCap : remainder;
+    // Exits: at most 1% of the position's value (never below a floor that still lands quickly, never above the cap).
+    // Jupiter's estimate otherwise took the full cap on every sell: 0.0003 SOL, ~1.8% of a $2 position.
+    const exitCap = notional * EXIT_PRIORITY.bps / 10_000n > EXIT_PRIORITY.floorLamports ? notional * EXIT_PRIORITY.bps / 10_000n : EXIT_PRIORITY.floorLamports;
+    const maxPriority = !buy ? (exitCap < d.configuredPriorityCap ? exitCap : d.configuredPriorityCap)
+      : !capped || remainder >= d.configuredPriorityCap ? d.configuredPriorityCap : remainder;
     if (maxPriority < 0n) throw new DeskReject('NO_PRIORITY_FEE_BUDGET');
     // The budget is the cap Jupiter's own priority estimate may use. (The RPC's recent per-slot minimums are
     // mostly zero, which built transactions without any priority fee.) The actual fee is measured before signing.

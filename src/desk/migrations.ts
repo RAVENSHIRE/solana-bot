@@ -1,4 +1,4 @@
-import { PublicKey, type ParsedTransactionWithMeta } from '@solana/web3.js';
+import { PublicKey, type Connection } from '@solana/web3.js';
 import type { ConnectionManager } from '../rpc/connection-manager';
 import { SOL_MINT } from '../core/types';
 
@@ -7,8 +7,22 @@ export const PUMP_MIGRATION_AUTHORITY = new PublicKey('39azUYFWPz3VHgKCf3VChUwbp
 
 export interface Graduation { mint: string; signature: string; at: number }
 
+/** The fields of a confirmed transaction that identify a graduation (same shape in json and jsonParsed encodings). */
+export interface MigrationTx { meta: { err: unknown; logMessages?: string[] | null; preTokenBalances?: Array<{ mint: string }> | null; postTokenBalances?: Array<{ mint: string }> | null } | null }
+
+/**
+ * Reads a transaction of any version. Migrations may be version 1 transactions, which clients that request
+ * version 0 at most are refused ("Transaction version (1) is not supported by the requesting client").
+ */
+export async function migrationTx(c: Connection, signature: string): Promise<MigrationTx | null> {
+  const rpc = c as unknown as { _rpcRequest(method: string, args: unknown[]): Promise<{ result?: MigrationTx | null; error?: { message: string } }> };
+  const res = await rpc._rpcRequest('getTransaction', [signature, { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 1 }]);
+  if (res.error) throw new Error(res.error.message);
+  return res.result ?? null;
+}
+
 /** The graduating token of a migration transaction (MigrateV2 → CreatePool), or null for any other transaction. */
-export function graduatedMint(tx: ParsedTransactionWithMeta | null): string | null {
+export function graduatedMint(tx: MigrationTx | null): string | null {
   const logs = tx?.meta?.logMessages ?? [];
   if (!tx || tx.meta?.err || !logs.some(l => /Instruction: Migrate/.test(l)) || !logs.some(l => /Instruction: CreatePool/.test(l))) return null;
   // The graduating token already existed before this transaction; the LP mint it creates did not.
@@ -25,6 +39,7 @@ export function graduatedMint(tx: ParsedTransactionWithMeta | null): string | nu
  */
 export class GraduationFeed {
   private readonly seen = new Set<string>();
+  private readonly failures = new Map<string, number>();
   private readonly recent = new Map<string, Graduation>();
   constructor(private readonly rpc: ConnectionManager, private readonly windowMs = 30 * 60_000, private readonly maxNewPerPoll = 12) {}
 
@@ -33,8 +48,17 @@ export class GraduationFeed {
     const fresh = sigs.filter(s => !s.err && s.blockTime && !this.seen.has(s.signature) && s.blockTime * 1000 >= now - this.windowMs)
       .sort((a, b) => b.blockTime! - a.blockTime!).slice(0, this.maxNewPerPoll);
     for (const s of fresh) {
-      const tx = await this.rpc.execute('desk:graduation-tx', c => c.getParsedTransaction(s.signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' }));
-      this.seen.add(s.signature);
+      let tx: MigrationTx | null;
+      try { tx = await this.rpc.execute('desk:graduation-tx', c => migrationTx(c, s.signature)); }
+      catch {
+        // One unreadable transaction must never hide the other graduations; it is retried twice, then skipped.
+        const n = (this.failures.get(s.signature) ?? 0) + 1;
+        this.failures.set(s.signature, n);
+        if (n >= 3) { this.seen.add(s.signature); this.failures.delete(s.signature); }
+        if (this.failures.size > 1_000) this.failures.clear();
+        continue;
+      }
+      this.seen.add(s.signature); this.failures.delete(s.signature);
       const mint = graduatedMint(tx);
       if (mint) this.recent.set(mint, { mint, signature: s.signature, at: s.blockTime! * 1000 });
     }

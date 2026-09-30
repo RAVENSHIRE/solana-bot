@@ -15,7 +15,8 @@ const entry = z.object({ id: z.string(), at: z.number().int(), mode: z.enum(['PA
   symbol: z.string().nullable(), router: z.string(), route: z.string(), side: z.enum(['BUY', 'SELL']), quantity: z.string(), qtyRaw: raw,
   entryPriceUsd: finite.nullable(), exitPriceUsd: finite.nullable(), grossPnlUsd: finite.nullable(), networkFeeLamports: raw,
   networkFeeUsd: finite.nullable(), routerFeeUsd: finite.nullable(), totalFeesUsd: finite.nullable(), netPnlUsd: finite.nullable(),
-  solDeltaLamports: raw, status: z.enum(['CONFIRMED', 'PAPER_FILLED', 'FAILED', 'UNKNOWN']), note: z.string().nullable() }).strict();
+  solDeltaLamports: raw, status: z.enum(['CONFIRMED', 'PAPER_FILLED', 'FAILED', 'UNKNOWN']), note: z.string().nullable(),
+  rentOutstandingLamports: raw.optional() }).strict();
 const stateSchema = z.object({ version: z.literal(1), mode: z.enum(['PAPER', 'LIVE']), wallet: z.string().nullable(), createdAt: z.number().int(),
   paperCashLamports: raw.nullable(), paperStartUsd: finite.nullable(), positions: z.array(position).max(50), entries: z.array(entry).max(10_000),
   pending: z.object({ side: z.enum(['BUY', 'SELL']), mint: z.string(), at: z.number().int(), signature: z.string().nullable() }).strict().nullable(),
@@ -94,9 +95,11 @@ export class DeskLedger {
       // Entry input excludes the entry's network fee, which was booked on the BUY row and is subtracted once here.
       const inputUsd = p.entryPriceUsd !== null ? p.entryPriceUsd * qty : p.costUsd, buyFeeUsd = Math.max(0, p.costUsd - inputUsd);
       const grossPnlUsd = proceedsUsd - inputUsd;
-      const netPnlUsd = grossPnlUsd - buyFeeUsd - feeUsd;
+      // The token account's rent left the wallet with the entry; it is a cost of this trade until the account is closed.
+      const rent = BigInt(p.rentLamports), netPnlUsd = grossPnlUsd - buyFeeUsd - feeUsd - lamportsUsd(rent, f.solUsd);
       entryRow = this.row(f, status, { quantity: uiAmount(f.inAmountRaw, p.decimals), qtyRaw: f.inAmountRaw, entryPriceUsd: p.entryPriceUsd,
         exitPriceUsd: qty > 0 ? proceedsUsd / qty : null, grossPnlUsd, netPnlUsd, feeUsd });
+      if (rent > 0n) entryRow.rentOutstandingLamports = String(rent);
       s.realizedPnlUsd += netPnlUsd;
       s.positions = s.positions.filter(x => x !== p);
       if (s.mode === 'PAPER') s.paperCashLamports = String(BigInt(s.paperCashLamports ?? '0') + f.solDeltaLamports);
@@ -119,6 +122,31 @@ export class DeskLedger {
     this.state.feesUsd += feeUsd; this.state.feesLamports = String(BigInt(this.state.feesLamports) + f.feeLamports);
     if (f.feeLamports > 0n) this.state.realizedPnlUsd -= feeUsd;
     return row;
+  }
+
+  /**
+   * Rent returned by closing a sold token's empty account: credited to the SELL that charged it, net of the close
+   * transaction's fee (shared equally when one transaction closes several accounts).
+   */
+  rentReclaimed(r: { mint: string; lamports: bigint; feeLamports: bigint; signature: string | null; solUsd: number }): void {
+    const s = this.state, feeUsd = lamportsUsd(r.feeLamports, r.solUsd);
+    const row = [...s.entries].reverse().find(e => e.mint === r.mint && e.side === 'SELL' && (e.status === 'CONFIRMED' || e.status === 'PAPER_FILLED'));
+    const charged = BigInt(row?.rentOutstandingLamports ?? '0'), credit = r.lamports < charged ? r.lamports : charged, creditUsd = lamportsUsd(credit, r.solUsd);
+    if (row) {
+      row.netPnlUsd = (row.netPnlUsd ?? 0) + creditUsd - feeUsd;
+      row.networkFeeLamports = String(BigInt(row.networkFeeLamports) + r.feeLamports);
+      row.networkFeeUsd = (row.networkFeeUsd ?? 0) + feeUsd; row.totalFeesUsd = (row.totalFeesUsd ?? 0) + feeUsd;
+      row.solDeltaLamports = String(BigInt(row.solDeltaLamports) + r.lamports - r.feeLamports);
+      if (charged > credit) row.rentOutstandingLamports = String(charged - credit); else delete row.rentOutstandingLamports;
+      row.note = [row.note, `account rent ${uiAmount(r.lamports, 9)} SOL reclaimed${r.signature ? ` (${r.signature})` : ''}`].filter(Boolean).join(' · ');
+    }
+    s.realizedPnlUsd += creditUsd - feeUsd;
+    s.feesUsd += feeUsd; s.feesLamports = String(BigInt(s.feesLamports) + r.feeLamports);
+    if (s.mode === 'PAPER') s.paperCashLamports = String(BigInt(s.paperCashLamports ?? '0') + r.lamports - r.feeLamports);
+  }
+  /** Mints of this ledger's closed trades whose account rent is still charged (not yet reclaimed). */
+  rentOutstandingMints(): string[] {
+    return [...new Set(this.state.entries.filter(e => e.side === 'SELL' && e.rentOutstandingLamports && !this.position(e.mint)).map(e => e.mint))];
   }
 
   private row(f: Fill, status: LedgerEntry['status'], v: { quantity: string; qtyRaw: bigint; entryPriceUsd: number | null; exitPriceUsd: number | null;

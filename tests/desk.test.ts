@@ -26,6 +26,7 @@ import { crashCheck, exitReason, scaleAdvice, strategyStats } from '../src/desk/
 import { replayExit, sizedReturn } from '../src/desk/replay';
 import { GraduationFeed } from '../src/desk/migrations';
 import { localKeySigner } from '../src/desk/local-signer';
+import { reclaimRent } from '../src/desk/rent';
 import bs58 from 'bs58';
 import type { DeskEvent, LedgerEntry } from '../src/desk/types';
 
@@ -135,7 +136,7 @@ test('gates show actual vs required; ultra-early tokens are discovered, never au
   assert.equal(qualified.scores.map(s => s.key).join(), 'FUNDAMENTAL,SOCIAL,MARKET,ONCHAIN,RISK,MOMENTUM');
 });
 
-test('ledger: TEST PnL books both network fees once; LIVE needs a signature; modes never share a file', async () => {
+test('ledger: TEST PnL books both network fees once and account rent until it is reclaimed; LIVE needs a signature; modes never share a file', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-ledger-'));
   try {
     const paper = await DeskLedger.open(path.join(dir, 'ledger-PAPER.json'), 'PAPER', null, NOW);
@@ -143,8 +144,14 @@ test('ledger: TEST PnL books both network fees once; LIVE needs a signature; mod
     const base = { mint: MINT, symbol: 'ABC', decimals: 6, pairAddress: POOL, router: 'Jupiter', route: 'Raydium', routerFeeUsd: null, txSignature: null, solUsd: 100, note: null };
     paper.book({ ...base, side: 'BUY', inAmountRaw: 20_000_000n, outAmountRaw: 4_000_000_000n, solDeltaLamports: -22_044_580n, feeLamports: 5_300n, rentLamports: 2_039_280n, at: NOW });
     const sell = paper.book({ ...base, side: 'SELL', inAmountRaw: 4_000_000_000n, outAmountRaw: 28_000_000n, solDeltaLamports: 27_994_700n, feeLamports: 5_300n, rentLamports: 0n, at: NOW + 1 });
-    assert.ok(Math.abs(sell.grossPnlUsd! - 0.8) < 1e-9); assert.ok(Math.abs(sell.netPnlUsd! - (0.8 - 0.00106)) < 1e-9);
+    assert.ok(Math.abs(sell.grossPnlUsd! - 0.8) < 1e-9); assert.ok(Math.abs(sell.netPnlUsd! - (0.8 - 0.00106 - 0.203928)) < 1e-9, 'the unreclaimed account rent is a cost');
+    assert.equal(sell.rentOutstandingLamports, '2039280'); assert.deepEqual(paper.rentOutstandingMints(), [MINT]);
     assert.equal(paper.state.positions.length, 0); assert.equal(paper.state.paperCashLamports, String(54_500_000n - 20_000_000n - 5_300n - 2_039_280n + 27_994_700n));
+    paper.rentReclaimed({ mint: MINT, lamports: 2_039_280n, feeLamports: 5_000n, signature: null, solUsd: 100 });
+    assert.ok(Math.abs(sell.netPnlUsd! - (0.8 - 0.00106 - 0.0005)) < 1e-9, 'closing the account returns the rent, minus its fee');
+    assert.equal(sell.rentOutstandingLamports, undefined); assert.deepEqual(paper.rentOutstandingMints(), []);
+    assert.ok(Math.abs(paper.state.realizedPnlUsd - (0.8 - 0.00106 - 0.0005)) < 1e-9);
+    assert.equal(paper.state.paperCashLamports, String(54_500_000n - 20_000_000n - 5_300n + 27_994_700n - 5_000n));
     await paper.save();
     const live = await DeskLedger.open(path.join(dir, 'ledger-LIVE-x.json'), 'LIVE', owner.toBase58(), NOW);
     assert.throws(() => live.book({ ...base, side: 'BUY', inAmountRaw: 1n, outAmountRaw: 1n, solDeltaLamports: -1n, feeLamports: 0n, rentLamports: 0n, at: NOW }), /LIVE_FILL_WITHOUT_SIGNATURE/);
@@ -171,7 +178,8 @@ interface Token { mint: string; symbol: string; pool: string; curve: string; pat
 function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' = 'fair', more: Array<Omit<Token, 'curve'>> = []) {
   const tokens: Token[] = [{ mint: MINT, symbol: 'ABC', pool: POOL, curve: SOL_POOL, patch, launch }, ...more.map((t, i) => ({ ...t, curve: key(200 + i).toBase58() }))];
   const w = { priceFactor: 1, extraRent: 0, liquidity: 50_000, native: 45_000_000, sends: 0, signRequests: 0,
-    graduations: [] as Array<{ signature: string; mint: string; ok: boolean; migrate: boolean }>,
+    graduations: [] as Array<{ signature: string; mint: string; ok: boolean; migrate: boolean; broken?: boolean }>,
+    priorityCaps: [] as Array<{ side: 'BUY' | 'SELL'; maxLamports: number; notional: bigint }>,
     last: null as null | { side: 'BUY' | 'SELL'; mint: string; inAmount: bigint; outAmount: bigint } };
   const holderMint = new Map<string, string>();
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -216,6 +224,7 @@ function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' =
       const q = body.quoteResponse as { inputMint: string; inAmount: string; outAmount: string };
       const q2 = body.quoteResponse as { outputMint: string };
       w.last = { side: q.inputMint === SOL_MINT ? 'BUY' : 'SELL', mint: q.inputMint === SOL_MINT ? q2.outputMint : q.inputMint, inAmount: BigInt(q.inAmount), outAmount: BigInt(q.outAmount) };
+      w.priorityCaps.push({ side: w.last.side, maxLamports: body.prioritizationFeeLamports.priorityLevelWithMaxLamports.maxLamports, notional: w.last.side === 'BUY' ? w.last.inAmount : w.last.outAmount });
       const tx = new VersionedTransaction(new TransactionMessage({ payerKey: new PublicKey(body.userPublicKey), recentBlockhash: SystemProgram.programId.toBase58(), instructions: [] }).compileToV0Message());
       return json({ swapTransaction: Buffer.from(tx.serialize()).toString('base64'), lastValidBlockHeight: 100, prioritizationFeeLamports: 0, computeUnitLimit: 200_000 });
     }
@@ -242,10 +251,14 @@ function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' =
     getFeeForMessage: async () => ({ value: 5_300 }),
     getMultipleAccountsInfo: async () => [],
     getSignaturesForAddress: async () => w.graduations.map(g => ({ signature: g.signature, blockTime: Math.floor(Date.now() / 1000) - 30, err: g.ok ? null : { InstructionError: [0, 'x'] } })),
-    getParsedTransaction: async (sig: string) => {
+    _rpcRequest: async (method: string, [sig, config]: [string, { maxSupportedTransactionVersion?: number }]) => {
+      if (method !== 'getTransaction') throw new Error(`unexpected ${method}`);
       const g = w.graduations.find(x => x.signature === sig)!, lp = key(222).toBase58();
-      return { meta: { err: null, logMessages: g.migrate ? ['Program log: Instruction: MigrateV2', 'Program log: Instruction: CreatePool'] : ['Program log: Instruction: Buy'],
-        preTokenBalances: [{ mint: g.mint }, { mint: SOL_MINT }], postTokenBalances: [{ mint: g.mint }, { mint: SOL_MINT }, { mint: lp }] } };
+      // Migrations may be version 1 transactions: a client that asks for version 0 at most is refused, like the real RPC.
+      if ((config.maxSupportedTransactionVersion ?? -1) < 1) return { error: { message: 'Transaction version (1) is not supported by the requesting client' } };
+      if (g.broken) throw new Error('RPC timeout');
+      return { result: { meta: { err: null, logMessages: g.migrate ? ['Program log: Instruction: MigrateV2', 'Program log: Instruction: CreatePool'] : ['Program log: Instruction: Buy'],
+        preTokenBalances: [{ mint: g.mint }, { mint: SOL_MINT }], postTokenBalances: [{ mint: g.mint }, { mint: SOL_MINT }, { mint: lp }] } } };
     },
     simulateTransaction: async (_tx: unknown, config?: { accounts?: unknown }) => {
       if (!config?.accounts) return { value: { err: null, logs: [] } };
@@ -606,8 +619,9 @@ test('replay: pessimistic minute-candle exits and constant-product size impact',
 test('every pump.fun graduation is discovered from the chain, even when no listing or new-pool page shows it', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-grad-')), GRAD = tokenKey(120);
   const { w, shared } = world({}, 'fair', [{ mint: GRAD, symbol: 'GRAD', pool: tokenKey(121), patch: YOUNG_PUMP, launch: 'insider', listed: false }]);
-  w.graduations = [{ signature: 'sig-grad', mint: GRAD, ok: true, migrate: true }, { signature: 'sig-failed', mint: tokenKey(122), ok: false, migrate: true },
-    { signature: 'sig-swap', mint: tokenKey(123), ok: true, migrate: false }];
+  // An unreadable transaction listed first must not hide the graduations after it.
+  w.graduations = [{ signature: 'sig-broken', mint: tokenKey(124), ok: true, migrate: true, broken: true }, { signature: 'sig-grad', mint: GRAD, ok: true, migrate: true },
+    { signature: 'sig-failed', mint: tokenKey(122), ok: false, migrate: true }, { signature: 'sig-swap', mint: tokenKey(123), ok: true, migrate: false }];
   try {
     const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
     engine.start(); await engine.pulse();
@@ -682,6 +696,49 @@ test('EXIT NOW sells an open position at once, while the desk runs and after STO
       assert.throws(() => engine.requestExit(mint), /POSITION_NOT_FOUND/, 'nothing left to sell');
     }
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('a sell spends at most 1% of its value on priority fee (floor 50,000 lamports), and TEST closes the emptied token account on paper', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-exit-fee-')), { w, shared } = world(YOUNG_PUMP, 'insider');
+  try {
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    engine.start(); await engine.pulse();
+    w.priceFactor = 0.8;
+    (engine as unknown as { lastPositionCheckAt: Record<string, number> }).lastPositionCheckAt.CRASH = 0; engine.tick(); await engine.settled();
+    const view = engine.status({ connected: false, address: null });
+    assert.equal(view.positions.length, 0, 'the stop loss sold');
+    const sell = w.priorityCaps.filter(c => c.side === 'SELL').at(-1)!;
+    assert.equal(sell.maxLamports, Number(sell.notional / 100n), '1% of the ~0.016 SOL the sell returns, not the full 300,000-lamport cap');
+    assert.ok(sell.maxLamports < 300_000);
+    const row = view.ledger.find(e => e.side === 'SELL')!;
+    assert.equal(row.rentOutstandingLamports, undefined); assert.match(row.note ?? '', /account rent 0\.00203928 SOL reclaimed/);
+    assert.ok(engine.events.list().some(e => /TEST — token account closed on paper: 0\.002039 SOL rent returned/.test(e.message)));
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('rent reclaim closes only empty desk-token accounts, simulates first, and never signs a transaction that would pay the wallet more', async () => {
+  const kp = Keypair.fromSeed(new Uint8Array(32).fill(7)), me = kp.publicKey, [SOLD, HELD, OTHER] = [tokenKey(140), tokenKey(141), tokenKey(142)];
+  const account = (n: number, mint: string, amount: string) => ({ pubkey: key(150 + n), account: { owner: TOKEN_PROGRAM_ID, lamports: 2_039_280, executable: false, rentEpoch: 0,
+    data: { program: 'spl-token', space: 165, parsed: { type: 'account', info: { mint, owner: me.toBase58(), state: 'initialized', tokenAmount: { amount, decimals: 6, uiAmount: 0, uiAmountString: '0' } } } } } });
+  let gain = 2_039_280 - 5_080, signed = 0, sent: VersionedTransaction | null = null;
+  const conn = {
+    getParsedTokenAccountsByOwner: async (_o: PublicKey, f: { programId?: PublicKey }) => ({ value: f.programId?.equals(TOKEN_PROGRAM_ID) ? [account(0, SOLD, '0'), account(1, HELD, '5'), account(2, OTHER, '0')] : [] }),
+    getLatestBlockhash: async () => ({ blockhash: SystemProgram.programId.toBase58(), lastValidBlockHeight: 100 }),
+    getFeeForMessage: async () => ({ value: 5_080 }), getBalance: async () => 10_000_000,
+    simulateTransaction: async () => ({ value: { err: null, accounts: [{ lamports: 10_000_000 + gain, owner: SystemProgram.programId.toBase58(), data: ['', 'base64'], executable: false }] } }),
+  };
+  const rpc = { execute: (_l: string, fn: (c: typeof conn) => unknown) => fn(conn) };
+  const signer: TransactionSigner = { publicKey: me, signTransaction: async tx => { signed++; tx.sign([kp]); return tx; } };
+  const sender = { sendAndConfirm: async (tx: VersionedTransaction) => { sent = tx; return { signature: 'close-sig', slot: 1 }; } };
+  const d = { rpc: rpc as never, sender: sender as never, owner: me, signer };
+  const r = await reclaimRent({ ...d, mints: [SOLD, HELD] });
+  assert.equal(r!.signature, 'close-sig'); assert.deepEqual(r!.accounts.map(a => a.mint), [SOLD], 'a non-empty account and a token the desk never traded are left alone');
+  assert.equal(r!.reclaimedLamports, 2_039_280n); assert.equal(r!.feeLamports, 5_080n); assert.equal(signed, 1);
+  const ix = sent!.message.compiledInstructions.map(i => sent!.message.staticAccountKeys[i.programIdIndex]!.toBase58());
+  assert.deepEqual(ix, ['ComputeBudget111111111111111111111111111111', 'ComputeBudget111111111111111111111111111111', TOKEN_PROGRAM_ID.toBase58()], 'only compute budget and one CloseAccount');
+  assert.equal(await reclaimRent({ ...d, mints: [OTHER.slice(0, 5)] }), null, 'nothing to close');
+  gain = 3_000_000;
+  await assert.rejects(reclaimRent({ ...d, mints: [SOLD] }), /RENT_SIMULATION_MISMATCH/); assert.equal(signed, 1, 'not signed');
 });
 
 test('strategy and drill toggles survive a restart; LIVE keeps CRASH off until the owner switches it on', async () => {

@@ -11,7 +11,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Connection, type ConfirmedSignatureInfo } from '@solana/web3.js';
 import { CRASH_DEFAULTS, CRASH_ENTRY, type ExitRules } from '../desk/config';
-import { graduatedMint, PUMP_MIGRATION_AUTHORITY } from '../desk/migrations';
+import { graduatedMint, migrationTx, PUMP_MIGRATION_AUTHORITY } from '../desk/migrations';
 import { deskEnvironment } from '../desk/runtime';
 import { signals, simulatePool, summarize, type Costs, type EntryRule, type PoolSeries, type SimTrade, type Summary, type VCandle } from '../desk/backtest';
 
@@ -52,12 +52,12 @@ async function graduations(rpc: Connection): Promise<Array<{ mint: string; at: n
   let done = 0;
   const worker = async () => {
     for (let s = todo.shift(); s; s = todo.shift()) {
-      const tx = await retry('transaction', () => rpc.getParsedTransaction(s.signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' }));
+      const tx = await retry('transaction', () => migrationTx(rpc, s.signature));
       known[s.signature] = { mint: graduatedMint(tx), at: s.blockTime! * 1000 };
       if (++done % 100 === 0) { console.log(`  ${done} read`); await writeJson(file, known); }
     }
   };
-  await Promise.all(Array.from({ length: 4 }, worker));
+  await Promise.all(Array.from({ length: 2 }, worker));
   await writeJson(file, known);
   const out = new Map<string, number>();
   for (const s of sigs) { const g = known[s.signature]; if (g?.mint && !out.has(g.mint)) out.set(g.mint, g.at); }

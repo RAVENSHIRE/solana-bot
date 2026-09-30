@@ -25,6 +25,7 @@ import { discover, pairMetrics, selectPair, tierFor, type Discovered } from './d
 import { creatorHolding, gatherOnchain, type OnchainEvidence } from './onchain';
 import { launchCheck, type LaunchCheck } from './launch';
 import { GraduationFeed } from './migrations';
+import { reclaimRent } from './rent';
 import { assessAuthenticity, checkWebsite, parseXLink, type WebsiteCheck, type XClient } from './social';
 import { analyze, type SocialEvidence, type WatchState } from './analysis';
 import { DeskGuard, DeskReject, PaperExecution, paperSigner } from './guard';
@@ -82,6 +83,8 @@ export class DeskEngine {
   private lastPositionCheckAt: Record<StrategyId, number> = { FAIR: 0, CRASH: 0 };
   /** Mints the owner asked to sell now (EXIT NOW); kept until the position is gone, so a failed sell is retried. */
   private manualExits = new Set<string>();
+  /** LIVE with the local key: empty token accounts left by earlier desk trades are closed once per session. */
+  private rentSwept = false;
   /** Position checks run beside the discovery scan, so a slow scan never delays an exit. */
   private positionWork: Promise<void> | null = null;
   /** One order at a time across both strategies (paper cash, wallet balance and Phantom requests stay consistent). */
@@ -177,7 +180,7 @@ export class DeskEngine {
     if (this.books().some(b => b.ledger.state.halted || b.ledger.state.pending)) throw new DeskReject('TRANSACTION_RECONCILIATION_REQUIRED');
     this.scanner = true; this.execution = true; this.generation++; this.nextScanAt = Date.now(); this.notes.clear();
     // Each LIVE session may open a limited number of new positions; exits are never capped.
-    if (this.d.mode === 'LIVE') this.entryAllowance = this.d.liveMaxEntries ?? null;
+    if (this.d.mode === 'LIVE') { this.entryAllowance = this.d.liveMaxEntries ?? null; this.rentSwept = false; }
     const on = STRATEGY_IDS.filter(id => this.strategies[id].enabled).join(' + ') || 'none';
     this.event('SYSTEM', this.d.mode === 'PAPER' ? `TEST started: scanner ON, paper execution ENABLED (strategies: ${on}) — no signature will ever be requested`
       : `LIVE session started: scanner ON, execution ENABLED (strategies: ${on}) — ` + (this.localKey
@@ -369,6 +372,11 @@ export class DeskEngine {
     this.event('SCANNING', 'Scan started', { detail: { mode: d.mode } });
     this.currentScanAt = started; this.message = null; this.entryNotes.clear();
     await this.syncWallet();
+    if (this.localKey && !this.rentSwept && !stopped()) {
+      this.rentSwept = true;
+      const mints = [...new Set(this.books().flatMap(b => b.ledger.state.entries.filter(e => e.side === 'BUY' && e.status === 'CONFIRMED').map(e => e.mint)))].filter(m => !this.heldBy(m));
+      this.orders = this.orders.then(() => this.reclaimRent(mints)).catch(() => undefined);
+    }
     const books = this.books();
     if (d.mode === 'LIVE' && !books.length) { this.message = 'Connect Phantom to scan in LIVE mode'; this.event('WAITING', this.message); return; }
     if (this.solUsd) for (const b of books) b.ledger.fundPaper(b.p.capitalUsd, this.solUsd);
@@ -772,8 +780,32 @@ export class DeskEngine {
   /** Orders are serialized across strategies; resolves to the reject code, or null when the order was filled. */
   private execute(side: 'BUY' | 'SELL', t: ExecTarget, ledger: DeskLedger, stopped: () => boolean, probe = false): Promise<string | null> {
     const run = this.orders.then(() => this.executeNow(side, t, ledger, stopped, probe));
-    this.orders = run.catch(() => undefined);
+    // After a full exit the token account is empty: with the local key its rent goes back to the wallet right away.
+    const next = run.then(code => side === 'SELL' && code === null && this.localKey ? this.reclaimRent([t.mint]) : undefined);
+    this.orders = next.catch(() => undefined);
     return run;
+  }
+
+  /**
+   * LIVE with the local key: closes the wallet's empty token accounts for these desk-traded mints and credits the rent
+   * to the SELL that charged it. Never throws; a failure leaves the rent for the next session's sweep.
+   */
+  private async reclaimRent(mints: string[]): Promise<void> {
+    const wallet = this.d.wallet(), solUsd = this.solUsd, sender = this.d.sender;
+    if (!mints.length || !wallet?.signer || !sender || !solUsd || this.d.mode !== 'LIVE') return;
+    try {
+      const r = await requestScope.run({ category: 'execution' }, () => reclaimRent({ rpc: this.d.rpc, sender, owner: wallet.owner, signer: wallet.signer!, mints }));
+      if (!r) return;
+      const share = r.feeLamports / BigInt(r.accounts.length);
+      for (const a of r.accounts) {
+        const ledger = this.books().map(b => b.ledger).find(l => l.state.entries.some(e => e.mint === a.mint && e.side === 'SELL')) ?? null;
+        ledger?.rentReclaimed({ mint: a.mint, lamports: BigInt(a.lamports), feeLamports: share, signature: r.signature, solUsd });
+      }
+      for (const b of this.books()) await b.ledger.save();
+      this.event('SYSTEM', `Account rent reclaimed: ${sol(r.reclaimedLamports).toFixed(6)} SOL from ${r.accounts.length} empty token account(s), fee ${r.feeLamports} lamports (${r.signature})`);
+    } catch (error) {
+      this.event('WAITING', `Account rent not reclaimed now (retried at the next session start): ${errorMessage(error)}`);
+    }
   }
 
   private async executeNow(side: 'BUY' | 'SELL', t: ExecTarget,
@@ -871,13 +903,19 @@ export class DeskEngine {
     const simulated = buy ? guard.lastSimulation.solDelta : null;
     const solDelta = buy ? (simulated !== null && -simulated >= BigInt(q.inAmount) ? simulated : -(BigInt(q.inAmount) + fee + o.rent)) : BigInt(q.outAmount) - fee;
     const rent = buy ? (-solDelta - BigInt(q.inAmount) - fee > o.rent ? -solDelta - BigInt(q.inAmount) - fee : o.rent) : 0n;
-    const pre = guard.lastPreflight;
+    const pre = guard.lastPreflight, held = buy ? null : ledger.position(t.mint);
     if (pre) { pre.outcome = 'PAPER_FILLED'; pre.signature = 'NOT_REQUESTED_TEST'; if (!buy) pre.simulation = { ...pre.simulation, status: guard.lastSimulation.status, detail: guard.lastSimulation.detail }; }
     this.event('SUBMITTED', `TEST — no signature requested, nothing submitted; paper execution recorded (${t.strategy})`, ctx);
     const row = ledger.book({ side, mint: t.mint, symbol: t.symbol, decimals: t.decimals, pairAddress: t.pairAddress, inAmountRaw: BigInt(q.inAmount),
       outAmountRaw: buy ? tokens : BigInt(q.outAmount), solDeltaLamports: solDelta, feeLamports: fee, rentLamports: rent, router: 'Jupiter', route: o.route,
       routerFeeUsd: sol(o.routerFee) * solUsd, txSignature: null, solUsd, at: Date.now(), note, entry: t.entry });
     this.bookedEvents(side, t.strategy, row, ctx);
+    // As LIVE with the local key does: the emptied token account is closed and its rent returns (minus the base fee).
+    const heldRent = held ? BigInt(held.rentLamports) : 0n, ata = heldRent < TOKEN_ACCOUNT_RENT_LAMPORTS ? heldRent : TOKEN_ACCOUNT_RENT_LAMPORTS;
+    if (ata > BASE_FEE_LAMPORTS) {
+      ledger.rentReclaimed({ mint: t.mint, lamports: ata, feeLamports: BASE_FEE_LAMPORTS, signature: null, solUsd });
+      this.event('SYSTEM', `TEST — token account closed on paper: ${sol(ata).toFixed(6)} SOL rent returned (fee ${BASE_FEE_LAMPORTS} lamports)`, ctx);
+    }
   }
 
   private bookedEvents(side: 'BUY' | 'SELL', id: StrategyId, row: ReturnType<DeskLedger['book']>, ctx: { mint: string; symbol: string | null }): void {
