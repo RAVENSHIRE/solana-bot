@@ -492,7 +492,8 @@ export class DeskEngine {
     const d = this.d;
     const launchDue = list.filter(s => s.tier === 'TRENDING' && this.deep.get(s.found.mint)?.onchain.holders &&
       (!this.launches.has(s.found.mint) || (this.launches.get(s.found.mint)!.value === null && now - this.launches.get(s.found.mint)!.at > 600_000)))
-      .sort((a, b) => (b.metrics.volume5mUsd ?? 0) - (a.metrics.volume5mUsd ?? 0)).slice(0, 2);
+      // A token a strategy already holds cannot be bought by FAIR: its history is checked after the others (rate-limited).
+      .sort((a, b) => Number(!!this.heldBy(a.found.mint)) - Number(!!this.heldBy(b.found.mint)) || (b.metrics.volume5mUsd ?? 0) - (a.metrics.volume5mUsd ?? 0)).slice(0, 2);
     for (const s of launchDue) {
       if (budget?.aborted) return;
       const h = this.deep.get(s.found.mint)!.onchain.holders!;
