@@ -24,6 +24,7 @@ import { DeskLedger } from '../src/desk/ledger';
 import { DeskEngine } from '../src/desk/engine';
 import { crashCheck, exitReason, scaleAdvice, strategyStats } from '../src/desk/strategies';
 import { replayExit, sizedReturn } from '../src/desk/replay';
+import { signals, simulatePool, summarize, type EntryRule, type PoolSeries } from '../src/desk/backtest';
 import { GraduationFeed } from '../src/desk/migrations';
 import { localKeySigner } from '../src/desk/local-signer';
 import { reclaimRent } from '../src/desk/rent';
@@ -614,6 +615,28 @@ test('replay: pessimistic minute-candle exits and constant-product size impact',
   // $2 on a $12.8K reserve barely moves the price; $10K into the same pool loses even on a +110% move.
   assert.ok(Math.abs(sizedReturn(2, 1, 2.1, 12_800, 1) - 1.1) < 0.001);
   assert.ok(sizedReturn(10_000, 1, 2.1, 12_800, 1) < 0);
+});
+
+test('backtest: minute signals use the trailing five minutes; trades pay impact, fees and costs; re-entry waits for the cooldown', () => {
+  const t0 = Date.UTC(2026, 8, 30, 0, 0), m = 60_000;
+  // Flat for 6 minutes, +50% in one minute on $30K volume, then +150% over 3 minutes, back to +20%, then a second pump.
+  const closes = [1, 1, 1, 1, 1, 1, 1.5, 1.8, 2.2, 2.5, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.9, 2.0, 2.0, 2.0];
+  const candles = closes.map((c, i) => ({ t: t0 + i * m, o: i ? closes[i - 1]! : 1, h: Math.max(c, i ? closes[i - 1]! : 1), l: Math.min(c, i ? closes[i - 1]! : 1), c, v: i === 6 || i === 26 ? 30_000 : 1_000 }));
+  const s: PoolSeries = { mint: 'M', symbol: 'M', pool: 'P', createdAt: t0, supply: 1e5, liquidityRefUsd: 40_000, priceRef: 1, candles };
+  const e: EntryRule = { maxPoolAgeMin: 60, minChange5mPct: 10, maxChange5mPct: 200, minVolume5mUsd: 20_000, minLiquidityUsd: 10_000, minLiquidityToMarketCap: 0.03,
+    maxMarketCapUsd: Infinity, pullbackPct: 0, pullbackWindowMin: 0 };
+  const sig = signals(s, e);
+  assert.equal(sig[0]!.at, t0 + 7 * m, 'the +50% minute closes at 00:07'); assert.ok(Math.abs(sig[0]!.change5mPct - 50) < 1e-9);
+  assert.equal(signals(s, { ...e, maxPoolAgeMin: 5 }).length, 0, 'too old');
+  const exit = { takeProfitPct: 50, stopLossPct: 20, maxHoldMin: 30, trailing: null, giveback: null };
+  const costs = { sizeUsd: 2, venueFeePct: 0.3, fixedUsd: 0.02, stopSlipPct: 3 };
+  const trades = simulatePool(s, e, exit, costs, 10);
+  assert.equal(trades.length, 2, 'take profit, then a new signal after the 10-minute cooldown');
+  assert.equal(trades[0]!.reason, 'TAKE_PROFIT'); assert.ok(trades[0]!.returnPct < 50 && trades[0]!.returnPct > 45, 'fees, impact and fixed costs are paid');
+  assert.ok(trades[1]!.entryAt >= trades[0]!.exitAt + 10 * m);
+  const sum = summarize(trades);
+  assert.equal(sum.trades, 2); assert.ok(Math.abs(sum.totalUsd - trades.reduce((a, x) => a + x.pnlUsd, 0)) < 1e-12);
+  assert.equal(simulatePool(s, e, exit, costs, 30).length, 1, 'a longer cooldown skips the second pump');
 });
 
 test('every pump.fun graduation is discovered from the chain, even when no listing or new-pool page shows it', async () => {

@@ -13,7 +13,7 @@ import { Connection, type ConfirmedSignatureInfo } from '@solana/web3.js';
 import { CRASH_DEFAULTS, CRASH_ENTRY, type ExitRules } from '../desk/config';
 import { graduatedMint, migrationTx, PUMP_MIGRATION_AUTHORITY } from '../desk/migrations';
 import { deskEnvironment } from '../desk/runtime';
-import { signals, simulatePool, summarize, type Costs, type EntryRule, type PoolSeries, type SimTrade, type Summary, type VCandle } from '../desk/backtest';
+import { signals, simulatePool, summarize, type Costs, type EntryRule, type PoolSeries, type Signal, type SimTrade, type Summary, type VCandle } from '../desk/backtest';
 
 const arg = (name: string) => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : undefined; };
 const hours = Number(arg('hours') ?? 18);
@@ -132,8 +132,8 @@ function entryGrid(): EntryRule[] {
 function exitGrid(): ExitRules[] {
   const out: ExitRules[] = [];
   for (const stopLossPct of [10, 15, 20, 25, 35, 50]) for (const takeProfitPct of [30, 50, 100, 200, Infinity])
-    for (const trailing of [null, { activationPct: 20, stopPct: 15 }, { activationPct: 30, stopPct: 20 }, { activationPct: 50, stopPct: 35 }])
-      for (const giveback of [null, { lockPeakPct: 40, points: 15 }]) for (const maxHoldMin of [4, 10, 20, 45])
+    for (const trailing of [null, { activationPct: 20, stopPct: 15 }, { activationPct: 30, stopPct: 20 }, { activationPct: 50, stopPct: 35 }, { activationPct: 100, stopPct: 40 }])
+      for (const giveback of [null, { lockPeakPct: 40, points: 15 }]) for (const maxHoldMin of [4, 10, 20, 45, 90])
         out.push({ takeProfitPct, stopLossPct, maxHoldMin, trailing, giveback });
   return out;
 }
@@ -143,8 +143,14 @@ const describeExit = (x: ExitRules) => `SL ${x.stopLossPct}% · TP ${Number.isFi
   `${x.trailing ? ` · trail ${x.trailing.stopPct}% after +${x.trailing.activationPct}%` : ''}${x.giveback ? ` · lock ${x.giveback.points}pts after +${x.giveback.lockPeakPct}%` : ''} · ${x.maxHoldMin}m`;
 
 interface Result { entry: EntryRule; exit: ExitRules; all: Summary; first: Summary; second: Summary; score: number; trades: SimTrade[] }
+const signalCache = new Map<string, Map<string, Signal[]>>();
 function run(series: PoolSeries[], split: number, entry: EntryRule, exit: ExitRules, costs: Costs): Result {
-  const trades = series.flatMap(s => simulatePool(s, entry, exit, costs, c.reentryMin));
+  const key = JSON.stringify(entry), cache = signalCache.get(key) ?? new Map<string, Signal[]>();
+  signalCache.set(key, cache);
+  const trades = series.flatMap(s => {
+    if (!cache.has(s.pool)) cache.set(s.pool, signals(s, entry));
+    return simulatePool(s, entry, exit, costs, c.reentryMin, undefined, cache.get(s.pool));
+  });
   const first = summarize(trades.filter(t => t.entryAt < split)), second = summarize(trades.filter(t => t.entryAt >= split));
   // Robust: judged by the weaker half, and only with enough trades in both.
   const score = first.trades >= 8 && second.trades >= 8 ? Math.min(first.meanPct, second.meanPct) : -Infinity;
@@ -163,7 +169,7 @@ async function main(): Promise<void> {
   // A CRASH signal needs ≥ $20K in five minutes, so a token below that in 24 h could never have signalled (no survivorship filter).
   const active = info.filter(p => p.volume24hUsd >= CRASH_ENTRY.minVolume5mUsd && p.createdAt >= Date.now() - (hours + 1) * 3_600_000);
   console.log(`pools: ${info.length} graduated tokens with a pool, ${active.length} with ≥ $${CRASH_ENTRY.minVolume5mUsd / 1000}K 24h volume; loading candles…`);
-  const spanMin = 60 + 50;
+  const spanMin = 60 + 95;
   const series: PoolSeries[] = [];
   for (const [i, p] of active.entries()) {
     const k = await candles(p, spanMin);

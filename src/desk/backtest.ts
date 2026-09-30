@@ -74,10 +74,11 @@ function entryAfter(s: PoolSeries, sig: Signal, e: EntryRule): { at: number; pri
 }
 
 /** All trades in one pool: one position at a time, re-entry only after `cooldownMin` past the previous exit. */
-export function simulatePool(s: PoolSeries, e: EntryRule, exit: ExitRules, costs: Costs, cooldownMin: number, horizonMs = exit.maxHoldMin * MINUTE + MINUTE): SimTrade[] {
+export function simulatePool(s: PoolSeries, e: EntryRule, exit: ExitRules, costs: Costs, cooldownMin: number, horizonMs = exit.maxHoldMin * MINUTE + MINUTE,
+  precomputed?: Signal[]): SimTrade[] {
   const trades: SimTrade[] = [];
   let free = 0;
-  for (const sig of signals(s, e)) {
+  for (const sig of precomputed ?? signals(s, e)) {
     if (sig.at < free) continue;
     const entry = entryAfter(s, sig, e);
     if (!entry || entry.at < free) continue;
