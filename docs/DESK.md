@@ -87,6 +87,19 @@ npx tsx src/scripts/desk-replay.ts --mint <MINT> --entry-at <ISO|ms> --entry-pri
 
 The replay recomputes each trade from GeckoTerminal minute candles under several exit rules (current CRASH rules, no take profit, a 50 % runner, hold) and entry sizes, with a constant-product impact estimate from the pool's depth. Downloaded data is cached (`data-desk/replay-cache`), so reruns give the same numbers. Minute candles hide the order of moves inside a minute; the replay assumes losses first, so it can understate what the 2-second exit loop achieves.
 
+### Backtest on every graduation
+
+```
+npm run desk:backtest -- --hours 12 [--size 2] [--fixed-usd 0.02] [--mints A,B] [--out backtest.json]
+```
+
+Reads every pump.fun graduation of the last hours from the chain (the whole universe, not only tokens that pumped), each pool's depth and 24 h volume (DexScreener) and its minute candles (GeckoTerminal), then applies the CRASH entry rule minute by minute and replays each entry. Every trade pays sized impact, 0.3 % venue fee per side, fixed network costs and a 3 % slippage on stop-type exits. It searches entry rules (pool age, 5-minute move, volume, market cap, pullback entry) and exit rules (stop, take profit, trailing, profit lock, hold time) and ranks them by the weaker of two time halves, so a rule that only worked in one stretch does not win. `--mints` prints, for named tokens, what the pool did and when the current and best rules would have traded. Buy/sell ratio and holder concentration are not in candles and are not modelled. Only `RPC_ENDPOINTS` is read from `.env` (through the desk allowlist); everything downloaded is cached in `data-desk/backtest-cache`.
+
+### Costs per trade (and what the desk does about them)
+
+- **Token-account rent** (~0.0015–0.002 SOL, about 9 % of a $2 position) leaves the wallet with every first buy of a token. With the local key the desk closes the emptied account right after the exit and the rent comes back; a LIVE session also closes empty accounts left by earlier desk trades once, after its first scan. With Phantom the accounts stay open (closing them would need another approval per exit). The ledger charges the rent to the trade until it is reclaimed, so net PnL matches the wallet. TEST closes accounts on paper.
+- **Exit priority fee**: at most 1 % of what the sell returns (at least 50,000 lamports, never above `MAX_PRIORITY_FEE_LAMPORTS`). Entries stay bounded by the drag budget.
+
 ### TEST sleeve cycles (no manual reset needed)
 
 When a TEST sleeve can no longer fund an entry and holds no open position, the desk archives it as a completed cycle (`ledger-PAPER[-CRASH].cycle-<time>.json`) and re-funds it at its planned capital. Trades, realized PnL, stats, the scale ladder, the ledger view and re-entry cooldowns all continue across cycles, also after a restart. LIVE never re-funds anything: the wallet is the budget.
