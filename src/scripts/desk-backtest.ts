@@ -127,7 +127,7 @@ async function candles(p: PoolInfo, spanMin: number, latest = false): Promise<VC
 
 const current: EntryRule = { maxPoolAgeMin: CRASH_ENTRY.maxPoolAgeMin, minChange5mPct: CRASH_ENTRY.minPriceChange5mPct, maxChange5mPct: CRASH_ENTRY.maxPriceChange5mPct,
   minVolume5mUsd: CRASH_ENTRY.minVolume5mUsd, minLiquidityUsd: CRASH_ENTRY.minLiquidityUsd, minLiquidityToMarketCap: CRASH_ENTRY.minLiquidityToMarketCap,
-  maxMarketCapUsd: Infinity, pullbackPct: 0, pullbackWindowMin: 0 };
+  maxMarketCapUsd: CRASH_ENTRY.maxMarketCapUsd, pullbackPct: 0, pullbackWindowMin: 0 };
 const c = CRASH_DEFAULTS;
 const quick: ExitRules = { takeProfitPct: c.takeProfitPct, stopLossPct: c.stopLossPct, maxHoldMin: c.maxHoldMin, trailing: null, giveback: { lockPeakPct: c.lockPeakPct, points: c.givebackPts } };
 const ride: ExitRules = { takeProfitPct: Infinity, stopLossPct: c.stopLossPct, maxHoldMin: c.rideMaxHoldMin, trailing: { activationPct: c.rideTrailActivationPct, stopPct: c.rideTrailStopPct }, giveback: null };

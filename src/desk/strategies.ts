@@ -22,6 +22,7 @@ function marketChecks(m: CandidateMetrics): GateResult[] {
       ? { key: 'crashLiquidity', label: 'AMM liquidity', status: 'FAIL', actual: 'bonding curve — no AMM pool yet', required: `≥ ${usd(r.minLiquidityUsd)}`, blocking: true }
       : check('crashLiquidity', 'AMM liquidity', m.liquidityUsd, v => v >= r.minLiquidityUsd, usd(m.liquidityUsd), `≥ ${usd(r.minLiquidityUsd)}`),
     check('crashLiquidityRatio', 'Liquidity vs market cap', ratio, v => v >= r.minLiquidityToMarketCap, pct(ratio === null ? null : ratio * 100), `≥ ${r.minLiquidityToMarketCap * 100}%`),
+    ...(Number.isFinite(r.maxMarketCapUsd) ? [check('crashMcap', 'Market cap', m.marketCapUsd, v => v <= r.maxMarketCapUsd, usd(m.marketCapUsd), `≤ ${usd(r.maxMarketCapUsd)}`)] : []),
   ];
 }
 

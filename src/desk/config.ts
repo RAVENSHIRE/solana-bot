@@ -105,6 +105,8 @@ export const CRASH_ENTRY = Object.freeze({
   minBuys5m: 40,
   minLiquidityUsd: 10_000,
   minLiquidityToMarketCap: 0.03,
+  /** Above this the early part of the move is gone; the backtest keeps this where entries still paid. */
+  maxMarketCapUsd: Number.POSITIVE_INFINITY,
   maxTop10WalletPct: 50,
   maxLargestWalletPct: 15,
 });
