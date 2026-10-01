@@ -51,14 +51,26 @@ export async function discover(dex: DexScreenerClient, gecko: GeckoTerminalClien
 }
 
 /** One observed pool per token: deepest supported liquidity, else the active bonding curve (which has no liquidity figure). */
+/** A pool quoted in another token (COMMIE/AMC on 1 Oct: $116K) counts when it holds real liquidity. */
+export const OTHER_QUOTE = Object.freeze({ minLiquidityUsd: 20_000, overStandard: 5 });
 export function selectPair(pairs: DexPair[], mint: string, now: number): DexPair | null {
-  const eligible = pairs.filter(p => p.baseToken.address === mint && isQuote(p.quoteToken.address) &&
-    now - p.meta.receivedAt <= DESK.priceMaxAgeMs && now >= p.meta.receivedAt && p.priceUsd !== null);
+  const priced = pairs.filter(p => p.baseToken.address === mint && now - p.meta.receivedAt <= DESK.priceMaxAgeMs && now >= p.meta.receivedAt && p.priceUsd !== null);
   const rank = (p: DexPair) => [p.liquidity?.usd ?? -1, p.volume?.h1 ?? 0, p.pairAddress] as const;
-  return eligible.sort((a, b) => {
+  const best = (list: DexPair[]) => list.sort((a, b) => {
     const [la, va, pa] = rank(a), [lb, vb, pb] = rank(b);
     return lb - la || vb - va || pa.localeCompare(pb);
   })[0] ?? null;
+  const standard = best(priced.filter(p => isQuote(p.quoteToken.address)));
+  // Jupiter routes through any pool; the market's real price and volume are where its liquidity is.
+  const other = best(priced.filter(p => !isQuote(p.quoteToken.address) && (p.liquidity?.usd ?? 0) >= OTHER_QUOTE.minLiquidityUsd));
+  return other && (!standard || (other.liquidity?.usd ?? 0) >= OTHER_QUOTE.overStandard * (standard.liquidity?.usd ?? 0)) ? other : standard;
+}
+
+/** When the token appeared, from all its pools: the oldest one; and its first AMM (non-curve) pool. */
+export function tokenTimes(pairs: DexPair[], mint: string): { createdAt: number | null; firstPoolAt: number | null } {
+  const own = pairs.filter(p => p.baseToken.address === mint && p.pairCreatedAt);
+  const min = (list: DexPair[]) => list.length ? Math.min(...list.map(p => p.pairCreatedAt!)) : null;
+  return { createdAt: min(own), firstPoolAt: min(own.filter(p => p.dexId !== 'pumpfun')) };
 }
 
 export function migrationOf(pair: DexPair): Migration {
@@ -67,10 +79,16 @@ export function migrationOf(pair: DexPair): Migration {
   return pair.dexId ? 'AMM' : 'UNKNOWN';
 }
 
-export function pairMetrics(pair: DexPair, now: number): CandidateMetrics {
+export function pairMetrics(pair: DexPair, now: number, times: { createdAt?: number | null; firstPoolAt?: number | null } = {}): CandidateMetrics {
   const buys = pair.txns?.m5?.buys ?? null, sells = pair.txns?.m5?.sells ?? null;
   const v5 = pair.volume?.m5 ?? null, v1h = pair.volume?.h1 ?? null;
+  const age = (t: number | null | undefined) => t ? Math.max(0, (now - t) / 60_000) : null;
+  const createdAt = times.createdAt ?? pair.pairCreatedAt ?? null;
+  const firstPoolAt = times.firstPoolAt !== undefined ? times.firstPoolAt : pair.dexId === 'pumpfun' ? null : pair.pairCreatedAt ?? null;
   return {
+    tokenAgeMin: age(createdAt), firstPoolAgeMin: age(firstPoolAt),
+    priceChange6hPct: pair.priceChange?.h6 ?? null, priceChange24hPct: pair.priceChange?.h24 ?? null, volume24hUsd: pair.volume?.h24 ?? null,
+    buys1h: pair.txns?.h1?.buys ?? null, sells1h: pair.txns?.h1?.sells ?? null, quote: pair.quoteToken.symbol ?? null,
     priceUsd: pair.priceUsd, marketCapUsd: pair.marketCap ?? pair.fdv, marketCapBasis: pair.marketCap !== null ? 'MARKET_CAP' : pair.fdv !== null ? 'FDV' : null,
     liquidityUsd: pair.liquidity?.usd ?? null, poolAgeMin: pair.pairCreatedAt ? Math.max(0, (now - pair.pairCreatedAt) / 60_000) : null,
     volume5mUsd: v5, volume1hUsd: v1h, buys5m: buys, sells5m: sells,

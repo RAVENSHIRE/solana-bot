@@ -45,7 +45,7 @@ Native reserve (0.003 SOL) and max drag (1.5 %) are the project's existing micro
 | | FAIR (fair launch) | CRASH |
 | --- | --- | --- |
 | Idea | Fair-launch trending tokens, every hard gate, momentum in two consecutive scans | The early, well-traded part of a young pool's first move; trades of up to 10 minutes targeting +100 % |
-| Entry | QUALIFIED status (below) | One scan: pool ≤ 15 min, 5m price +10 % to +30 %, 5m volume ≥ $50K, market cap ≤ $300K, buy/sell ≥ 1.3, ≥ 40 buys, AMM liquidity ≥ $10K and ≥ 3 % of market cap, mint + freeze authority revoked, no dangerous extensions, top-10 ≤ 50 % and largest wallet ≤ 15 % when known, liquidity not dropping. Launch fairness is shown but **not required** |
+| Entry | QUALIFIED status (below) | One scan: graduated ≤ 15 min ago (age of the token's **first** AMM pool, not of whichever pool is deepest now), 5m price +10 % to +30 %, 5m volume ≥ $50K, market cap ≤ $300K, buy/sell ≥ 1.3, ≥ 40 buys, AMM liquidity ≥ $10K and ≥ 3 % of market cap, mint + freeze authority revoked, no dangerous extensions, top-10 ≤ 50 % and largest wallet ≤ 15 % when known, liquidity not dropping. Launch fairness is shown but **not required** |
 | Exits | `RS_*` rules: stop loss, take profit, trailing stop, max hold | `CRASH_EXIT_MODE=quick` (default): take profit +100 % (= $2 unrealized on a $2 entry) · stop loss −35 % · time stop 10 min · no profit lock unless `CRASH_LOCK_PEAK_PCT` is set. `CRASH_EXIT_MODE=ride`: no take profit · trailing stop 35 % from the peak once +50 % was reached · stop loss −35 % · time stop 60 min |
 | Re-entry after an exit | 30 min | `CRASH_REENTRY_MIN` (10 min) — a fresh signal only |
 | Checked | every 5 s | every 2 s |
@@ -187,19 +187,50 @@ The signal is the quality of the launch itself. Only a few of the ~50 pump.fun l
   | X or website shows another CA | score 0 (IMPERSONATOR) |
 
 - Clones are marked **CLONE** and never shortlisted: a later launch that copies an earlier one's X account, website or name (on the first live run KEN appeared 3× and ROPAD 2×). If the project's own X account posts the clone's CA, the clone is the real token and the earlier "original" an impersonator.
-- From a score of 6 the launch is shortlisted: it appears under *Launch radar* with a **CA** column (✓ on X, ✓ on site, ✗ FAKE, not yet), an alert with a FOMO link goes to your phone, and the token is analysed like any candidate.
+- **X reach** comes from the same X profile page (no key needed): followers, account creation date, post count, blue check, and the views, likes and replies of the recent posts. The more followers, the higher the launch ranks:
+
+  | X reach | Points |
+  | --- | --- |
+  | Followers ≥ 10K / ≥ 2K / ≥ 500 / ≥ 100 | +4 / +3 / +2 / +1 |
+  | Followers below 25 | −1 |
+  | Best own post in the last 3 days ≥ 50K / ≥ 10K / ≥ 2K views | +3 / +2 / +1 |
+  | Account less than a day old with under 500 followers | −1 |
+  | The linked X account does not exist | −3 |
+
+  A linked *post* (x.com/…/status/…) counts too: its author's page is read for reach and for this CA (Ansemmas on 1 Oct: a 5-day-old account, 401 followers, a 21.7K-view post; it went from $63K to $1.03M).
+- **Claude review** (with `ANTHROPIC_API_KEY`): every launch that reaches the shortlist score is read by Claude — token description, the website's visible text, the X bio and recent posts with their views, the CA check and the insiders — and rated STRONG (+3), OK (+1), WEAK (−1) or **SCAM** (never bought). It also scores idea and professionalism (0–10), says whether the material looks AI-made, and lists concrete scam signs (another CA, drainer warnings, "send SOL" giveaways, impersonation). One low-effort request per launch, at most 20 per hour (`DESK_AI_REVIEWS_PER_HOUR`; `DESK_AI_REVIEW=off` turns it off). At about $0.01–0.03 per review that is at most ~$0.60 an hour while the radar is busy. Everything sent is public.
+- **X feed** (with `X_BEARER_TOKEN`): every 30 s the desk searches recent X posts for token launches and CAs (`DESK_X_QUERY` overrides the search; the default looks for "ca:", "pump.fun", "contract address", "just launched", "now live" on Solana, no reposts). Each post that names a mint becomes a signal with the author's followers and the post's impressions:
+  - the project's own account posting this CA confirms it (+3);
+  - another account posting it adds +1, or +2 with ≥ 10K views or followers;
+  - a mint the radar did not see launch (older, or from another launchpad) is scanned like any candidate (source *X feed*).
+
+  The X API's Basic plan allows 60 searches per 15 minutes; the desk uses 30 and waits out a rate limit. Without a token the feed is off and the radar still reads X profile pages.
+- **Rug defence** (`launch-risk.ts`). The two LAUNCH trades of 1 Oct that dumped at graduation:
+
+  | | Insiders at creation | Peak | After graduating |
+  | --- | --- | --- | --- |
+  | ETF (5EvrB7…pump) | dev 26.6 % + 5 wallets = 40 % | +308 % | −84 % |
+  | Potato (GicwGn7X…) | dev 5.1 % + 5 wallets = 15 % | +220 % | −90 %, X account deleted afterwards |
+
+  A bundled creation alone does not mark a rug (ETF was the best trade). What both had in common is the insiders — the creator and every wallet that bought in the creation slot — selling into the migration, when Jupiter cannot route the token for a minute or two. So:
+  - the insiders are read from the chain seconds after the launch is seen and shown in the radar; a launch where they hold ≥ 50 % is never bought;
+  - a held position sells as soon as the insiders sold 25 % of their bag and at least 1 % of supply (**RUG insiders sold**), checked every 8 s;
+  - a position bought on the curve sells **before graduation** when the curve is 90 % full and the insiders still hold ≥ 8 % (**PRE_GRADUATION**); insiders with a small bag are ridden through graduation;
+  - a held launch's X account is re-read every minute: gone on two reads in a row after it existed → **RUG**, sold;
+  - every rug is remembered in `data-desk/rugs.json` with its creator, X account and website: a later launch by the same creator, account or site scores 0 (**RUG HISTORY**). Potato is on the list from the start.
+- From a score of 6 the launch is shortlisted: it appears under *Launch radar* (ranked by score, then followers) with columns for the **CA** (✓ on X, ✓ on site, ✗ FAKE, ✗ RUG, not yet), **X reach** (followers, best post views, account age, X-feed posts), **Insiders** and **Claude**'s verdict, an alert with a FOMO link goes to your phone, and the token is analysed like any candidate. A launch exposed later (impersonator, rug) is reported once and alerted.
 
 **LAUNCH** (built-in strategy, ON in TEST, OFF in LIVE) buys a shortlisted launch:
 
 - **Entry** (all of these):
-  - from 1 minute after creation when the project's X account or website shows this CA, from 3 minutes otherwise, never after 12 minutes. Jupiter quotes new curve tokens 3–12 s after creation (measured on 1 Oct), so the evidence sets the window, not routing;
-  - never an impersonator (X or website shows another CA);
-  - market cap $5K–$40K;
-  - 5m volume ≥ $1K and ≥ 10 buys;
+  - never an impersonator, a rug (deleted X account, rug history, SCAM review) or a launch whose insiders hold ≥ 50 %; insiders read before the entry;
+  - **on the curve**: from 1 minute after creation when the project's X account or website shows this CA, from 3 minutes otherwise, never after 12 minutes. Jupiter quotes new curve tokens 3–12 s after creation (measured on 1 Oct), so the evidence sets the window, not routing; market cap $5K–$40K; 5m volume ≥ $1K and ≥ 10 buys;
+  - **after graduation** (the runners that outgrow the curve window — Ansemmas, WIRED): up to 90 minutes after creation, market cap $40K–$400K, score ≥ 9, X reach of ≥ 300 followers or a 5,000-view post, 5m volume ≥ $10K and ≥ 40 buys;
   - top-10 wallets ≤ 35 %, largest wallet ≤ 12 %, developer ≤ 10 % when known;
   - mint and freeze authority revoked;
   - not a copycat.
 - **Exits:**
+  - the rug exits above (insiders selling, before graduation while insiders hold a bag, X account deleted);
   - stop −40 % (not in the first 60 s);
   - trailing stop 35 % once 2× is reached;
   - max hold 4 h;
@@ -319,6 +350,19 @@ When a TEST sleeve can no longer fund an entry and holds no open position, the d
 
 Each candidate shows its holder count and the share of the 10 largest wallets; its detail view lists the largest holders (from the 20 largest token accounts) with their share of supply, marked **wallet**, **pool / curve / program** (off-curve owners such as the PumpSwap vault or the bonding curve, which are excluded from concentration) or **DEV** (the pump.fun creator), each linked to Solscan, plus links to the token on FOMO and Solscan. The largest holders are refreshed every 3 minutes for the 8 most active candidates per scan (standard RPC calls); the holder count every 10 minutes for 3 per scan, through the DAS `getTokenAccounts` method (Helius and compatible RPCs, up to 2,000 owners, shown as "2,000+" beyond). An RPC without DAS shows the count as "?" with the reason.
 
+### Candidates
+
+The *Candidates* table separates the scan from the strategies. The scan columns are market data, FOMO-style:
+
+- **Age** since the token appeared (its pump.fun creation, or its oldest pool), never the age of whichever pool is deepest now; below it, *grad.* = time since its first AMM pool (graduation), or *on curve*;
+- market cap, liquidity (with the quote token when it is not SOL/USD), volume 5m and 1h, transactions in the last hour (buys / sells), price change 5m, 1h, 6h, buy/sell ratio, holders, X account and followers, mint/freeze authority, risk flags.
+
+The **Strategies** column shows every *enabled* strategy's verdict: ✓ entry-ready, or the first rule it misses. A strategy that is off says nothing, and its rules no longer appear as the token's status in the telemetry (FAIR's buy/sell ≥ 1.4 and fair-launch gates were shown as "FILTERED" for every token while FAIR was off).
+
+Pools quoted in another token count when they hold the real liquidity: at least $20K and 5× the best SOL/USDC/USDT pool (COMMIE on 1 Oct traded against AMC with $116K; its SOL pools held $6K, so the scan dropped it).
+
+The copycat guard (an older same-name token at least 3× bigger) now applies only when that namesake is at most 3 days older or still the busier market, and never to a launch whose own X account posted its CA. WIRED on 1 Oct was blocked by a quiet 5-day-old WIRED and then ran from $75K to $2.7M.
+
 ### Why a token was not entered
 
 Each candidate shows, per strategy, why this scan did not enter it: held by the other strategy, re-entry cooldown, the guard's last block and when it is retried, slots in use, or an unfundable sleeve. A candidate that was not re-assessed in the last completed scan is marked **STALE** and is never traded on; held tokens and the watchlist are always assessed first (up to 120 tokens per scan). Telemetry keeps separate windows for scanner outcomes and for signals, orders, positions and PnL, so executions never scroll out behind filter messages.
@@ -348,7 +392,7 @@ With TEST stopped, **RESET TEST** archives both paper ledgers and their cycles (
 
 ## X account data
 
-Without X API access every X metric stays UNVERIFIED. To enable it, put your own bearer token in `.env` as `X_BEARER_TOKEN`; it is read by the local server only. An X account older than the project is flagged (`SOCIAL AGE MISMATCH`), never rewarded.
+The launch radar reads X profile pages as x.com serves them to logged-out visitors (followers, account age, posts, views) without any key. For the other candidates, and for the X feed, put your own bearer token in `.env` as `X_BEARER_TOKEN`; it is read by the local server only. Without it those X metrics stay UNVERIFIED and the X feed is off. An X account older than the project is flagged (`SOCIAL AGE MISMATCH`), never rewarded.
 
 ## Headless TEST run
 

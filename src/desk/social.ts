@@ -29,6 +29,8 @@ export interface WebsiteCheck {
   httpStatus: number | null; title: string | null; description: string | null; xHandles: string[]; detail: string;
   /** Every Solana address written on the page (and, if asked, its own scripts); `claimed`: the ones it presents as its token. */
   addresses: string[]; claimed: string[];
+  /** The page's visible text (scripts, styles and tags removed), first ~3,000 characters. */
+  text?: string | null;
 }
 
 // ---------------------------------------------------------------- Contract addresses on a page
@@ -105,7 +107,9 @@ export async function checkWebsite(raw: string | null, fetcher: typeof fetch = f
       let found = pageAddresses(html);
       // Client-rendered sites keep their contract address in their own script bundles (stashd.fun: ca:"3Bdwh…pump").
       if (o.scripts && !found.claimed.length) found = mergeAddresses(found, await siteScripts(url, html, o.scripts, fetcher, resolve));
-      return { url: url.toString(), status: 'AVAILABLE', httpStatus: res.status, title, description, xHandles, detail: `HTTP ${res.status}`, ...found };
+      const text = html.replace(/<(script|style|noscript|svg)[^>]*>[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#160;/g, ' ')
+        .replace(/&amp;/g, '&').replace(/&#x27;|&#39;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim().slice(0, 3_000) || null;
+      return { url: url.toString(), status: 'AVAILABLE', httpStatus: res.status, title, description, xHandles, detail: `HTTP ${res.status}`, ...found, text };
     } catch (error) {
       return { ...none, url: url.toString(), status: 'UNAVAILABLE', detail: (error as Error).name === 'AbortError' ? 'Timed out' : 'Connection failed' };
     } finally { clearTimeout(timer); }
@@ -203,11 +207,58 @@ export class XClient {
 
 // ---------------------------------------------------------------- X profile page (no API key)
 
+/** The account as x.com shows it to logged-out visitors. */
+export interface XProfile {
+  handle: string; name: string | null; createdAt: number | null; followers: number | null; following: number | null;
+  tweets: number | null; blueVerified: boolean | null; bio: string | null;
+}
+export interface XPost { id: string; author: string | null; at: number; text: string; views: number | null; likes: number; replies: number; reposts: number; quotes: number }
 export interface XPageCheck {
-  handle: string; status: 'READ' | 'NO_POSTS' | 'UNAVAILABLE'; detail: string;
-  /** Addresses in the account's recent posts as x.com serves them without login. */
+  handle: string;
+  /** NOT_FOUND: x.com says the account does not exist (deleted, renamed or suspended). */
+  status: 'READ' | 'NO_POSTS' | 'NOT_FOUND' | 'UNAVAILABLE'; detail: string;
+  profile?: XProfile | null; posts?: XPost[];
+  /** Addresses in the account's recent posts and bio. */
   addresses: string[]; claimed: string[];
 }
+
+const jsString = (raw: string) => { try { return JSON.parse(`"${raw}"`) as string; } catch { return raw; } };
+const int = (v: string | undefined) => v === undefined ? null : Number(v);
+
+/**
+ * Parses the profile page x.com serves without login. The page embeds the GraphQL results it rendered: the user
+ * (`core:{created_at_ms,name,screen_name}`, `relationship_counts:{followers,following}`, `tweet_counts`, `verification`)
+ * and the recent posts (`counts`, `details:{created_at_ms,full_text}`, `views:{count}`), pinned first.
+ */
+export function parseXPage(handle: string, html: string): Omit<XPageCheck, 'status' | 'detail'> & { found: boolean } {
+  const lower = handle.toLowerCase();
+  const userAt = html.search(new RegExp(`core:\\$R\\[\\d+\\]=\\{created_at_ms:\\d+,name:"(?:[^"\\\\]|\\\\.)*",screen_name:"${handle}"\\}`, 'i'));
+  let profile: XProfile | null = null;
+  if (userAt >= 0) {
+    const block = html.slice(userAt, userAt + 4_000);
+    const core = /created_at_ms:(\d+),name:"((?:[^"\\]|\\.)*)"/.exec(block);
+    const rel = /relationship_counts:\$R\[\d+\]=\{followers:(\d+),following:(\d+)\}/.exec(block);
+    const bio = /profile_bio:\$R\[\d+\]=\{description:"((?:[^"\\]|\\.)*)"/.exec(block);
+    const ver = /is_blue_verified:(!0|!1)/.exec(block);
+    profile = { handle, name: core ? jsString(core[2]!) : null, createdAt: int(core?.[1]), followers: int(rel?.[1]), following: int(rel?.[2]),
+      tweets: int(/tweet_counts:\$R\[\d+\]=\{tweets:(\d+)\}/.exec(block)?.[1]), blueVerified: ver ? ver[1] === '!0' : null, bio: bio ? jsString(bio[1]!) : null };
+  }
+  const posts: XPost[] = [];
+  const marks = [...html.matchAll(/entry_id:"tweet-(\d+)"/g)];
+  for (let i = 0; i < marks.length && posts.length < 20; i++) {
+    const seg = html.slice(i ? marks[i - 1]!.index! : 0, marks[i]!.index!);
+    const det = /created_at_ms:(\d+),display_text_range:\$R\[\d+\]=\[[^\]]*\],full_text:"((?:[^"\\]|\\.)*)"/.exec(seg);
+    if (!det) continue;
+    const counts = /counts:\$R\[\d+\]=\{bookmark_count:\d+,favorite_count:(\d+),quote_count:(\d+),reply_count:(\d+),retweet_count:(\d+)\}/.exec(seg);
+    const author = [...seg.matchAll(/screen_name:"([A-Za-z0-9_]{1,15})"/g)].map(m => m[1]!).find(Boolean) ?? null;
+    posts.push({ id: marks[i]![1]!, author, at: Number(det[1]), text: jsString(det[2]!).slice(0, 1_000), views: int(/views:\$R\[\d+\]=\{count:"(\d+)"\}/.exec(seg)?.[1]) ?? null,
+      likes: Number(counts?.[1] ?? 0), quotes: Number(counts?.[2] ?? 0), replies: Number(counts?.[3] ?? 0), reposts: Number(counts?.[4] ?? 0) });
+  }
+  const own = posts.filter(p => !p.author || p.author.toLowerCase() === lower);
+  const text = [profile?.bio ?? '', ...own.map(p => p.text)].join('\n');
+  return { handle, profile, posts, found: !!profile || posts.length > 0, ...(own.length || profile ? pageAddresses(text) : pageAddresses(html)) };
+}
+
 /**
  * The account's public profile page: x.com renders its recent posts (pinned first) into the page for logged-out
  * browsers, which is where a project posts "ca: …". Bounded in size and time; any failure is UNAVAILABLE, never an error.
@@ -219,10 +270,14 @@ export async function readXPage(handle: string, fetcher: typeof fetch = fetch): 
   try {
     const res = await fetcher(`https://x.com/${handle}`, { redirect: 'follow', signal: controller.signal, credentials: 'omit',
       headers: { Accept: 'text/html', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36' } });
+    const html = res.ok || res.status === 404 ? await boundedText(res, 2_000_000) : '';
+    if (res.status === 404 || /could not be found|Account suspended|profileStatus:"(?:NotFound|Suspended)"/.test(html))
+      return { handle, status: 'NOT_FOUND', detail: res.status === 404 ? 'x.com: this account does not exist' : 'x.com: account suspended or gone', profile: null, posts: [], ...none };
     if (!res.ok) return { handle, status: 'UNAVAILABLE', detail: `HTTP ${res.status}`, ...none };
-    const html = await boundedText(res, 2_000_000);
-    if (!/full_text|tweetText/.test(html)) return { handle, status: 'NO_POSTS', detail: 'No posts readable on the profile page', ...none };
-    return { handle, status: 'READ', detail: 'Profile page read', ...pageAddresses(html) };
+    const page = parseXPage(handle, html);
+    const { found: _found, ...rest } = page;
+    if (!page.posts!.length && !/full_text|tweetText/.test(html)) return { ...rest, status: 'NO_POSTS', detail: 'No posts readable on the profile page' };
+    return { ...rest, status: 'READ', detail: 'Profile page read' };
   } catch (error) {
     return { handle, status: 'UNAVAILABLE', detail: (error as Error).name === 'AbortError' ? 'Timed out' : 'Connection failed', ...none };
   } finally { clearTimeout(timer); }

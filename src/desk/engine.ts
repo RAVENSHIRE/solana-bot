@@ -21,7 +21,7 @@ import { atomicWriteFile } from '../utils/fs';
 import { DESK, LAUNCH_ENTRY, STRATEGY_IDS, strategyProfiles, type BuiltinStrategyId, type DeskCapital, type DeskOperational, type LiveSignerKind, type StrategyProfile } from './config';
 import { EventLog } from './events';
 import { DeskLedger, uiAmount, type LedgerState } from './ledger';
-import { discover, pairMetrics, selectPair, tierFor, type Discovered } from './discovery';
+import { discover, pairMetrics, selectPair, tierFor, tokenTimes, type Discovered } from './discovery';
 import { creatorHolding, gatherOnchain, holderCount, holders as readHolders, type Holders, type OnchainEvidence } from './onchain';
 import { launchCheck, type LaunchCheck } from './launch';
 import { GraduationFeed } from './migrations';
@@ -32,8 +32,14 @@ import { DeskGuard, DeskReject, PaperExecution, paperSigner } from './guard';
 import { crashCheck, crashMarketHint, launchEntryCheck, exitReason, exitRuleText, scaleAdvice, strategyStats } from './strategies';
 import type { Candidate, DeskEvent, DeskMode, DeskPosition, DeskStatus, Preflight, Stage, StrategyId, StrategyView, Tier } from './types';
 import type { Launch, LaunchSource } from './launches';
+import type { XFeed } from './xfeed';
+
+import { curveState, insiderExit, insiderHolding, RISK } from './launch-risk';
 import { fomoUrl } from './watch';
 import { PRESETS, loadRuleSpecs, removeRuleSpec, ruleCheck, ruleMarketHint, ruleProfile, saveRuleSpec, type RuleSpec } from './custom';
+
+/** An older same-name token counts as the original only within this gap, unless it is still the busier market. */
+const COPYCAT_MAX_GAP_MS = 3 * 24 * 60 * 60_000;
 
 export interface DeskWallet { owner: PublicKey; signer: TransactionSigner | null }
 export interface DeskDeps {
@@ -50,6 +56,10 @@ export interface DeskDeps {
   operational?: DeskOperational;
   /** Launch radar (new pump.fun launches from the chain); absent: no LAUNCH entries. */
   launches?: LaunchSource | null;
+  /** X feed (X API search for posts naming a token); off without X_BEARER_TOKEN. */
+  xfeed?: XFeed | null;
+  /** Whether shortlisted launches get a Claude review (status only). */
+  aiReview?: boolean;
   /** Phone/desktop alerts (ntfy, Telegram) for launch-radar finds and entry-ready signals. */
   notify?: (title: string, body: string) => Promise<void>;
   /** LIVE: who signs (default PHANTOM) and how many new entries one LIVE session may open. */
@@ -61,7 +71,7 @@ interface Deep { at: number; onchain: OnchainEvidence; social: SocialEvidence }
 interface Staged { found: Discovered; pair: DexPair; tier: Tier; metrics: ReturnType<typeof pairMetrics>; crashHint: boolean; ruleHints: StrategyId[]; launch: Launch | null }
 interface ExecTarget {
   strategy: StrategyId; mint: string; symbol: string | null; decimals: number; pairAddress: string; heldRaw: bigint; token2022?: boolean; drill?: boolean;
-  entry?: { liquidityUsd: number | null; creator: string | null; creatorPct: number | null };
+  entry?: { liquidityUsd: number | null; creator: string | null; creatorPct: number | null; insiders?: string[] | null; insiderPct?: number | null; onCurve?: boolean | null };
 }
 const LABEL: Record<DeskMode, string> = { PAPER: 'TEST / PAPER — NO REAL TRANSACTIONS', LIVE: 'LIVE — REAL FUNDS' };
 const sol = (l: bigint) => exactNumber(l < 0n ? -l : l) / 1e9 * (l < 0n ? -1 : 1);
@@ -86,7 +96,7 @@ export class DeskEngine {
   private launchAlerts = new Set<string>();
   private launchPoll: Promise<void> | null = null;
   /** Every priced token seen, by lower-case ticker and name: the original a copycat imitates is usually among them. */
-  private names = new Map<string, Map<string, { mint: string; symbol: string | null; marketCapUsd: number; createdAt: number | null; at: number }>>();
+  private names = new Map<string, Map<string, { mint: string; symbol: string | null; marketCapUsd: number; createdAt: number | null; volume1hUsd?: number | null; at: number }>>();
   /** `${strategy}:${mint}` → why this scan did not enter a token (shown on the candidate). */
   private entryNotes = new Map<string, string>();
   /** TEST: sleeves that ran dry and were re-funded; their trades still count in the strategy stats. */
@@ -96,6 +106,7 @@ export class DeskEngine {
   private lastCompletedScanAt = 0;
   private notes = new Map<string, string>();
   private creatorChecks = new Map<string, number>();
+  private insiderChecks = new Map<string, number>();
   private holdLog = new Map<string, { pct: number; at: number }>();
   /** Per mint: when an unroutable position was last quoted, and when a valuation failure was last logged. */
   private noRouteChecks = new Map<string, number>();
@@ -481,11 +492,18 @@ export class DeskEngine {
       () => discover(d.dex, d.gecko, this.watchlist(), () => this.graduations.poll()));
     this.sources = found.sources;
     for (const l of this.launchList.values()) {
-      if (started - l.at > LAUNCH_ENTRY.maxAgeMin * 60_000 + 30 * 60_000) continue;
+      if (started - l.at > LAUNCH_ENTRY.migrated.maxAgeMin * 60_000 + 10 * 60_000) continue;
       const row = found.tokens.get(l.mint) ?? { mint: l.mint, sources: [], boostAmount: null, description: l.meta?.description ?? null, links: [], geckoPool: null };
       row.sources.push('launch-radar'); found.tokens.set(l.mint, row);
     }
-    if (d.launches) this.sources['Launch radar (pump.fun, on-chain)'] = `${this.launchList.size} shortlisted`;
+    // Tokens posted on X (X feed) that the radar did not see launch: scanned like any candidate.
+    for (const x of d.launches?.xOnly?.(started) ?? []) {
+      const row = found.tokens.get(x.mint) ?? { mint: x.mint, sources: [], boostAmount: null, description: null, links: [], geckoPool: null };
+      if (!row.sources.includes('x-feed')) row.sources.push('x-feed');
+      found.tokens.set(x.mint, row);
+    }
+    if (d.launches) this.sources['Launch radar (pump.fun, on-chain)'] = `${this.launchList.size} shortlisted · X pages read without a key${d.aiReview ? ' · Claude review on' : ''}`;
+    if (d.xfeed) { const x = d.xfeed.status(); this.sources['X feed (X API search)'] = x.configured ? (x.lastError ?? `${x.signals} token posts from ${x.posts} posts`) : 'off — set X_BEARER_TOKEN in .env'; }
     const staged = await this.stage(found.tokens);
     // CRASH is time-critical: safety evidence for pumping young pools first, entries right after, and only then
     // the remaining evidence and the rate-limited launch-history checks that FAIR needs.
@@ -556,8 +574,9 @@ export class DeskEngine {
     let filtered = 0;
     for (const mint of mints) {
       const found = tokens.get(mint)!, pair = selectPair(pairs, mint, Date.now());
-      if (!pair) { filtered++; this.transition(mint, null, 'FILTERED', 'No fresh SOL/USDC/USDT pool with a price'); continue; }
-      const metrics = pairMetrics(pair, Date.now()), tier = tierFor(metrics);
+      if (!pair) { filtered++; this.transition(mint, null, 'FILTERED', 'No fresh pool with a price (SOL/USDC/USDT, or another quote with ≥ $20K liquidity)'); continue; }
+      const times = tokenTimes(pairs, mint), radar = this.launchList.get(mint);
+      const metrics = pairMetrics(pair, Date.now(), { createdAt: radar?.at ?? times.createdAt, firstPoolAt: times.firstPoolAt }), tier = tierFor(metrics);
       this.rememberName(mint, pair);
       // Custom strategies see every priced token: a $5M runner is outside FAIR's bands but may be exactly what one wants.
       const ruleHints = this.customIds().filter(id => this.profile(id).enabled && ruleMarketHint(this.profile(id).rule!, metrics));
@@ -692,7 +711,14 @@ export class DeskEngine {
       }
       if (candidate.status === 'QUALIFIED') counts.qualified++; else if (candidate.status === 'WAITING') counts.waiting++;
       else if (candidate.status === 'WATCHLIST') counts.watch++; else counts.filtered++;
-      this.transition(mint, candidate.symbol, candidate.status, `${candidate.tier === 'ULTRA_EARLY' ? `[${candidate.classification}] ` : ''}${candidate.reasons.join('; ')}`);
+      // The scan's verdict is what the ENABLED strategies say: FAIR's own gates (buy/sell ≥ 1.4, fair launch…) are no
+      // longer reported as the token's status while FAIR is off.
+      if (this.strategies.FAIR.enabled) this.transition(mint, candidate.symbol, candidate.status, `${candidate.tier === 'ULTRA_EARLY' ? `[${candidate.classification}] ` : ''}${candidate.reasons.join('; ')}`);
+      else {
+        const v = this.verdicts(candidate).filter(x => x.id !== 'FAIR');
+        this.transition(mint, candidate.symbol, v.some(x => x.signal) ? 'QUALIFIED' : 'WATCHLIST',
+          v.map(x => `${x.id}: ${x.signal ? 'entry-ready' : x.summary}`).join('; ') || 'no enabled strategy covers this token');
+      }
     }
     if (this.candidates.size > DESK.maxCandidates) {
       const held = new Set(this.books().flatMap(b => b.ledger.state.positions.map(p => p.mint)));
@@ -701,6 +727,17 @@ export class DeskEngine {
       for (const c of drop) { this.candidates.delete(c.mint); this.watch.delete(c.mint); this.deep.delete(c.mint); this.holderInfo.delete(c.mint); }
     }
     return counts;
+  }
+
+  /** Every enabled strategy's verdict on a candidate: entry-ready, or the first rule it misses. */
+  private verdicts(c: Candidate): Array<{ id: StrategyId; signal: boolean; summary: string }> {
+    return this.ids().filter(id => this.profile(id).enabled).flatMap(id => {
+      if (id === 'FAIR') return [{ id, signal: c.status === 'QUALIFIED', summary: c.reasons[0] ?? c.status }];
+      if (id === 'CRASH') return c.crash ? [{ id, signal: c.crash.signal, summary: c.crash.summary }] : [];
+      if (id === 'LAUNCH') return c.launch ? [{ id, signal: c.launch.signal.signal, summary: c.launch.signal.summary }] : [];
+      const r = c.rules?.[id];
+      return r ? [{ id, signal: r.signal, summary: r.summary }] : [];
+    });
   }
 
   /** One telemetry event per token and state change; repeated identical outcomes stay quiet. */
@@ -761,9 +798,22 @@ export class DeskEngine {
     return out;
   }
 
-  /** Early-warning exits: pool liquidity collapsing since entry, or the known creator selling. */
+  /**
+   * Early-warning exits: pool liquidity collapsing since entry, the known creator selling, and for fresh launches the
+   * insiders (creator + creation-slot buyers) selling or about to dump into the graduation, or the X account deleted.
+   */
   private async earlyWarning(p: DeskPosition, liquidity: Map<string, number | null>): Promise<string | null> {
     const x = DESK.exits, liq = liquidity.get(p.mint) ?? null;
+    const rug = this.launchList.get(p.mint)?.rug ?? null;
+    if (rug) return rug.startsWith('RUG') ? rug : `RUG ${rug}`;
+    if (p.insiders?.length && p.insiderPctAtEntry != null && Date.now() - (this.insiderChecks.get(p.mint) ?? 0) >= RISK.insiderCheckMs) {
+      this.insiderChecks.set(p.mint, Date.now());
+      try {
+        const [now, curve] = await Promise.all([insiderHolding(this.d.rpc, p.mint, p.insiders), p.onCurve ? curveState(this.d.rpc, p.mint) : Promise.resolve(null)]);
+        const exit = insiderExit(p.insiderPctAtEntry, now, curve);
+        if (exit) return exit;
+      } catch { /* RPC outage: retried on the next check */ }
+    }
     if (p.entryLiquidityUsd && liq !== null && liq <= p.entryLiquidityUsd * (1 - x.liquidityDropExitPct / 100))
       return `LIQUIDITY_DROP $${Math.round(liq).toLocaleString('en-US')} vs $${Math.round(p.entryLiquidityUsd).toLocaleString('en-US')} at entry (−${((1 - liq / p.entryLiquidityUsd) * 100).toFixed(0)}%)`;
     const last = this.creatorChecks.get(p.mint) ?? 0;
@@ -821,6 +871,10 @@ export class DeskEngine {
       }
       // Exits run even while entries are paused: a paused desk must never leave a position without its stops.
       this.event('EXIT', `${id} · exit signal: ${reason}`, ctx);
+      if (reason.startsWith('RUG')) {
+        void this.d.launches?.markRug?.(p.mint, reason).catch(() => undefined);
+        this.alertOnce(`rug:${p.mint}`, `${p.symbol ?? p.mint.slice(0, 6)}: RUG — selling`, `${reason}\n${fomoUrl(p.mint)}`);
+      }
       await this.execute('SELL', { strategy: id, mint: p.mint, symbol: p.symbol, decimals: p.decimals, pairAddress: p.pairAddress, heldRaw: BigInt(p.qtyRaw) }, ledger, stopped);
     }
   }
@@ -853,11 +907,22 @@ export class DeskEngine {
   private async pollLaunches(now: number): Promise<void> {
     const feed = this.d.launches;
     if (!feed) return;
+    feed.hold?.([...new Set(this.books().flatMap(b => b.ledger.state.positions.map(p => p.mint)))]);
+    if (this.d.xfeed?.configured) {
+      const posts = await this.d.xfeed.poll(now);
+      if (posts.length) feed.addXSignals?.(posts, now);
+    }
     this.launchPoll ??= feed.poll(now).then(() => undefined).catch(() => undefined).finally(() => { this.launchPoll = null; });
     await Promise.race([this.launchPoll, new Promise(r => setTimeout(r, 10_000).unref?.())]);
     for (const l of feed.recent(Date.now())) {
       const age = Math.max(0, Math.round((Date.now() - l.at) / 60_000)), ctx = { mint: l.mint, symbol: l.symbol };
       if (this.launchList.has(l.mint)) {
+        if (l.rug && !this.launchAlerts.has(`rugseen:${l.mint}`)) {
+          this.launchAlerts.add(`rugseen:${l.mint}`);
+          this.event('FILTERED', `LAUNCH radar: ${l.symbol} ${l.rug}${this.heldBy(l.mint) ? ' — selling' : ' — never bought'}`, ctx);
+          this.alertOnce(`rugradar:${l.mint}`, `LAUNCH radar: ${l.symbol} RUG`, `${l.rug}\n${fomoUrl(l.mint)}`);
+          continue;
+        }
         // Re-reads of the X page and website after the shortlist: a confirmed CA or an exposed impersonator is news.
         const seen = this.launchCa.get(l.mint);
         if (seen === l.ca.status || l.ca.status === 'UNCONFIRMED') continue;
@@ -887,23 +952,30 @@ export class DeskEngine {
     if (cap === null) return;
     for (const key of new Set([pair.baseToken.symbol, pair.baseToken.name].filter((k): k is string => !!k).map(k => k.trim().toLowerCase()))) {
       const byMint = this.names.get(key) ?? new Map();
-      byMint.set(mint, { mint, symbol: pair.baseToken.symbol ?? null, marketCapUsd: cap, createdAt: pair.pairCreatedAt ?? null, at: Date.now() });
+      byMint.set(mint, { mint, symbol: pair.baseToken.symbol ?? null, marketCapUsd: cap, createdAt: pair.pairCreatedAt ?? null, volume1hUsd: pair.volume?.h1 ?? null, at: Date.now() });
       this.names.set(key, byMint);
     }
     if (this.names.size > 20_000) this.names.delete(this.names.keys().next().value!);
   }
 
   /**
-   * A copycat: an older Solana token with the same ticker or name is at least 3× bigger (and ≥ $100K). Fresh clones of a
-   * trending coin pump on the original's attention and are dumped within minutes (the second "Jane" on 1 Oct). Checked
-   * against every token the scanner has seen, then a DexScreener search; a failed search never blocks an entry.
+   * A copycat: an older Solana token with the same ticker or name is at least 3× bigger (and ≥ $100K), and it is
+   * either recent (≤ 3 days older) or still the busier market. Fresh clones of a trending coin pump on the original's
+   * attention and are dumped within minutes (the second "Jane" on 1 Oct). A revival of a name days later is a new
+   * story, not a clone (WIRED on 1 Oct: blocked by a 5-day-old WIRED, then ran $75K → $2.7M), and a launch whose own
+   * X account posted its CA is never a copycat. Checked against every token the scanner has seen, then a DexScreener
+   * search; a failed search never blocks an entry.
    */
   private async copycatOf(c: Candidate): Promise<string | null> {
+    if (this.launchList.get(c.mint)?.ca.status === 'X') return null;
     const keys = [c.symbol, c.name].filter((k): k is string => !!k && k.trim().length > 1).map(k => k.trim().toLowerCase());
     if (!keys.length) return null;
-    const ours = c.metrics.marketCapUsd ?? 0, oursCreated = c.metrics.poolAgeMin === null ? Date.now() : Date.now() - c.metrics.poolAgeMin * 60_000;
-    const others: Array<{ mint: string; symbol: string | null; marketCapUsd: number; createdAt: number | null }> = keys.flatMap(k => [...(this.names.get(k)?.values() ?? [])]);
-    const original = (list: typeof others) => list.filter(o => o.mint !== c.mint && o.marketCapUsd >= Math.max(3 * ours, 100_000) && (o.createdAt === null || o.createdAt < oursCreated))
+    const ours = c.metrics.marketCapUsd ?? 0, oursVol = c.metrics.volume1hUsd ?? 0;
+    const age = c.metrics.tokenAgeMin ?? c.metrics.poolAgeMin, oursCreated = age == null ? Date.now() : Date.now() - age * 60_000;
+    type Other = { mint: string; symbol: string | null; marketCapUsd: number; createdAt: number | null; volume1hUsd?: number | null };
+    const others: Other[] = keys.flatMap(k => [...(this.names.get(k)?.values() ?? [])]);
+    const original = (list: Other[]) => list.filter(o => o.mint !== c.mint && o.marketCapUsd >= Math.max(3 * ours, 100_000) && (o.createdAt === null || o.createdAt < oursCreated) &&
+      (o.createdAt === null || oursCreated - o.createdAt <= COPYCAT_MAX_GAP_MS || (o.volume1hUsd ?? 0) >= oursVol))
       .sort((a, b) => b.marketCapUsd - a.marketCapUsd)[0] ?? null;
     let found = original(others);
     if (!found) {
@@ -911,7 +983,7 @@ export class DeskEngine {
         const pairs = await this.d.dex.searchPairs(c.symbol ?? c.name ?? '');
         const match = pairs.filter(p => keys.includes((p.baseToken.symbol ?? '').trim().toLowerCase()) || keys.includes((p.baseToken.name ?? '').trim().toLowerCase()));
         for (const p of match) this.rememberName(p.baseToken.address, p);
-        found = original(match.map(p => ({ mint: p.baseToken.address, symbol: p.baseToken.symbol ?? null, marketCapUsd: p.marketCap ?? p.fdv ?? 0, createdAt: p.pairCreatedAt ?? null })));
+        found = original(match.map(p => ({ mint: p.baseToken.address, symbol: p.baseToken.symbol ?? null, marketCapUsd: p.marketCap ?? p.fdv ?? 0, createdAt: p.pairCreatedAt ?? null, volume1hUsd: p.volume?.h1 ?? null })));
       } catch { return null; }
     }
     if (!found) return null;
@@ -1074,8 +1146,9 @@ export class DeskEngine {
   }
 
   private entryContext(c: Candidate): NonNullable<ExecTarget['entry']> {
-    const dev = this.deep.get(c.mint)?.onchain.developer ?? null;
-    return { liquidityUsd: c.metrics.liquidityUsd, creator: dev?.creator ?? null, creatorPct: dev?.heldPct ?? null };
+    const dev = this.deep.get(c.mint)?.onchain.developer ?? null, launch = this.launchList.get(c.mint) ?? null;
+    return { liquidityUsd: c.metrics.liquidityUsd, creator: dev?.creator ?? launch?.creator ?? null, creatorPct: dev?.heldPct ?? launch?.insiders?.creatorPct ?? null,
+      ...(launch?.insiders?.wallets.length ? { insiders: launch.insiders.wallets, insiderPct: launch.insiders.insiderPct, onCurve: c.metrics.migration === 'BONDING_CURVE' } : {}) };
   }
 
   // ------------------------------------------------------------------ one order through the production path
@@ -1339,9 +1412,15 @@ export class DeskEngine {
       operational: d.operational,
       strategies: this.ids().map(id => this.strategyView(id)),
       presets: PRESETS,
-      launches: [...this.launchList.values()].sort((a, b) => b.at - a.at).slice(0, 25).map(l => {
+      // Newest first within the last 15 minutes, then by score and X followers: the more followers, the higher.
+      launches: [...this.launchList.values()].sort((a, b) => Number(Date.now() - b.at < 15 * 60_000) - Number(Date.now() - a.at < 15 * 60_000) ||
+        b.score - a.score || (b.reach?.followers ?? 0) - (a.reach?.followers ?? 0) || b.at - a.at).slice(0, 25).map(l => {
         const c = this.candidates.get(l.mint);
         return { mint: l.mint, symbol: l.symbol, name: l.name, at: l.at, score: l.score, reasons: l.reasons, x: l.x.url, website: l.site?.url ?? l.meta?.website ?? null, ca: l.ca,
+          followers: l.reach?.followers ?? null, bestViews: l.reach?.bestViews ?? null, accountAgeDays: l.reach?.accountAgeDays ?? null,
+          insiders: l.insiders?.detail ?? null, insiderPct: l.insiders?.insiderPct ?? null, rug: l.rug ?? null, xPosts: l.xSignals?.length ?? 0,
+          review: l.review ? { verdict: l.review.verdict, idea: l.review.idea, professionalism: l.review.professionalism, aiGenerated: l.review.aiGenerated,
+            summary: l.review.summary, scamSignals: l.review.scamSignals } : null,
           marketCapUsd: c?.metrics.marketCapUsd ?? null, signal: c?.launch?.signal.signal ?? false,
           status: this.heldBy(l.mint) ? `held by ${this.heldBy(l.mint)}` : c?.entryNotes?.LAUNCH ?? c?.launch?.signal.summary ?? 'waiting for market data' };
       }),
@@ -1361,8 +1440,9 @@ export class DeskEngine {
       events: this.events.list(250).reverse(),
       candidates: [...this.candidates.values()].map(c => {
         const notes = Object.fromEntries(this.ids().flatMap(id => { const n = this.entryNotes.get(`${id}:${c.mint}`); return n ? [[id, n]] : []; }));
-        return { ...c, entryNotes: notes, stale: c.updatedAt < this.lastCompletedScanAt };
+        return { ...c, entryNotes: notes, stale: c.updatedAt < this.lastCompletedScanAt, verdicts: this.verdicts(c) };
       }).sort((a, b) => Number(a.stale) - Number(b.stale) || rank(b) - rank(a) || Number(!!b.crash?.signal) - Number(!!a.crash?.signal) || composite(b) - composite(a)).slice(0, 40),
+      ...(d.xfeed ? { xFeed: (({ configured, lastPollAt, lastError, posts, signals }) => ({ configured, lastPollAt, lastError, posts, signals }))(d.xfeed.status()) } : {}),
       preflights: [...this.preflights].reverse(), positions, ledger: rows,
       sources: this.sources, path: this.pathView(),
     };

@@ -22,6 +22,9 @@ import { SOL_MINT } from '../core/types';
 import { DeskEngine, type DeskWallet } from './engine';
 import { DeskReject } from './guard';
 import { XClient } from './social';
+import { KNOWN_RUGS, RugList } from './launch-risk';
+import { LaunchReviewer, REVIEW } from './review';
+import { XFeed, XFEED } from './xfeed';
 import { deskCapital, deskOperational, liveSignerSettings, strategyProfiles, type DeskCapital, type DeskOperational, type LiveSignerKind } from './config';
 import { localKeySigner } from './local-signer';
 import { PublicKey } from '@solana/web3.js';
@@ -41,7 +44,8 @@ const ENV_KEYS = ['RPC_ENDPOINTS', 'RPC_MAX_RPS', 'RPC_TIMEOUT_MS', 'JUPITER_API
   'CRASH_EXIT_MODE', 'CRASH_TRAIL_ACTIVATION_PCT', 'CRASH_TRAIL_STOP_PCT', 'CRASH_RIDE_MAX_HOLD_MIN', 'CRASH_REENTRY_MIN',
   'DESK_LIVE_SIGNER', 'DESK_LIVE_MAX_ENTRIES', 'DESK_DEPLOYMENT_MODE', 'DESK_PAPER_FAIR_ENABLED', 'DESK_PAPER_CRASH_ENABLED',
   'DESK_LIVE_FAIR_ENABLED', 'DESK_LIVE_CRASH_ENABLED', 'DESK_FAIR_LOSS_REENTRY_MIN', 'DESK_CRASH_LOSS_REENTRY_MIN',
-  'DESK_FAIR_FRESH_SIGNAL', 'DESK_CRASH_FRESH_SIGNAL', 'DESK_NTFY_TOPIC', 'DESK_NTFY_SERVER', 'DESK_TELEGRAM_BOT_TOKEN', 'DESK_TELEGRAM_CHAT_ID', 'ANTHROPIC_API_KEY'];
+  'DESK_FAIR_FRESH_SIGNAL', 'DESK_CRASH_FRESH_SIGNAL', 'DESK_NTFY_TOPIC', 'DESK_NTFY_SERVER', 'DESK_TELEGRAM_BOT_TOKEN', 'DESK_TELEGRAM_CHAT_ID', 'ANTHROPIC_API_KEY',
+  'DESK_X_QUERY', 'DESK_AI_REVIEW', 'DESK_AI_REVIEWS_PER_HOUR'];
 export async function deskEnvironment(repo: string): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = {};
   try {
@@ -95,14 +99,22 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
     // TEST only ever gets an address (never a signer).
     const paperAddress = configured ?? localSigner?.publicKey ?? null;
     // One radar for both modes (only the running one polls), and one set of phone alerts for the desk and the watch.
-    const alerts = notifier(env), launches = new LaunchFeed(rpc);
+    // Launch radar: rug list (persisted; seeded with known rugs), Claude review of shortlisted launches (opt-out with
+    // DESK_AI_REVIEW=off), and the X feed when an X API token is set.
+    const rugs = await RugList.open(path.join(o.dataDir, 'rugs.json'), KNOWN_RUGS);
+    const reviewsPerHour = Math.max(0, Math.min(120, Number(env.DESK_AI_REVIEWS_PER_HOUR ?? '') || REVIEW.maxPerHour));
+    const reviewer = env.ANTHROPIC_API_KEY?.trim() && env.DESK_AI_REVIEW?.trim().toLowerCase() !== 'off' && reviewsPerHour > 0
+      ? new LaunchReviewer(env.ANTHROPIC_API_KEY.trim(), undefined, reviewsPerHour) : null;
+    const xfeed = new XFeed(env.X_BEARER_TOKEN?.trim() || null, fetch, env.DESK_X_QUERY?.trim() || XFEED.query);
+    const alerts = notifier(env), launches = new LaunchFeed(rpc, fetch, undefined, undefined,
+      { rugs, review: reviewer ? (i, now) => reviewer.review(i, now) : null, reviewAvailable: reviewer ? now => reviewer.available(now) : undefined });
     const sender = new TransactionSender(rpc, logger, { confirmTimeoutMs: cfg.execution.confirmTimeoutMs, pollIntervalMs: 1500, rebroadcastIntervalMs: 2000 });
     const engines = {
       // TEST needs only an address to build and simulate; without Phantom it uses the public key from .env, never a secret.
-      PAPER: await DeskEngine.create({ ...shared, launches, notify: alerts.notify, mode: 'PAPER', sender: null,
+      PAPER: await DeskEngine.create({ ...shared, launches, xfeed, aiReview: !!reviewer, notify: alerts.notify, mode: 'PAPER', sender: null,
         wallet: () => context.wallet('PAPER') ?? (paperAddress ? { owner: paperAddress, signer: null } : null) }),
       // LOCAL_KEY: signed in this process and independent of the browser session; PHANTOM: the browser session signs.
-      LIVE: await DeskEngine.create({ ...shared, launches, notify: alerts.notify, mode: 'LIVE', sender, signerKind: live.signer, liveMaxEntries: live.maxEntries,
+      LIVE: await DeskEngine.create({ ...shared, launches, xfeed, aiReview: !!reviewer, notify: alerts.notify, mode: 'LIVE', sender, signerKind: live.signer, liveMaxEntries: live.maxEntries,
         ...(localSigner ? { authorized: () => true, wallet: () => ({ owner: localSigner.publicKey, signer: localSigner }) }
           : { wallet: () => context.wallet('LIVE') }) }),
     };

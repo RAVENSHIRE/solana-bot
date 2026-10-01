@@ -1,4 +1,5 @@
 import { CRASH_ENTRY, LAUNCH_ENTRY, type ExitRules, type StrategyProfile } from './config';
+import { RISK } from './launch-risk';
 import type { Candidate, CandidateMetrics, CrashSignal, DeskMode, GateResult, LedgerEntry, ScaleAdvice, StrategyStats } from './types';
 
 const usd = (n: number | null) => n === null ? 'UNKNOWN' : `$${n >= 1000 ? Math.round(n).toLocaleString('en-US') : n.toFixed(2)}`;
@@ -11,8 +12,11 @@ function check(key: string, label: string, value: number | null, pass: (v: numbe
 /** Market-only part of the CRASH entry: decides whether a token gets deep (safety) analysis first in this scan. */
 function marketChecks(m: CandidateMetrics): GateResult[] {
   const r = CRASH_ENTRY, ratio = m.liquidityUsd !== null && m.marketCapUsd ? m.liquidityUsd / m.marketCapUsd : null;
+  const since = m.firstPoolAgeMin !== undefined ? m.firstPoolAgeMin : m.poolAgeMin;
   return [
-    check('crashAge', 'Pool age', m.poolAgeMin, v => v <= r.maxPoolAgeMin, m.poolAgeMin === null ? 'UNKNOWN' : `${Math.round(m.poolAgeMin)} min`, `≤ ${r.maxPoolAgeMin} min`),
+    // Since the token's FIRST AMM pool (its graduation), not the selected pool: a new Meteora pool on a 3-day-old token
+    // looked "young" to the old check (SI Strategy had five pools opened on 1 Oct for a token graduated on 30 Sep).
+    check('crashAge', 'Since first AMM pool (graduation)', since, v => v <= r.maxPoolAgeMin, since === null ? (m.migration === 'BONDING_CURVE' ? 'still on its curve' : 'UNKNOWN') : `${Math.round(since)} min`, `≤ ${r.maxPoolAgeMin} min`),
     check('crashPump', '5m price change', m.priceChange5mPct, v => v >= r.minPriceChange5mPct && v <= r.maxPriceChange5mPct, pct(m.priceChange5mPct),
       `+${r.minPriceChange5mPct}% to +${r.maxPriceChange5mPct}%`),
     check('crashVolume', '5m volume', m.volume5mUsd, v => v >= r.minVolume5mUsd, usd(m.volume5mUsd), `≥ ${usd(r.minVolume5mUsd)}`),
@@ -51,36 +55,56 @@ export function crashCheck(c: Candidate): CrashSignal {
   const signal = checks.every(g => !g.blocking || g.status === 'PASS');
   const miss = checks.find(g => g.blocking && g.status !== 'PASS');
   const summary = signal
-    ? `${pct(m.priceChange5mPct)} in 5m · pool ${Math.round(m.poolAgeMin ?? 0)} min · ${usd(m.volume5mUsd)} 5m volume · buy/sell ${m.buySellRatio5m?.toFixed(2)}`
+    ? `${pct(m.priceChange5mPct)} in 5m · graduated ${Math.round((m.firstPoolAgeMin !== undefined ? m.firstPoolAgeMin : m.poolAgeMin) ?? 0)} min ago · ${usd(m.volume5mUsd)} 5m volume · buy/sell ${m.buySellRatio5m?.toFixed(2)}`
     : `${miss!.label}: ${miss!.actual} (${miss!.required})`;
   return { signal, checks, summary };
 }
 
 /**
- * LAUNCH entry: a shortlisted launch (own X account + live website), never one whose X account or website shows another
- * CA, still early ($5K–$40K), with real buying, no whale and no dev bag; the safety gates must pass. From 1 min when the
- * project's X account or website shows this CA, from 3 min otherwise; never after 12 min.
+ * LAUNCH entry: a shortlisted launch (own X account + live website), never an impersonator or a rug, with real buying,
+ * no whale and no dev bag; the safety gates must pass. Two windows:
+ * - CURVE: $5K–$40K, from 1 min when the project's X account or website shows this CA (3 min otherwise) to 12 min;
+ * - MIGRATED: after graduation, up to 90 min and $40K–$400K, only with strong X reach (followers or post views) and a
+ *   higher score — the runners that graduate before the curve window ends.
  */
-export function launchEntryCheck(c: Candidate, l: { score: number; at: number; ca?: { status: string; detail: string } }, now: number): CrashSignal {
-  const r = LAUNCH_ENTRY, m = c.metrics, age = (now - l.at) / 60_000;
+export function launchEntryCheck(c: Candidate, l: { score: number; at: number; ca?: { status: string; detail: string }; rug?: string | null;
+  insiders?: { insiderPct: number; detail: string } | null; reach?: { followers: number | null; bestViews: number | null } | null }, now: number): CrashSignal {
+  const r = LAUNCH_ENTRY, g = r.migrated, m = c.metrics, age = (now - l.at) / 60_000;
   const confirmed = l.ca?.status === 'X' || l.ca?.status === 'WEBSITE', minAge = confirmed ? r.minAgeConfirmedMin : r.minAgeMin;
-  const safety = (key: string): GateResult => { const g = c.gates.find(x => x.key === key); return g ? { ...g, blocking: true } : { key, label: key, status: 'UNKNOWN', actual: 'not evaluated', required: 'PASS', blocking: true }; };
+  const reachOk = (l.reach?.followers ?? 0) >= g.minFollowers || (l.reach?.bestViews ?? 0) >= g.minBestViews;
+  const migrated = m.migration !== 'BONDING_CURVE' && age <= g.maxAgeMin && (m.marketCapUsd ?? 0) > r.maxMarketCapUsd;
+  const safety = (key: string): GateResult => { const x = c.gates.find(y => y.key === key); return x ? { ...x, blocking: true } : { key, label: key, status: 'UNKNOWN', actual: 'not evaluated', required: 'PASS', blocking: true }; };
+  const reachText = `${l.reach?.followers ?? '?'} followers · best post ${l.reach?.bestViews ?? '?'} views`;
   const checks: GateResult[] = [
-    check('launchScore', 'Launch quality (X account + website)', l.score, v => v >= r.minScore, String(l.score), `≥ ${r.minScore}`),
+    check('launchScore', 'Launch quality (X, website, CA, reach, review)', l.score, v => v >= (migrated ? g.minScore : r.minScore), String(l.score), `≥ ${migrated ? g.minScore : r.minScore}`),
+    check('launchRug', 'Rug checks (X account, rug history, Claude review)', l.rug ? 0 : 1, v => v === 1, l.rug ?? 'clean', 'no rug sign'),
+    // Insiders are read from the chain seconds after the launch is seen; a failed read (null) does not block.
+    check('launchInsiders', 'Insiders (dev + creation-slot buyers)', l.insiders === undefined ? null : l.insiders === null ? 0 : l.insiders.insiderPct,
+      v => v < RISK.maxInsiderPctAtEntry, l.insiders === undefined ? 'reading' : l.insiders === null ? 'unknown (read failed)' : l.insiders.detail,
+      `< ${RISK.maxInsiderPctAtEntry}% of supply`, l.insiders !== null),
     check('launchCa', 'Contract address on the project\'s X / website', l.ca?.status === 'IMPERSONATOR' ? 0 : 1, v => v === 1,
       l.ca ? (l.ca.status === 'IMPERSONATOR' ? l.ca.detail : l.ca.status === 'UNCONFIRMED' ? 'not shown yet' : l.ca.detail) : 'not checked', 'never another CA'),
-    check('launchAge', 'Minutes since launch', age, v => v >= minAge && v <= r.maxAgeMin, `${age.toFixed(1)} min`,
-      `${minAge}–${r.maxAgeMin} min${confirmed ? ' (CA confirmed)' : ` (${r.minAgeConfirmedMin} min once the CA is confirmed)`}`),
-    check('launchMcap', 'Market cap', m.marketCapUsd, v => v >= r.minMarketCapUsd && v <= r.maxMarketCapUsd, usd(m.marketCapUsd), `${usd(r.minMarketCapUsd)}–${usd(r.maxMarketCapUsd)}`),
-    check('launchVolume', '5m volume', m.volume5mUsd, v => v >= r.minVolume5mUsd, usd(m.volume5mUsd), `≥ ${usd(r.minVolume5mUsd)}`),
-    check('launchBuys', 'Buys (5m)', m.buys5m, v => v >= r.minBuys5m, m.buys5m === null ? 'UNKNOWN' : String(m.buys5m), `≥ ${r.minBuys5m}`),
+    ...(migrated ? [
+      check('launchAge', 'Minutes since launch (after graduation)', age, v => v <= g.maxAgeMin, `${age.toFixed(1)} min`, `≤ ${g.maxAgeMin} min`),
+      check('launchReach', 'X reach', reachOk ? 1 : 0, v => v === 1, reachText, `≥ ${g.minFollowers} followers or a ${g.minBestViews.toLocaleString('en-US')}-view post`),
+      check('launchMcap', 'Market cap', m.marketCapUsd, v => v >= g.minMarketCapUsd && v <= g.maxMarketCapUsd, usd(m.marketCapUsd), `${usd(g.minMarketCapUsd)}–${usd(g.maxMarketCapUsd)}`),
+      check('launchVolume', '5m volume', m.volume5mUsd, v => v >= g.minVolume5mUsd, usd(m.volume5mUsd), `≥ ${usd(g.minVolume5mUsd)}`),
+      check('launchBuys', 'Buys (5m)', m.buys5m, v => v >= g.minBuys5m, m.buys5m === null ? 'UNKNOWN' : String(m.buys5m), `≥ ${g.minBuys5m}`),
+    ] : [
+      check('launchAge', 'Minutes since launch', age, v => v >= minAge && v <= r.maxAgeMin, `${age.toFixed(1)} min`,
+        `${minAge}–${r.maxAgeMin} min${confirmed ? ' (CA confirmed)' : ` (${r.minAgeConfirmedMin} min once the CA is confirmed)`}`),
+      check('launchMcap', 'Market cap', m.marketCapUsd, v => v >= r.minMarketCapUsd && v <= r.maxMarketCapUsd, usd(m.marketCapUsd), `${usd(r.minMarketCapUsd)}–${usd(r.maxMarketCapUsd)}`),
+      check('launchVolume', '5m volume', m.volume5mUsd, v => v >= r.minVolume5mUsd, usd(m.volume5mUsd), `≥ ${usd(r.minVolume5mUsd)}`),
+      check('launchBuys', 'Buys (5m)', m.buys5m, v => v >= r.minBuys5m, m.buys5m === null ? 'UNKNOWN' : String(m.buys5m), `≥ ${r.minBuys5m}`),
+    ]),
     check('launchTop10', 'Top-10 wallet concentration', m.top10WalletPct, v => v <= r.maxTop10WalletPct, pct(m.top10WalletPct), `≤ ${r.maxTop10WalletPct}%`),
     check('launchLargest', 'Largest single wallet', m.largestWalletPct, v => v <= r.maxLargestWalletPct, pct(m.largestWalletPct), `≤ ${r.maxLargestWalletPct}%`),
     check('launchDev', 'Developer holding', m.developerPct, v => v <= r.maxDeveloperPct, pct(m.developerPct), `≤ ${r.maxDeveloperPct}%`, m.developerPct !== null),
     safety('mintAuthority'), safety('freezeAuthority'), safety('contract'),
   ];
-  const signal = checks.every(g => !g.blocking || g.status === 'PASS'), miss = checks.find(g => g.blocking && g.status !== 'PASS');
-  const summary = signal ? `score ${l.score} · ${age.toFixed(1)} min old · ${usd(m.marketCapUsd)} cap · ${usd(m.volume5mUsd)} 5m volume · top-10 ${pct(m.top10WalletPct)}${confirmed ? ` · ${l.ca!.detail}` : ''}`
+  const signal = checks.every(x => !x.blocking || x.status === 'PASS'), miss = checks.find(x => x.blocking && x.status !== 'PASS');
+  const summary = signal ? `${migrated ? 'after graduation · ' : ''}score ${l.score} · ${age.toFixed(1)} min old · ${usd(m.marketCapUsd)} cap · ${usd(m.volume5mUsd)} 5m volume · top-10 ${pct(m.top10WalletPct)}${
+    migrated ? ` · ${reachText}` : ''}${confirmed ? ` · ${l.ca!.detail}` : ''}`
     : `${miss!.label}: ${miss!.actual} (${miss!.required})`;
   return { signal, checks, summary };
 }

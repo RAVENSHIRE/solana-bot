@@ -1377,3 +1377,5 @@ table.gates td{padding:4px 6px;border-bottom:1px solid #eef0f2;text-align:left!i
 tr.launch-ready td{background:#eef8f0}
 tr.launch-fake td{color:#8f1f1f;text-decoration:line-through;text-decoration-color:rgba(143,31,31,.35)}
 tr.launch-fake td:nth-child(4){text-decoration:none;font-weight:600}
+.chg-up{color:#1d7a3a}
+.chg-down{color:#a8322a}

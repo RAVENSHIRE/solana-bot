@@ -44,6 +44,14 @@ export interface CandidateMetrics {
   buys5m: number | null; sells5m: number | null; buySellRatio5m: number | null; volumeAcceleration: number | null;
   priceChange5mPct: number | null; priceChange1hPct: number | null; top10WalletPct: number | null;
   largestWalletPct: number | null; developerPct: number | null; washRatio: number | null; migration: Migration;
+  /** Minutes since the token appeared: its pump.fun creation (radar) or its oldest pool — not the selected pool's age. */
+  tokenAgeMin?: number | null;
+  /** Minutes since the token's first AMM pool (for pump.fun tokens: since graduation); null while it is on its curve. */
+  firstPoolAgeMin?: number | null;
+  priceChange6hPct?: number | null; priceChange24hPct?: number | null; volume24hUsd?: number | null;
+  buys1h?: number | null; sells1h?: number | null;
+  /** The selected pool's quote token symbol (SOL, USDC, … or another token when that pool holds the real liquidity). */
+  quote?: string | null;
 }
 
 export interface CandidateSocial {
@@ -77,6 +85,8 @@ export interface Candidate {
   entryNotes?: Partial<Record<StrategyId, string>>;
   /** Status view only: not re-assessed in the last completed scan; its data is a past snapshot and is never traded on. */
   stale?: boolean;
+  /** Status view only: every enabled strategy's verdict — entry-ready, or the first rule it misses. */
+  verdicts?: Array<{ id: StrategyId; signal: boolean; summary: string }>;
 }
 
 export interface CrashSignal { signal: boolean; checks: GateResult[]; summary: string }
@@ -107,6 +117,8 @@ export interface DeskPosition {
   router: string; route: string; entrySignature: string | null; rentLamports: string; pairAddress: string;
   /** Context at entry for early-warning exits; absent in ledgers written before they existed. */
   entryLiquidityUsd?: number | null; creator?: string | null; creatorPctAtEntry?: number | null;
+  /** LAUNCH: the creator and creation-slot buyers, their share at entry, and whether the token was still on its curve. */
+  insiders?: string[] | null; insiderPctAtEntry?: number | null; onCurve?: boolean | null;
   /** Status view only: the strategy whose ledger holds the position. */
   strategy?: StrategyId;
   /** Status view only: EXIT NOW was requested and the sell is being attempted. */
@@ -165,7 +177,12 @@ export interface DeskStatus {
   operational?: import('./config').DeskOperational;
   /** Launch radar: recent shortlisted pump.fun launches (own X account + website). */
   launches?: Array<{ mint: string; symbol: string; name: string; at: number; score: number; reasons: string[]; x: string | null; website: string | null;
-    ca?: { status: 'X' | 'WEBSITE' | 'IMPERSONATOR' | 'UNCONFIRMED'; detail: string }; marketCapUsd: number | null; signal: boolean; status: string }>;
+    ca?: { status: 'X' | 'WEBSITE' | 'IMPERSONATOR' | 'UNCONFIRMED'; detail: string }; marketCapUsd: number | null; signal: boolean; status: string;
+    followers?: number | null; bestViews?: number | null; accountAgeDays?: number | null; insiders?: string | null; insiderPct?: number | null;
+    rug?: string | null; xPosts?: number;
+    review?: { verdict: 'STRONG' | 'OK' | 'WEAK' | 'SCAM'; idea: number; professionalism: number; aiGenerated: string; summary: string; scamSignals: string[] } | null }>;
+  /** X feed (X API search) state; absent when the desk has none. */
+  xFeed?: { configured: boolean; lastPollAt: number | null; lastError: string | null; posts: number; signals: number };
   /** Templates for a new custom strategy (RUNNER: the owner's own style). */
   presets?: Record<string, import('./custom').RuleSpecInput>;
   /** CONFIGURED: TEST is using WALLET_PUBLIC_KEY from .env because Phantom is not connected (address only, never a signer). */

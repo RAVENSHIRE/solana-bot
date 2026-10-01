@@ -183,6 +183,8 @@ function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' =
     graduations: [] as Array<{ signature: string; mint: string; ok: boolean; migrate: boolean; broken?: boolean }>,
     priorityCaps: [] as Array<{ side: 'BUY' | 'SELL'; maxLamports: number; notional: bigint }>,
     dasUnsupported: false, noRoute: false, sellQuotes: 0, searchPairs: [] as unknown[], searches: 0,
+    /** Launch insiders: what they hold (raw) and the bonding curve account, for the rug exits. */
+    insider: null as string | null, insiderRaw: 0n, curve: null as Buffer | null,
     last: null as null | { side: 'BUY' | 'SELL'; mint: string; inAmount: bigint; outAmount: bigint } };
   const holderMint = new Map<string, string>();
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -251,8 +253,9 @@ function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' =
       mint: holderMint.get(k.toBase58()) ?? MINT } } } })) }),
     getParsedAccountInfo: async () => ({ value: { owner: TOKEN_PROGRAM_ID, data: { program: 'spl-token', parsed: { type: 'mint',
       info: { decimals: 6, supply: '1000000000000000', mintAuthority: null, freezeAuthority: null, isInitialized: true } } } } }),
-    getAccountInfo: async () => null,
-    getParsedTokenAccountsByOwner: async () => ({ value: [] }),
+    getAccountInfo: async () => w.curve ? { data: w.curve, owner: SystemProgram.programId, lamports: 1, executable: false } : null,
+    getParsedTokenAccountsByOwner: async (owner: PublicKey) => ({ value: w.insider && owner.toBase58() === w.insider && w.insiderRaw > 0n
+      ? [{ account: { data: { parsed: { info: { tokenAmount: { amount: String(w.insiderRaw), decimals: 6 } } } } } }] : [] }),
     getMinimumBalanceForRentExemption: async () => 2_039_280,
     getRecentPrioritizationFees: async () => [{ slot: 1, prioritizationFee: 1000 }],
     getFeeForMessage: async () => ({ value: 5_300 }),
@@ -484,17 +487,19 @@ test('CRASH entry check: a young pump with passing safety signals without a fair
     hasMintAuthority: false, hasFreezeAuthority: false, reasons: [], warnings: [] };
   const onchain = { safety, holders: { supplyRaw: 10n ** 15n, decimals: 6, walletTop10Pct: 20, largestWalletPct: 2, programOwnedPct: 30, accountsInspected: 20 }, developer: null, flow: null, errors: {} };
   const insider = { launchedAt: NOW - 600_000, poolsChecked: 2, curvePool: SOL_POOL, migratedAfterSec: 0, earlyHighMcUsd: 617_026, firstCandleMultiple: 9, windowMin: 5 };
-  const run = (patch: Record<string, unknown>, o: typeof onchain = onchain) => {
+  const run = (patch: Record<string, unknown>, o: typeof onchain = onchain, times?: { createdAt?: number | null; firstPoolAt?: number | null }) => {
     const p = pair(patch);
-    return crashCheck(analyze({ found: found(), pair: p, metrics: pairMetrics(p, NOW), tier: 'TRENDING', onchain: o, onchainAt: NOW, social: null, watch, now: NOW, maxWashRatio: 0.45, launch: insider }));
+    return crashCheck(analyze({ found: found(), pair: p, metrics: pairMetrics(p, NOW, times), tier: 'TRENDING', onchain: o, onchainAt: NOW, social: null, watch, now: NOW, maxWashRatio: 0.45, launch: insider }));
   };
   const young = run(YOUNG_PUMP);
-  assert.equal(young.signal, true, young.summary); assert.match(young.summary, /^25\.0% in 5m · pool 10 min/);
+  assert.equal(young.signal, true, young.summary); assert.match(young.summary, /^25\.0% in 5m · graduated 10 min ago/);
+  // A fresh extra pool on an old token is not a young graduation (SI Strategy: five new pools on 1 Oct, graduated 30 Sep).
+  assert.match(run(YOUNG_PUMP, onchain, { createdAt: NOW - 20 * 3_600_000, firstPoolAt: NOW - 19 * 3_600_000 }).summary, /^Since first AMM pool \(graduation\): 1140 min/);
   assert.equal(young.checks.find(g => g.key === 'fairLaunch')!.status, 'FAIL', 'the insider launch is shown…');
   assert.equal(young.checks.find(g => g.key === 'fairLaunch')!.blocking, false, '…but never required for CRASH');
-  assert.match(run({ ...YOUNG_PUMP, pairCreatedAt: NOW - 3 * 3_600_000 }).summary, /^Pool age: 180 min/);
+  assert.match(run({ ...YOUNG_PUMP, pairCreatedAt: NOW - 3 * 3_600_000 }).summary, /^Since first AMM pool \(graduation\): 180 min/);
   assert.match(run({ ...YOUNG_PUMP, priceChange: { m5: 45 } }).summary, /^5m price change: 45\.0%/, 'a move already above +30% in five minutes is not chased');
-  assert.match(run({ ...YOUNG_PUMP, pairCreatedAt: NOW - 20 * 60_000 }).summary, /^Pool age: 20 min/, 'only the first 15 minutes of a pool');
+  assert.match(run({ ...YOUNG_PUMP, pairCreatedAt: NOW - 20 * 60_000 }).summary, /^Since first AMM pool \(graduation\): 20 min/, 'only the first 15 minutes after graduation');
   assert.match(run({ ...YOUNG_PUMP, volume: { m5: 30_000, h1: 60_000 } }).summary, /^5m volume: \$30,000/, 'thin volume is not traded');
   assert.equal(run(YOUNG_PUMP, { ...onchain, safety: { ...safety, hasMintAuthority: true } }).signal, false);
   assert.equal(run(YOUNG_PUMP, { ...onchain, safety: null } as never).signal, false, 'unknown safety never signals');
@@ -872,6 +877,11 @@ test('a copycat (same ticker as an older token 3× bigger) is never entered: the
     assert.ok(engine.events.list().some(e => /^CRASH · entry refused: COPYCAT of abc .+ \(\$1,400,000 · 1\d\d min older\)$/.test(e.message)),
       engine.events.list().filter(e => /COPYCAT|entry/.test(e.message)).map(e => e.message).join(' | '));
     assert.match(view.candidates.find(c => c.mint === MINT)!.entryNotes!.CRASH!, /^COPYCAT/);
+    // WIRED on 1 Oct: the namesake was 5 days older and quieter — a revival, not a clone; it ran $75K → $2.7M.
+    w.searchPairs = [{ ...original, pairCreatedAt: NOW - 5 * 86_400_000, volume: { m5: 100, h1: 2_000 } }];
+    const revival = await DeskEngine.create({ ...shared, mode: 'PAPER', dir: await fs.mkdtemp(path.join(os.tmpdir(), 'desk-copycat-3-')), sender: null, wallet: () => ({ owner, signer: null }) });
+    revival.start(); await revival.pulse();
+    assert.equal(revival.status({ connected: false, address: null }).positions.length, 1, 'an old, quiet namesake does not make a copycat');
     w.searchPairs = [];
     const fresh = await DeskEngine.create({ ...shared, mode: 'PAPER', dir: await fs.mkdtemp(path.join(os.tmpdir(), 'desk-copycat-2-')), sender: null, wallet: () => ({ owner, signer: null }) });
     fresh.start(); await fresh.pulse();
@@ -886,7 +896,8 @@ test('LAUNCH: a fresh pump.fun launch with its own X account and website is boug
     const launch = { mint: MINT, name: 'Alpha', symbol: 'ABC', uri: 'https://meta/1', creator: null, at: Date.now() - 5 * 60_000, signature: 'S',
       meta: { description: 'Alpha does things on chain, every day.', twitter: 'https://x.com/alphaproj', website: 'https://alpha.example', telegram: null },
       x: parseXLink('https://x.com/alphaproj'), site, score: 8, reasons: ['own X account @alphaproj', 'website alpha.example ("Alpha")', 'website links the same X account'], shortlistedAt: null,
-      xPage: null, xCheckedAt: null, siteCheckedAt: null, ca: { status: 'UNCONFIRMED' as const, detail: 'CA not posted by @alphaproj yet' }, clone: null };
+      xPage: null, xCheckedAt: null, siteCheckedAt: null, ca: { status: 'UNCONFIRMED' as const, detail: 'CA not posted by @alphaproj yet' }, clone: null,
+      insiders: { wallets: [owner.toBase58()], creatorPct: 2, insiderPct: 9, slot: 1, detail: 'insiders hold 9.0%: dev 2.0% + 1 wallet in the creation slot' } };
     const alerts: Array<{ title: string; body: string }> = [];
     const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }),
       launches: { poll: async () => [launch], recent: () => [launch] }, notify: async (title, body) => { alerts.push({ title, body }); } });
@@ -913,7 +924,8 @@ test('LAUNCH: the project posting the CA on X allows an entry from 1 min; unconf
       meta: { description: null, twitter: 'https://x.com/alphaproj', website: 'https://alpha.example', telegram: null },
       x: parseXLink('https://x.com/alphaproj'), site, score: 8, reasons: ['own X account @alphaproj', 'website alpha.example ("Alpha")', 'website links the same X account'],
       shortlistedAt: null, xPage: null, xCheckedAt: null, siteCheckedAt: null, clone: null,
-      ca: { status: 'UNCONFIRMED' as 'UNCONFIRMED' | 'X' | 'IMPERSONATOR', detail: 'CA not posted by @alphaproj yet' } };
+      ca: { status: 'UNCONFIRMED' as 'UNCONFIRMED' | 'X' | 'IMPERSONATOR', detail: 'CA not posted by @alphaproj yet' },
+      insiders: { wallets: [owner.toBase58()], creatorPct: 2, insiderPct: 9, slot: 1, detail: 'insiders hold 9.0%: dev 2.0% + 1 wallet in the creation slot' } as { wallets: string[]; creatorPct: number; insiderPct: number; slot: number; detail: string } | undefined };
     const alerts: string[] = [];
     const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }),
       launches: { poll: async () => [], recent: () => [launch] }, notify: async title => { alerts.push(title); } });
@@ -949,6 +961,43 @@ test('LAUNCH: the project posting the CA on X allows an entry from 1 min; unconf
     assert.equal(alerts.filter(a => a === 'LAUNCH radar: ABC is an IMPERSONATOR').length, 1);
     await fs.rm(dir2, { recursive: true, force: true });
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('LAUNCH rug defence: insiders selling is a RUG exit (remembered); insiders still holding at 92% curve progress means selling before graduation', async () => {
+  const curve = { dexId: 'pumpfun', liquidity: null, marketCap: 20_000, fdv: 20_000, pairCreatedAt: NOW - 5 * 60_000, priceChange: { m5: 12, h1: 40 } };
+  const INS = key(77).toBase58();
+  for (const scenario of ['dump', 'graduation'] as const) {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), `desk-rug-${scenario}-`)), { w, shared } = world(curve);
+    try {
+      w.insider = INS; w.insiderRaw = 147_000_000_000_000n;
+      const launch = { mint: MINT, name: 'Pot Potato', symbol: 'ABC', uri: 'https://meta/1', creator: INS, at: Date.now() - 5 * 60_000, signature: 'S',
+        meta: { description: null, twitter: 'https://x.com/alphaproj', website: 'https://alpha.example', telegram: null }, x: parseXLink('https://x.com/alphaproj'), site,
+        score: 8, reasons: ['own X account @alphaproj'], shortlistedAt: null, xPage: null, xCheckedAt: null, siteCheckedAt: null, clone: null,
+        ca: { status: 'UNCONFIRMED' as const, detail: '' }, insiders: { wallets: [INS], creatorPct: 5.1, insiderPct: 14.7, slot: 1, detail: 'insiders hold 14.7%: dev 5.1% + 3 wallets in the creation slot' } };
+      const rugs: Array<{ mint: string; reason: string }> = [], alerts: string[] = [];
+      const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }), notify: async t => { alerts.push(t); },
+        launches: { poll: async () => [], recent: () => [launch], markRug: async (mint, reason) => { rugs.push({ mint, reason }); } } });
+      engine.setStrategy('CRASH', false); engine.start(); await engine.pulse();
+      let view = engine.status({ connected: false, address: null });
+      assert.equal(view.positions.length, 1, view.candidates[0]?.launch?.signal.summary);
+      const held = (await fs.readFile(path.join(dir, 'ledger-PAPER-LAUNCH.json'), 'utf8'));
+      assert.match(held, /"insiders": \[\s*"[^"]+"\s*\]/); assert.match(held, /"insiderPctAtEntry": 14\.7/); assert.match(held, /"onCurve": true/);
+      if (scenario === 'dump') w.insiderRaw = 90_000_000_000_000n;
+      else { const b = Buffer.alloc(151); b.writeBigUInt64LE(63_448_000_000_000n, 24); w.curve = b; }
+      await engine.pulse();
+      view = engine.status({ connected: false, address: null });
+      assert.equal(view.positions.length, 0, `${scenario}: sold`);
+      const exit = engine.events.list().find(e => e.stage === 'EXIT' && /exit signal/.test(e.message))!.message;
+      if (scenario === 'dump') {
+        assert.match(exit, /^LAUNCH · exit signal: RUG insiders sold: they hold 9\.0% \(was 14\.7% at entry\)$/);
+        assert.deepEqual(rugs.map(r => r.mint), [MINT], 'remembered: its creator, X account and website never get an entry again');
+        assert.ok(alerts.includes('ABC: RUG — selling'));
+      } else {
+        assert.match(exit, /^LAUNCH · exit signal: PRE_GRADUATION curve 92% full while insiders hold 14\.7%/);
+        assert.equal(rugs.length, 0, 'a precaution, not a rug');
+      }
+    } finally { await fs.rm(dir, { recursive: true, force: true }); }
+  }
 });
 
 test('a sell spends at most 1% of its value on priority fee (floor 50,000 lamports), and TEST closes the emptied token account on paper', async () => {

@@ -164,7 +164,8 @@ export function ruleMarketChecks(s: RuleSpec, m: CandidateMetrics): GateResult[]
   const e = s.entry, signed = (n: number) => `${n >= 0 ? '+' : ''}${n}%`;
   return [
     ...range('ruleMcap', 'Market cap', m.marketCapUsd, e.minMarketCapUsd, e.maxMarketCapUsd, usd, big),
-    ...range('ruleAge', 'Pool age', m.poolAgeMin, e.minPoolAgeMin, e.maxPoolAgeMin, v => v === null ? 'UNKNOWN' : `${Math.round(v)} min`, v => `${v} min`),
+    // Since the token's first AMM pool (its graduation), or its creation while on the curve — never a later extra pool.
+    ...range('ruleAge', 'Age (since first pool)', m.firstPoolAgeMin ?? m.tokenAgeMin ?? m.poolAgeMin, e.minPoolAgeMin, e.maxPoolAgeMin, v => v === null ? 'UNKNOWN' : `${Math.round(v)} min`, v => `${v} min`),
     ...range('rule5m', '5m price change', m.priceChange5mPct, e.minPriceChange5mPct, e.maxPriceChange5mPct, pct, signed),
     ...range('rule1h', '1h price change', m.priceChange1hPct, e.minPriceChange1hPct, e.maxPriceChange1hPct, pct, signed),
     ...range('ruleVol5m', '5m volume', m.volume5mUsd, e.minVolume5mUsd, null, usd, big),

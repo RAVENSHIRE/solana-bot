@@ -355,3 +355,22 @@ test('LP outage retains paper position without inventing current APR or a pool-g
       updateLp: (_id: string, patch: any) => { updated = patch; }, closeLp: () => { closed++; } } } as any);
   await sutr.updateLpPositions(); assert.equal(updated.missedUpdates, 21); assert.equal(updated.accruedFeesLamports, undefined); assert.equal(closed, 0);
 });
+
+test('pair selection: a pool quoted in another token wins when it holds the real liquidity (COMMIE/AMC); token age comes from the oldest pool', async () => {
+  const { selectPair, tokenTimes, pairMetrics } = await import('../src/desk/discovery');
+  const { normalizeDexPairs } = await import('../src/data/dexscreener');
+  const now = Date.now(), mint = 'So11111111111111111111111111111111111111112'.replace('So1', 'Co1');
+  const raw = (pairAddress: string, quote: { address: string; symbol: string }, liq: number, created: number, dexId = 'raydium') => ({ chainId: 'solana', dexId, pairAddress,
+    baseToken: { address: mint, symbol: 'COMMIE' }, quoteToken: quote, priceUsd: '0.0012', liquidity: { usd: liq }, marketCap: 1_200_000, pairCreatedAt: created });
+  const SOL = { address: 'So11111111111111111111111111111111111111112', symbol: 'SOL' }, AMC = { address: 'AMC1qwR9KhiyrQBRPrxnfo4JfMeMZqEBvt5tgTytNNoc', symbol: 'AMC' };
+  const pairs = normalizeDexPairs([raw('Cmcfrs6r6dsCyXvhooFbwvbvNDqe3vDHeXcKmfWGAzrr', AMC, 116_050, now - 60 * 60_000), raw('9j9UhKT8N27F3hZC1kjYMG6i9gL59qB3kdJM7hKozL6P', SOL, 5_874, now - 58 * 60_000, 'meteora')], now);
+  assert.equal(selectPair(pairs, mint, now)!.quoteToken.symbol, 'AMC');
+  const solDeep = normalizeDexPairs([raw('Cmcfrs6r6dsCyXvhooFbwvbvNDqe3vDHeXcKmfWGAzrr', AMC, 116_050, now), raw('9j9UhKT8N27F3hZC1kjYMG6i9gL59qB3kdJM7hKozL6P', SOL, 40_000, now, 'meteora')], now);
+  assert.equal(selectPair(solDeep, mint, now)!.quoteToken.symbol, 'SOL', 'a SOL pool with a fair share of the liquidity is preferred');
+  const thin = normalizeDexPairs([raw('Cmcfrs6r6dsCyXvhooFbwvbvNDqe3vDHeXcKmfWGAzrr', AMC, 9_000, now)], now);
+  assert.equal(selectPair(thin, mint, now), null, 'a thin pool in an odd quote token is not a market');
+  const t = tokenTimes(pairs, mint);
+  assert.equal(t.createdAt, now - 60 * 60_000);
+  const m = pairMetrics(selectPair(pairs, mint, now)!, now, t);
+  assert.equal(Math.round(m.tokenAgeMin!), 60); assert.equal(m.quote, 'AMC');
+});

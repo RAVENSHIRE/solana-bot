@@ -44,7 +44,7 @@ test('the feed reads only new launches each poll, fetches metadata, and checks t
   const fetcher = (async (url: string) => new Response(JSON.stringify(url.endsWith('/2')
     ? { description: 'Meme Industries: the factory for internet culture, onchain.', twitter: 'https://x.com/MemeInds', website: 'https://onsolchain.lol' }
     : { description: '' }))) as unknown as typeof fetch;
-  const feed = new LaunchFeed(rpc, fetcher, async url => { checked.push(url!); return site(); }, async () => xp());
+  const feed = new LaunchFeed(rpc, fetcher, async url => { checked.push(url!); return site(); }, async () => xp(), { insiders: null });
   const fresh = await feed.poll(1_790_870_900_000);
   assert.deepEqual(fresh.map(l => [l.symbol, l.score]).sort(), [['MEME', 9], ['TEST', 0]]);
   assert.equal(fresh.find(l => l.symbol === 'MEME')!.reasons.at(-1), 'CA not posted by @MemeInds yet');
@@ -62,7 +62,7 @@ test('clones (same X account, website or name as an earlier launch) lose their s
   const rpc = { execute: async (_l: string, fn: (c: never) => unknown) => fn(conn as never) } as never;
   const meta = { description: 'The dog before doge, chapter zero of the story.', twitter: 'https://x.com/kenonpump', website: 'https://kendoge.lol' };
   const fetcher = (async () => new Response(JSON.stringify(meta))) as unknown as typeof fetch;
-  const feed = new LaunchFeed(rpc, fetcher, async () => site({ url: 'https://kendoge.lol/', title: '$KEN', xHandles: ['kenonpump'] }), async () => xp());
+  const feed = new LaunchFeed(rpc, fetcher, async () => site({ url: 'https://kendoge.lol/', title: '$KEN', xHandles: ['kenonpump'] }), async () => xp(), { insiders: null });
   const fresh = await feed.poll(400_000);
   const by = (m: number) => fresh.find(l => l.mint === key(m).toBase58())!;
   assert.equal(by(11).score, 9, 'the first launch keeps its score');
@@ -114,7 +114,7 @@ test('the radar re-reads the X page of unconfirmed launches: Potato is confirmed
     _rpcRequest: async (_m: string, [sig]: [string]) => ({ result: { meta: { logMessages: logs[sig] ?? [] } } }) };
   const rpc = { execute: async (_l: string, fn: (c: never) => unknown) => fn(conn as never) } as never;
   const fetcher = (async () => new Response(JSON.stringify({ description: '', twitter: 'https://x.com/PotPotato_Sol', website: 'https://potpotato.fun/' }))) as unknown as typeof fetch;
-  const feed = new LaunchFeed(rpc, fetcher, async () => site({ url: 'https://potpotato.fun/', title: 'Pot Potato', xHandles: [] }), async h => { reads.push(h); return page; });
+  const feed = new LaunchFeed(rpc, fetcher, async () => site({ url: 'https://potpotato.fun/', title: 'Pot Potato', xHandles: [] }), async h => { reads.push(h); return page; }, { insiders: null });
   await feed.poll(clock);
   const first = feed.recent(clock).find(l => l.mint === key(21).toBase58())!, second = feed.recent(clock).find(l => l.mint === key(22).toBase58())!;
   assert.equal(first.score, 6); assert.equal(first.ca.status, 'UNCONFIRMED'); assert.match(second.reasons[0]!, /^CLONE of Potato/);
@@ -154,4 +154,62 @@ test('website check: a client-rendered site\'s CA is found in its own scripts, n
   assert.equal((await readXPage('stashdfun', xFetch('<html>Log in</html>'))).status, 'NO_POSTS');
   assert.equal((await readXPage('stashdfun', xFetch('', 429))).detail, 'HTTP 429');
   assert.equal((await readXPage('bad/handle', xFetch(''))).status, 'UNAVAILABLE');
+});
+
+test('the radar: X reach and a STRONG Claude review raise a launch; an account deleted after launch or a SCAM review makes it a rug', async () => {
+  let clock = 1_790_880_000_000;
+  const sigs = [{ signature: 'R2', blockTime: clock / 1000 - 30, err: null }, { signature: 'R1', blockTime: clock / 1000 - 40, err: null }];
+  const logs: Record<string, string[]> = { R1: [createLog('Good Proj', 'GOOD', 'https://meta/1', key(31))], R2: [createLog('Bad Proj', 'BAD', 'https://meta/2', key(32))] };
+  const conn = { getSignaturesForAddress: async (_a: unknown, o: { until?: string }) => o.until ? [] : sigs,
+    _rpcRequest: async (_m: string, [sig]: [string]) => ({ result: { meta: { logMessages: logs[sig] ?? [] } } }) };
+  const rpc = { execute: async (_l: string, fn: (c: never) => unknown) => fn(conn as never) } as never;
+  const fetcher = (async (url: string) => new Response(JSON.stringify(url.endsWith('/1')
+    ? { description: 'Good Proj: a real product for onchain creators.', twitter: 'https://x.com/goodproj', website: 'https://good.lol' }
+    : { description: 'Bad Proj', twitter: 'https://x.com/badproj', website: 'https://bad.lol' }))) as unknown as typeof fetch;
+  const profile = (handle: string, followers: number) => ({ handle, status: 'READ' as const, detail: '', addresses: [], claimed: [],
+    profile: { handle, name: null, createdAt: clock - 10 * 86_400_000, followers, following: 1, tweets: 5, blueVerified: false, bio: null },
+    posts: [{ id: '9', author: handle, at: clock - 60_000, text: 'we are live', views: 12_000, likes: 50, replies: 3, reposts: 2, quotes: 0 }] });
+  let badGone = false;
+  const reviews: string[] = [];
+  const feed = new LaunchFeed(rpc, fetcher, async url => site({ url: url!, title: url!.includes('good') ? 'Good Proj' : 'Bad Proj', xHandles: [url!.includes('good') ? 'goodproj' : 'badproj'] }),
+    async h => h === 'badproj' && badGone ? { handle: h, status: 'NOT_FOUND', detail: 'gone', addresses: [], claimed: [] } : profile(h, h === 'goodproj' ? 2_500 : 40),
+    { insiders: null, review: async i => { reviews.push(i.symbol); return { verdict: i.symbol === 'GOOD' ? 'STRONG' : 'OK', idea: 8, professionalism: 7, aiGenerated: 'UNLIKELY',
+      scamSignals: [], summary: 'ok', model: 'm', at: clock }; } });
+  await feed.poll(clock); await feed.settle();
+  const good = feed.recent(clock).find(l => l.symbol === 'GOOD')!, bad = feed.recent(clock).find(l => l.symbol === 'BAD')!;
+  assert.deepEqual(reviews.sort(), ['BAD', 'GOOD'], 'shortlist-level launches are reviewed once their X page was read');
+  // own X 3 + website 3 + links X 2 + description 1 + reach (2,500 followers +3, 12K views +2) + STRONG +3
+  assert.equal(good.score, 3 + 3 + 2 + 1 + 3 + 2 + 3);
+  assert.ok(good.reasons.includes('2,500 followers (+3)') && good.reasons.includes('Claude: STRONG · idea 8/10 · site 7/10 (+3)'), good.reasons.join(' | '));
+  assert.equal(bad.xSeenAt, clock);
+  // The bad project's account disappears: re-read (held positions every minute) → RUG.
+  badGone = true; feed.hold([bad.mint]);
+  clock += LAUNCH.heldReverifyMs; await feed.poll(clock);
+  assert.equal(bad.rug ?? null, null, 'one "not found" read is not enough');
+  clock += LAUNCH.heldReverifyMs; await feed.poll(clock);
+  assert.equal(bad.rug, 'RUG: X account @badproj was deleted after launch'); assert.equal(bad.score, 0); assert.equal(bad.reasons[0], bad.rug);
+  // A SCAM verdict is a rug too.
+  const scam = new LaunchFeed(rpc, fetcher, async url => site({ url: url! }), async h => profile(h, 900),
+    { insiders: null, review: async () => ({ verdict: 'SCAM', idea: 1, professionalism: 2, aiGenerated: 'LIKELY', scamSignals: ['asks to send SOL'], summary: 'Giveaway asking to send SOL', model: 'm', at: clock }) });
+  await scam.poll(clock); await scam.settle();
+  assert.ok(scam.recent(clock).every(l => l.score === 0 && l.rug === 'SCAM (Claude review): Giveaway asking to send SOL'));
+});
+
+test('X feed signals: a post by the project itself confirms the CA; posts by others add reach; unseen mints go to the scanner', async () => {
+  const clock = 1_790_880_000_000;
+  const sigs = [{ signature: 'S1', blockTime: clock / 1000 - 30, err: null }];
+  const conn = { getSignaturesForAddress: async (_a: unknown, o: { until?: string }) => o.until ? [] : sigs,
+    _rpcRequest: async () => ({ result: { meta: { logMessages: [createLog('Proj', 'PRJ', 'https://meta/1', key(41))] } } }) };
+  const rpc = { execute: async (_l: string, fn: (c: never) => unknown) => fn(conn as never) } as never;
+  const fetcher = (async () => new Response(JSON.stringify({ description: 'Proj builds things on chain for everyone.', twitter: 'https://x.com/projx', website: 'https://proj.lol' }))) as unknown as typeof fetch;
+  const feed = new LaunchFeed(rpc, fetcher, async () => site({ url: 'https://proj.lol/', title: 'Proj', xHandles: ['projx'] }), async () => xp(), { insiders: null });
+  await feed.poll(clock);
+  const l = feed.recent(clock)[0]!, base = l.score;
+  const sig = (handle: string, mint: string, views: number, followers: number) => ({ mint, handle, followers, accountCreatedAt: null, postId: `${handle}-${mint}`, postAt: clock - 30_000, views, likes: 3, text: 'ca' });
+  feed.addXSignals([sig('ProjX', l.mint, 800, 300)], clock);
+  assert.equal(l.ca.status, 'X', 'the project account posting the CA (via the X API) confirms it'); assert.equal(l.score, base + 3);
+  feed.addXSignals([sig('bigcaller', l.mint, 40_000, 90_000)], clock);
+  assert.equal(l.score, base + 3 + 2); assert.match(l.reasons.at(-1)!, /^posted on X by @bigcaller \(90,000 followers, 40,000 views\) \(\+2\)$/);
+  feed.addXSignals([sig('other', key(42), 5_000, 1_000)], clock);
+  assert.deepEqual(feed.xOnly(clock).map(x => x.mint), [key(42)], 'a mint the radar did not see launch is handed to the scanner');
 });

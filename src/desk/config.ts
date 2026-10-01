@@ -255,7 +255,7 @@ export function strategyProfiles(env: NodeJS.ProcessEnv, capital: DeskCapital,
         : { takeProfitPct: e.CRASH_TAKE_PROFIT_PCT, stopLossPct: e.CRASH_STOP_LOSS_PCT, maxHoldMin: e.CRASH_MAX_HOLD_MIN, trailing: null,
           giveback: e.CRASH_LOCK_PEAK_PCT > 0 ? { lockPeakPct: e.CRASH_LOCK_PEAK_PCT, points: e.CRASH_GIVEBACK_PTS } : null } },
     LAUNCH: { id: 'LAUNCH', label: 'LAUNCH', enabled: true,
-      summary: 'Fresh pump.fun launches with their own X account and a real website, bought on the curve 1–12 min after creation once the project shows the CA (3 min otherwise); impersonators blocked (the @glabuz Meme Industries entry); TEST first',
+      summary: 'Fresh pump.fun launches with their own X account and a real website: bought on the curve 1–12 min after creation once the project shows the CA (3 min otherwise), or after graduation up to 90 min / $400K when the X reach is strong; impersonators, rugs and insider dumps blocked or sold (the @glabuz Meme Industries entry); TEST first',
       capitalUsd: capital.plannedStartingCapitalUsd, entryUsd: capital.baseEntryUsd, slippageBps: 600, exitSlippageBps: 1_500, maxDragBps: 1_200n,
       maxOpenPositions: 2, positionCheckMs: 3_000, exitMode: 'rules', reentryCooldownMs: 4 * 60 * 60_000,
       exits: { takeProfitPct: Number.POSITIVE_INFINITY, stopLossPct: 40, maxHoldMin: 240, trailing: { activationPct: 100, stopPct: 35 }, giveback: null, graceMs: 60_000 } },
@@ -270,6 +270,13 @@ export function strategyProfiles(env: NodeJS.ProcessEnv, capital: DeskCapital,
 export const LAUNCH_ENTRY = Object.freeze({
   minScore: 6, minAgeMin: 3, minAgeConfirmedMin: 1, maxAgeMin: 12,
   minMarketCapUsd: 5_000, maxMarketCapUsd: 40_000,
+  /**
+   * Second window, after graduation: a launch with strong X reach that outran the curve window (Ansemmas on 1 Oct:
+   * curve bought out in 89 s, $63K at 3 min with a 21.7K-view post, $1.03M three hours later; WIRED: $75K at
+   * graduation, $2.7M 26 min later). Entered from the first AMM pool up to 90 min after creation, $40K–$400K.
+   */
+  migrated: Object.freeze({ maxAgeMin: 90, minMarketCapUsd: 40_000, maxMarketCapUsd: 400_000, minScore: 9, minVolume5mUsd: 10_000, minBuys5m: 40,
+    minFollowers: 300, minBestViews: 5_000 }),
   minVolume5mUsd: 1_000, minBuys5m: 10,
   maxTop10WalletPct: 35, maxLargestWalletPct: 12, maxDeveloperPct: 10,
 });

@@ -412,37 +412,43 @@ function PreflightCard({ p, live }: { p: Preflight | null; live: boolean }) {
   </section>;
 }
 
+/**
+ * Candidates: the general scan (market data for every token found, FOMO-style) and, separately, what each ENABLED
+ * strategy says about it. A strategy that is off says nothing; the scan itself never filters on a strategy's rules.
+ */
 function Candidates({ list, probe, busy }: { list: Candidate[]; probe: ((mint: string) => void) | null; busy: boolean }) {
   const [open, setOpen] = useState<string | null>(null);
+  const age = (m: number | null | undefined) => m == null ? '?' : m < 60 ? `${Math.round(m)}m` : m < 2_880 ? `${(m / 60).toFixed(m < 600 ? 1 : 0)}h` : `${Math.round(m / 1_440)}d`;
+  const change = (v: number | null | undefined) => v == null ? '--' : <span className={v >= 0 ? 'chg-up' : 'chg-down'}>{v >= 0 ? '+' : ''}{v >= 1000 ? Math.round(v).toLocaleString('en-US') : v.toFixed(1)}%</span>;
   return <section className="panel desk-card" aria-label="Candidates">
-    <div className="card-head"><h3>Candidates · what is scanned and why it passed or failed</h3><small>{list.length} shown</small></div>
+    <div className="card-head"><h3>Candidates · market data, and what each enabled strategy says</h3><small>{list.length} shown · age = since the token appeared, not the pool</small></div>
     <div className="wallet-table"><table className="cand"><thead><tr>
-      <th>Token / CA</th><th>Tier</th><th>FAIR status</th><th>CRASH</th><th title="Your custom strategies: entry-ready, or the first rule that is not met">Custom</th><th>Market cap</th><th>Pool age</th><th>Liquidity</th><th>5m vol</th><th>Buy/sell</th><th>Accel.</th>
-      <th title="Owners with a balance · share of the 10 largest wallets (pools and curves excluded)">Holders</th><th>Dev</th><th>Website</th><th>X</th><th>X activity</th><th>Narrative</th><th>Mint / freeze</th><th>Risk flags</th></tr></thead>
-      <tbody>{list.map(c => <Fragment key={c.mint}>
-        <tr className={`status-${c.status.toLowerCase()}${c.stale ? ' stale' : ''}`} onClick={() => setOpen(open === c.mint ? null : c.mint)} aria-expanded={open === c.mint}>
-          <td title={c.mint}><strong>{c.symbol ?? '?'}</strong> <Fomo mint={c.mint} /><br /><small>{short(c.mint)}</small></td>
-          <td>{c.tier === 'ULTRA_EARLY' ? 'Ultra-early' : c.tier === 'CUSTOM' ? 'Custom only' : 'Trending'}</td>
+      <th>Token / CA</th><th title="Since creation (pump.fun) or the oldest pool; after: since graduation / first AMM pool">Age</th><th>Market cap</th><th>Liquidity</th>
+      <th>Vol 5m / 1h</th><th title="Buys / sells in the last hour">Txns 1h</th><th>5m</th><th>1h</th><th>6h</th><th>Buy/sell 5m</th>
+      <th title="Owners with a balance · share of the 10 largest wallets (pools and curves excluded)">Holders</th><th>X</th>
+      <th title="Every enabled strategy: entry-ready, or the first rule it misses">Strategies</th><th>Mint / freeze</th><th>Risk flags</th></tr></thead>
+      <tbody>{list.map(c => { const m = c.metrics, v = c.verdicts ?? []; return <Fragment key={c.mint}>
+        <tr className={`${v.some(x => x.signal) ? 'status-qualified' : 'status-watchlist'}${c.stale ? ' stale' : ''}`} onClick={() => setOpen(open === c.mint ? null : c.mint)} aria-expanded={open === c.mint}>
+          <td title={c.mint}><strong>{c.symbol ?? '?'}</strong> <Fomo mint={c.mint} /><br /><small>{short(c.mint)}{c.sources.includes('launch-radar') ? ' · radar' : ''}{c.sources.includes('x-feed') ? ' · X feed' : ''}</small></td>
+          <td>{age(m.tokenAgeMin ?? m.poolAgeMin)}<br /><small>{m.migration === 'BONDING_CURVE' ? 'on curve' : m.firstPoolAgeMin != null ? `grad. ${age(m.firstPoolAgeMin)}` : ''}</small></td>
+          <td>{usdOrUnknown(m.marketCapUsd)}</td><td>{usdOrUnknown(m.liquidityUsd)}<br /><small>{m.quote && !['SOL', 'WSOL', 'USDC', 'USDT'].includes(m.quote) ? `vs ${m.quote}` : ''}</small></td>
+          <td>{usdOrUnknown(m.volume5mUsd)}<br /><small>{usdOrUnknown(m.volume1hUsd)}</small></td>
+          <td>{m.buys1h == null ? '--' : `${m.buys1h} / ${m.sells1h ?? 0}`}</td>
+          <td>{change(m.priceChange5mPct)}</td><td>{change(m.priceChange1hPct)}</td><td>{change(m.priceChange6hPct)}</td>
+          <td>{m.buySellRatio5m === null ? '--' : m.buySellRatio5m.toFixed(2)}</td>
+          <td>{holderCount(c.holders)}<br /><small>top-10 {pct(m.top10WalletPct)}</small></td>
+          <td>{c.social.x.kind === 'NONE' ? 'none' : `${c.social.x.handle ? `@${c.social.x.handle}` : c.social.x.kind.toLowerCase()}`}
+            <br /><small>{c.social.xFollowers != null ? `${c.social.xFollowers.toLocaleString('en-US')} followers` : c.social.authenticity}</small></td>
           <td>{c.stale ? <span className="badge-stale" title="Not re-assessed in the last scan; never traded on">STALE · {ago(c.updatedAt)}</span>
-            : <span className={`badge-${c.status.toLowerCase()}`}>{c.status}</span>}<br /><small>{c.entryNotes?.FAIR ?? c.classification.replace('_', ' ')}</small></td>
-          <td title={c.crash?.summary}>{c.stale ? <span className="badge-stale">STALE</span> : c.crash?.signal ? <span className="badge-qualified">SIGNAL</span> : <span className="badge-filtered">no</span>}<br />
-            <small>{c.entryNotes?.CRASH ?? (c.crash ? (c.crash.signal ? 'entry-ready' : c.crash.summary.split(':')[0]) : '--')}</small></td>
-          <td>{Object.entries(c.rules ?? {}).map(([id, r]) => <div key={id} title={r.summary}>
-            {c.stale ? <span className="badge-stale">STALE</span> : r.signal ? <span className="badge-qualified">{id}</span> : <span className="badge-filtered">{id}</span>}
-            <br /><small>{c.entryNotes?.[id] ?? (r.signal ? 'entry-ready' : r.summary.split(':')[0])}</small></div>)}{!c.rules && '--'}</td>
-          <td>{usdOrUnknown(c.metrics.marketCapUsd)}</td><td>{c.metrics.poolAgeMin === null ? 'UNKNOWN' : `${numeric(c.metrics.poolAgeMin, 0)}m`}</td>
-          <td>{usdOrUnknown(c.metrics.liquidityUsd)}</td><td>{usdOrUnknown(c.metrics.volume5mUsd)}</td>
-          <td>{c.metrics.buySellRatio5m === null ? 'UNKNOWN' : c.metrics.buySellRatio5m.toFixed(2)}</td>
-          <td>{c.metrics.volumeAcceleration === null ? 'UNKNOWN' : `${c.metrics.volumeAcceleration.toFixed(2)}×`}</td>
-          <td>{holderCount(c.holders)}<br /><small>top-10 {pct(c.metrics.top10WalletPct)}</small></td><td>{pct(c.metrics.developerPct, 2)}</td><td>{c.social.websiteStatus}</td>
-          <td>{c.social.x.kind === 'NONE' ? 'none' : `${c.social.x.kind}${c.social.x.handle ? ` @${c.social.x.handle}` : ''}`}<br /><small className={`auth-${c.social.authenticity.toLowerCase()}`}>{c.social.authenticity}</small></td>
-          <td>{c.social.xPosts7d === null ? 'UNKNOWN' : `${c.social.xPosts7d} posts/7d`}</td><td>{c.social.narrativeVelocity}</td>
-          <td>{c.onchain.mintAuthority === null ? 'UNKNOWN' : `${c.onchain.mintAuthority ? 'ACTIVE' : 'revoked'} / ${c.onchain.freezeAuthority ? 'ACTIVE' : 'revoked'}`}</td>
+            : v.length ? v.map(x => <div key={x.id} title={x.summary}>{x.signal ? <span className="badge-qualified">{x.id} ✓</span> : <span className="badge-filtered">{x.id}</span>}
+              {' '}<small>{c.entryNotes?.[x.id] ?? (x.signal ? 'entry-ready' : x.summary.split(':')[0])}</small></div>)
+            : <small>no enabled strategy covers it</small>}</td>
+          <td>{c.onchain.mintAuthority === null ? '?' : `${c.onchain.mintAuthority ? 'ACTIVE' : 'revoked'} / ${c.onchain.freezeAuthority ? 'ACTIVE' : 'revoked'}`}</td>
           <td>{c.riskFlags.length ? c.riskFlags.slice(0, 2).join('; ') : '—'}</td>
         </tr>
-        {open === c.mint && <tr className="detail-row"><td colSpan={19}><CandidateDetail c={c} probe={probe} busy={busy} /></td></tr>}
-      </Fragment>)}
-      {!list.length && <tr><td colSpan={19}>No candidates yet. The first scan starts with TEST or a LIVE session.</td></tr>}</tbody></table></div>
+        {open === c.mint && <tr className="detail-row"><td colSpan={15}><CandidateDetail c={c} probe={probe} busy={busy} /></td></tr>}
+      </Fragment>; })}
+      {!list.length && <tr><td colSpan={15}>No candidates yet. The first scan starts with TEST or a LIVE session.</td></tr>}</tbody></table></div>
   </section>;
 }
 
@@ -633,25 +639,37 @@ function Watch({ t, d }: { t: TradingSession; d: DeskStatus }) {
 
 /**
  * Launch radar: fresh pump.fun launches with their own X account and a live website (the @glabuz Meme Industries
- * pattern), shortlisted seconds after creation. The X page and website are read for the contract address: this CA
- * there confirms the launch, another CA there exposes an impersonator. The LAUNCH strategy buys the best of them 1–12
- * minutes in; each find is also an alert with a FOMO link, to buy by hand.
+ * pattern), shortlisted seconds after creation and ranked by score and X followers. The X page is read for followers,
+ * account age, post views and the contract address; the website for the CA too (another CA marks an impersonator);
+ * the chain for the insiders (dev + creation-slot buyers); Claude reviews the idea and the site. LAUNCH buys the best
+ * on the curve 1–12 min in, or after graduation when the X reach is strong; each find is an alert with a FOMO link.
  */
 function LaunchRadar({ d }: { d: DeskStatus }) {
   const list = d.launches ?? [], mins = (at: number) => `${Math.max(0, Math.round((Date.now() - at) / 60_000))} min`;
-  const ca = (c: NonNullable<DeskStatus['launches']>[number]['ca']) => !c ? '--' : c.status === 'X' ? '✓ on X' : c.status === 'WEBSITE' ? '✓ on site'
-    : c.status === 'IMPERSONATOR' ? '✗ FAKE' : 'not yet';
+  type L = NonNullable<DeskStatus['launches']>[number];
+  const ca = (c: L['ca']) => !c ? '--' : c.status === 'X' ? '✓ on X' : c.status === 'WEBSITE' ? '✓ on site' : c.status === 'IMPERSONATOR' ? '✗ FAKE' : 'not yet';
+  const num = (n: number | null | undefined) => n == null ? '?' : n >= 10_000 ? `${(n / 1000).toFixed(0)}K` : n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+  const x = d.xFeed;
   return <section className="panel desk-card" aria-label="Launch radar">
     <div className="card-head"><h3>Launch radar · new pump.fun launches with their own X account and a website</h3>
-      <small>About 50 launches a minute are read from the chain; few have both. Their X page and website are read for the CA: another CA there marks an impersonator.
-        LAUNCH buys at $5K–$40K, from 1 min once the project shows this CA (3 min otherwise), until 12 min.</small></div>
-    <div className="wallet-table"><table><thead><tr><th>Token</th><th>Age</th><th>Score</th><th>CA</th><th>Why</th><th>X</th><th>Website</th><th>Market cap</th><th>Status</th></tr></thead>
-      <tbody>{list.map(l => <tr key={l.mint} className={l.signal ? 'launch-ready' : l.ca?.status === 'IMPERSONATOR' ? 'launch-fake' : ''}>
+      <small>About 50 launches a minute are read from the chain. The X page (followers, account age, post views, CA), the website (CA) and the insiders
+        (dev + creation-slot wallets) are checked; Claude rates the idea and the site. More followers rank higher. LAUNCH buys $5K–$40K on the curve 1–12 min in,
+        or $40K–$400K after graduation with strong X reach; it sells when insiders sell, before graduation while they hold ≥ 8%, and on any rug sign.
+        X feed: {x ? (x.configured ? (x.lastError ?? `${x.signals} token posts read`) : 'off (set X_BEARER_TOKEN in .env)') : 'off'}.</small></div>
+    <div className="wallet-table"><table><thead><tr><th>Token</th><th>Age</th><th>Score</th><th>CA</th><th title="Followers · best post views (3 days) · account age">X reach</th>
+      <th title="Creator + wallets that bought in the creation slot">Insiders</th><th>Claude</th><th>Why</th><th>Links</th><th>Market cap</th><th>Status</th></tr></thead>
+      <tbody>{list.map(l => <tr key={l.mint} className={l.signal ? 'launch-ready' : l.rug || l.ca?.status === 'IMPERSONATOR' ? 'launch-fake' : ''}>
         <td title={l.mint}><strong>{l.symbol}</strong> <Fomo mint={l.mint} /><br /><small>{l.name.slice(0, 40)}</small></td>
-        <td>{mins(l.at)}</td><td>{l.score}</td><td title={l.ca?.detail}><small>{ca(l.ca)}</small></td><td><small>{l.reasons.join(' · ')}</small></td>
-        <td>{l.x ? <a href={l.x} target="_blank" rel="noreferrer">X</a> : '--'}</td>
-        <td>{l.website ? <a href={l.website} target="_blank" rel="noreferrer">{(() => { try { return new URL(l.website).hostname; } catch { return 'site'; } })()}</a> : '--'}</td>
+        <td>{mins(l.at)}</td><td>{l.score}</td><td title={l.ca?.detail}><small>{l.rug ? '✗ RUG' : ca(l.ca)}</small></td>
+        <td><small>{num(l.followers)} followers<br />{l.bestViews != null ? `${num(l.bestViews)} views` : '--'}{l.accountAgeDays != null ? ` · ${l.accountAgeDays < 1 ? `${Math.max(1, Math.round(l.accountAgeDays * 24))} h` : `${Math.round(l.accountAgeDays)} d`} old` : ''}
+          {l.xPosts ? <><br />{l.xPosts} X-feed post{l.xPosts > 1 ? 's' : ''}</> : null}</small></td>
+        <td title={l.insiders ?? undefined}><small>{l.insiderPct != null ? `${l.insiderPct.toFixed(1)}%` : 'reading'}</small></td>
+        <td title={l.review ? `${l.review.summary}${l.review.scamSignals.length ? ` · Scam signs: ${l.review.scamSignals.join('; ')}` : ''}` : undefined}>
+          <small>{l.review ? <>{l.review.verdict}<br />idea {l.review.idea}/10 · site {l.review.professionalism}/10</> : '--'}</small></td>
+        <td><small>{l.reasons.join(' · ')}</small></td>
+        <td><small>{l.x ? <a href={l.x} target="_blank" rel="noreferrer">X</a> : 'no X'}{' · '}
+          {l.website ? <a href={l.website} target="_blank" rel="noreferrer">{(() => { try { return new URL(l.website).hostname; } catch { return 'site'; } })()}</a> : 'no site'}</small></td>
         <td>{cap(l.marketCapUsd)}</td><td><small>{l.signal ? 'ENTRY-READY · ' : ''}{l.status}</small></td></tr>)}
-        {!list.length && <tr><td colSpan={9}>No launch with its own X account and a live website yet. The radar runs while TEST or LIVE scans.</td></tr>}</tbody></table></div>
+        {!list.length && <tr><td colSpan={11}>No launch with its own X account and a live website yet. The radar runs while TEST or LIVE scans.</td></tr>}</tbody></table></div>
   </section>;
 }
