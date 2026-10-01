@@ -1,4 +1,4 @@
-import { CRASH_ENTRY, type ExitRules, type StrategyProfile } from './config';
+import { CRASH_ENTRY, LAUNCH_ENTRY, type ExitRules, type StrategyProfile } from './config';
 import type { Candidate, CandidateMetrics, CrashSignal, DeskMode, GateResult, LedgerEntry, ScaleAdvice, StrategyStats } from './types';
 
 const usd = (n: number | null) => n === null ? 'UNKNOWN' : `$${n >= 1000 ? Math.round(n).toLocaleString('en-US') : n.toFixed(2)}`;
@@ -52,6 +52,30 @@ export function crashCheck(c: Candidate): CrashSignal {
   const miss = checks.find(g => g.blocking && g.status !== 'PASS');
   const summary = signal
     ? `${pct(m.priceChange5mPct)} in 5m · pool ${Math.round(m.poolAgeMin ?? 0)} min · ${usd(m.volume5mUsd)} 5m volume · buy/sell ${m.buySellRatio5m?.toFixed(2)}`
+    : `${miss!.label}: ${miss!.actual} (${miss!.required})`;
+  return { signal, checks, summary };
+}
+
+/**
+ * LAUNCH entry: a shortlisted launch (own X account + live website) 3–12 min after creation — when Jupiter routes the
+ * curve — still early ($8K–$40K), with real buying, no whale and no dev bag; the safety gates must pass.
+ */
+export function launchEntryCheck(c: Candidate, l: { score: number; at: number }, now: number): CrashSignal {
+  const r = LAUNCH_ENTRY, m = c.metrics, age = (now - l.at) / 60_000;
+  const safety = (key: string): GateResult => { const g = c.gates.find(x => x.key === key); return g ? { ...g, blocking: true } : { key, label: key, status: 'UNKNOWN', actual: 'not evaluated', required: 'PASS', blocking: true }; };
+  const checks: GateResult[] = [
+    check('launchScore', 'Launch quality (X account + website)', l.score, v => v >= r.minScore, String(l.score), `≥ ${r.minScore}`),
+    check('launchAge', 'Minutes since launch', age, v => v >= r.minAgeMin && v <= r.maxAgeMin, `${age.toFixed(1)} min`, `${r.minAgeMin}–${r.maxAgeMin} min`),
+    check('launchMcap', 'Market cap', m.marketCapUsd, v => v >= r.minMarketCapUsd && v <= r.maxMarketCapUsd, usd(m.marketCapUsd), `${usd(r.minMarketCapUsd)}–${usd(r.maxMarketCapUsd)}`),
+    check('launchVolume', '5m volume', m.volume5mUsd, v => v >= r.minVolume5mUsd, usd(m.volume5mUsd), `≥ ${usd(r.minVolume5mUsd)}`),
+    check('launchBuys', 'Buys (5m)', m.buys5m, v => v >= r.minBuys5m, m.buys5m === null ? 'UNKNOWN' : String(m.buys5m), `≥ ${r.minBuys5m}`),
+    check('launchTop10', 'Top-10 wallet concentration', m.top10WalletPct, v => v <= r.maxTop10WalletPct, pct(m.top10WalletPct), `≤ ${r.maxTop10WalletPct}%`),
+    check('launchLargest', 'Largest single wallet', m.largestWalletPct, v => v <= r.maxLargestWalletPct, pct(m.largestWalletPct), `≤ ${r.maxLargestWalletPct}%`),
+    check('launchDev', 'Developer holding', m.developerPct, v => v <= r.maxDeveloperPct, pct(m.developerPct), `≤ ${r.maxDeveloperPct}%`, m.developerPct !== null),
+    safety('mintAuthority'), safety('freezeAuthority'), safety('contract'),
+  ];
+  const signal = checks.every(g => !g.blocking || g.status === 'PASS'), miss = checks.find(g => g.blocking && g.status !== 'PASS');
+  const summary = signal ? `score ${l.score} · ${age.toFixed(1)} min old · ${usd(m.marketCapUsd)} cap · ${usd(m.volume5mUsd)} 5m volume · top-10 ${pct(m.top10WalletPct)}`
     : `${miss!.label}: ${miss!.actual} (${miss!.required})`;
   return { signal, checks, summary };
 }

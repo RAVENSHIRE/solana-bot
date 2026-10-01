@@ -806,7 +806,7 @@ test('custom strategy specs are validated: built-in ids, inverted bands, slippag
   const ok = parseRuleSpec(RUNNER_PRESET);
   assert.equal(ok.entry.minHolders, 1_000); assert.equal(ok.exits.takeProfitPct, null); assert.equal(ok.entry.requireXAccount, false);
   const bad = (patch: (s: RuleSpecInput) => void, re: RegExp) => { const s = structuredClone(RUNNER_PRESET); patch(s); assert.throws(() => parseRuleSpec(s), re); };
-  bad(s => { s.id = 'CRASH'; }, /^Error: INVALID_STRATEGY_SPEC: id: FAIR and CRASH are built in/);
+  bad(s => { s.id = 'CRASH'; }, /^Error: INVALID_STRATEGY_SPEC: id: FAIR, CRASH and LAUNCH are built in/);
   bad(s => { s.id = 'x y'; }, /INVALID_STRATEGY_SPEC: id/);
   bad(s => { s.entry.minMarketCapUsd = 30_000_000; }, /market cap: minimum above maximum/);
   bad(s => { s.sizing.slippageBps = 900; s.sizing.exitSlippageBps = 900; }, /must stay below/);
@@ -876,6 +876,31 @@ test('a copycat (same ticker as an older token 3× bigger) is never entered: the
     const fresh = await DeskEngine.create({ ...shared, mode: 'PAPER', dir: await fs.mkdtemp(path.join(os.tmpdir(), 'desk-copycat-2-')), sender: null, wallet: () => ({ owner, signer: null }) });
     fresh.start(); await fresh.pulse();
     assert.equal(fresh.status({ connected: false, address: null }).positions.length, 1, 'without a bigger namesake the same signal is entered');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('LAUNCH: a fresh pump.fun launch with its own X account and website is bought on the curve 3–12 min after creation, with alerts', async () => {
+  const curve = { dexId: 'pumpfun', liquidity: null, marketCap: 20_000, fdv: 20_000, pairCreatedAt: NOW - 5 * 60_000, priceChange: { m5: 12, h1: 40 } };
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-launch-')), { shared } = world(curve);
+  try {
+    const launch = { mint: MINT, name: 'Alpha', symbol: 'ABC', uri: 'https://meta/1', creator: null, at: Date.now() - 5 * 60_000, signature: 'S',
+      meta: { description: 'Alpha does things on chain, every day.', twitter: 'https://x.com/alphaproj', website: 'https://alpha.example', telegram: null },
+      x: parseXLink('https://x.com/alphaproj'), site, score: 8, reasons: ['own X account @alphaproj', 'website alpha.example ("Alpha")', 'website links the same X account'], shortlistedAt: null };
+    const alerts: Array<{ title: string; body: string }> = [];
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }),
+      launches: { poll: async () => [launch], recent: () => [launch] }, notify: async (title, body) => { alerts.push({ title, body }); } });
+    engine.setStrategy('CRASH', false); engine.start(); await engine.pulse();
+    const view = engine.status({ connected: false, address: null });
+    const c = view.candidates.find(x => x.mint === MINT)!;
+    assert.equal(c.tier, 'ULTRA_EARLY'); assert.equal(c.launch!.signal.signal, true, c.launch!.signal.summary);
+    assert.equal(view.positions.length, 1); assert.equal(view.positions[0]!.strategy, 'LAUNCH');
+    assert.ok(engine.events.list().some(e => /^LAUNCH radar: ABC "Alpha" 5 min old · score 8 · own X account @alphaproj/.test(e.message)));
+    assert.ok(engine.events.list().some(e => /^LAUNCH entry selected: score 8 · 5\.\d min old · \$20,000 cap/.test(e.message)));
+    assert.deepEqual(alerts.map(a => a.title), ['LAUNCH radar: ABC (5 min old)', 'LAUNCH entry-ready: ABC']);
+    assert.match(alerts[1]!.body, new RegExp(`https://fomo.family/tokens/solana/${MINT}$`));
+    assert.equal(view.launches![0]!.status, 'held by LAUNCH'); assert.equal(view.launches![0]!.marketCapUsd, 20_000);
+    const live = await DeskEngine.create({ ...shared, mode: 'LIVE', dir, sender: null, wallet: () => null });
+    assert.equal(live.strategies.LAUNCH.enabled, false, 'LIVE starts LAUNCH off');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 

@@ -18,7 +18,7 @@ import { BASE_FEE_LAMPORTS, SOL_MINT, TOKEN_ACCOUNT_RENT_LAMPORTS } from '../cor
 import type { Logger } from '../utils/logger';
 import { errorMessage } from '../utils/errors';
 import { atomicWriteFile } from '../utils/fs';
-import { DESK, STRATEGY_IDS, strategyProfiles, type BuiltinStrategyId, type DeskCapital, type DeskOperational, type LiveSignerKind, type StrategyProfile } from './config';
+import { DESK, LAUNCH_ENTRY, STRATEGY_IDS, strategyProfiles, type BuiltinStrategyId, type DeskCapital, type DeskOperational, type LiveSignerKind, type StrategyProfile } from './config';
 import { EventLog } from './events';
 import { DeskLedger, uiAmount, type LedgerState } from './ledger';
 import { discover, pairMetrics, selectPair, tierFor, type Discovered } from './discovery';
@@ -29,8 +29,10 @@ import { reclaimRent } from './rent';
 import { assessAuthenticity, checkWebsite, parseXLink, type WebsiteCheck, type XClient } from './social';
 import { analyze, type SocialEvidence, type WatchState } from './analysis';
 import { DeskGuard, DeskReject, PaperExecution, paperSigner } from './guard';
-import { crashCheck, crashMarketHint, exitReason, exitRuleText, scaleAdvice, strategyStats } from './strategies';
+import { crashCheck, crashMarketHint, launchEntryCheck, exitReason, exitRuleText, scaleAdvice, strategyStats } from './strategies';
 import type { Candidate, DeskEvent, DeskMode, DeskPosition, DeskStatus, Preflight, Stage, StrategyId, StrategyView, Tier } from './types';
+import type { Launch, LaunchSource } from './launches';
+import { fomoUrl } from './watch';
 import { PRESETS, loadRuleSpecs, removeRuleSpec, ruleCheck, ruleMarketHint, ruleProfile, saveRuleSpec, type RuleSpec } from './custom';
 
 export interface DeskWallet { owner: PublicKey; signer: TransactionSigner | null }
@@ -46,13 +48,17 @@ export interface DeskDeps {
   /** Strategy settings; defaults to strategyProfiles() of the desk capital and RS_* rules. */
   strategies?: Record<BuiltinStrategyId, StrategyProfile>;
   operational?: DeskOperational;
+  /** Launch radar (new pump.fun launches from the chain); absent: no LAUNCH entries. */
+  launches?: LaunchSource | null;
+  /** Phone/desktop alerts (ntfy, Telegram) for launch-radar finds and entry-ready signals. */
+  notify?: (title: string, body: string) => Promise<void>;
   /** LIVE: who signs (default PHANTOM) and how many new entries one LIVE session may open. */
   signerKind?: LiveSignerKind;
   liveMaxEntries?: number;
 }
 
 interface Deep { at: number; onchain: OnchainEvidence; social: SocialEvidence }
-interface Staged { found: Discovered; pair: DexPair; tier: Tier; metrics: ReturnType<typeof pairMetrics>; crashHint: boolean; ruleHints: StrategyId[] }
+interface Staged { found: Discovered; pair: DexPair; tier: Tier; metrics: ReturnType<typeof pairMetrics>; crashHint: boolean; ruleHints: StrategyId[]; launch: Launch | null }
 interface ExecTarget {
   strategy: StrategyId; mint: string; symbol: string | null; decimals: number; pairAddress: string; heldRaw: bigint; token2022?: boolean; drill?: boolean;
   entry?: { liquidityUsd: number | null; creator: string | null; creatorPct: number | null };
@@ -73,6 +79,10 @@ export class DeskEngine {
   private drillSkips = new Map<string, number>();
   /** `${strategy}:${mint}` → when and why the guard last blocked an entry; skipped for DESK.entrySkipMs. */
   private entrySkips = new Map<string, { at: number; code: string }>();
+  /** Shortlisted launches (radar score ≥ LAUNCH_ENTRY.minScore) by mint, and which alerts were already sent. */
+  private launchList = new Map<string, Launch>();
+  private launchAlerts = new Set<string>();
+  private launchPoll: Promise<void> | null = null;
   /** Every priced token seen, by lower-case ticker and name: the original a copycat imitates is usually among them. */
   private names = new Map<string, Map<string, { mint: string; symbol: string | null; marketCapUsd: number; createdAt: number | null; at: number }>>();
   /** `${strategy}:${mint}` → why this scan did not enter a token (shown on the candidate). */
@@ -131,8 +141,10 @@ export class DeskEngine {
     this.events = new EventLog(d.mode, path.join(d.dir, `events-${d.mode}.json`));
     this.graduations = new GraduationFeed(d.rpc);
     const base = d.strategies ?? strategyProfiles({}, d.capital, d.cfg.rs);
-    this.strategies = { FAIR: { ...base.FAIR, exits: { ...base.FAIR.exits } }, CRASH: { ...base.CRASH, exits: { ...base.CRASH.exits } } };
-    for (const id of STRATEGY_IDS) this.strategies[id].enabled = d.operational?.strategyEnabled[d.mode][id] ?? (d.mode === 'LIVE' && id === 'CRASH' ? false : this.strategies[id].enabled);
+    const copy = (p: StrategyProfile): StrategyProfile => ({ ...p, exits: { ...p.exits } });
+    this.strategies = { FAIR: copy(base.FAIR), CRASH: copy(base.CRASH), LAUNCH: copy(base.LAUNCH) };
+    // LIVE starts the fast strategies OFF: the owner switches them on after TEST has shown how they trade.
+    for (const id of STRATEGY_IDS) this.strategies[id].enabled = d.operational?.strategyEnabled[d.mode][id] ?? (d.mode === 'LIVE' && id !== 'FAIR' ? false : this.strategies[id].enabled);
   }
 
   static async create(d: DeskDeps): Promise<DeskEngine> {
@@ -462,14 +474,27 @@ export class DeskEngine {
     if (stopped()) return;
     for (const [k, at] of this.drillSkips) if (Date.now() - at > 15 * 60_000) this.drillSkips.delete(k);
     for (const [k, v] of this.entrySkips) if (Date.now() - v.at > DESK.entrySkipMs) this.entrySkips.delete(k);
+    await this.pollLaunches(started);
     const found = await requestScope.run({ category: 'discovery', signal: AbortSignal.timeout(DESK.discoveryBudgetMs) },
       () => discover(d.dex, d.gecko, this.watchlist(), () => this.graduations.poll()));
     this.sources = found.sources;
+    for (const l of this.launchList.values()) {
+      if (started - l.at > LAUNCH_ENTRY.maxAgeMin * 60_000 + 30 * 60_000) continue;
+      const row = found.tokens.get(l.mint) ?? { mint: l.mint, sources: [], boostAmount: null, description: l.meta?.description ?? null, links: [], geckoPool: null };
+      row.sources.push('launch-radar'); found.tokens.set(l.mint, row);
+    }
+    if (d.launches) this.sources['Launch radar (pump.fun, on-chain)'] = `${this.launchList.size} shortlisted`;
     const staged = await this.stage(found.tokens);
     // CRASH is time-critical: safety evidence for pumping young pools first, entries right after, and only then
     // the remaining evidence and the rate-limited launch-history checks that FAIR needs.
     const due = this.deepDue(staged.list, started);
-    await this.deepAnalyses(due.filter(s => s.crashHint));
+    await this.deepAnalyses(due.filter(s => s.crashHint || s.launch));
+    if (this.strategies.LAUNCH.enabled && !stopped()) {
+      const signals = staged.list.filter(s => s.launch).map(s => this.assess(s, started)).filter(c => c.launch?.signal.signal);
+      for (const c of signals) this.alertOnce(`entry:${c.mint}`, `LAUNCH entry-ready: ${c.symbol ?? c.mint.slice(0, 6)}`, `${c.launch!.signal.summary}\n${fomoUrl(c.mint)}`);
+      const ledger = this.ledgerOf('LAUNCH');
+      if (ledger && signals.length) await this.maybeEnter('LAUNCH', ledger, signals, stopped);
+    }
     if (this.strategies.CRASH.enabled && !stopped()) {
       const signals = staged.list.filter(s => s.crashHint).map(s => this.assess(s, started)).filter(c => c.crash?.signal);
       const ledger = this.ledgerOf('CRASH');
@@ -477,7 +502,7 @@ export class DeskEngine {
     }
     if (stopped()) return;
     await this.refreshHolders(staged.list, started);
-    await this.slowPath(staged.list, due.filter(s => !s.crashHint), started);
+    await this.slowPath(staged.list, due.filter(s => !s.crashHint && !s.launch), started);
     const counts = this.finalize(staged.list, staged.filtered, started);
     this.lastCompletedScanAt = started;
     if (stopped()) return;
@@ -522,7 +547,7 @@ export class DeskEngine {
   private async stage(tokens: Map<string, Discovered>): Promise<{ list: Staged[]; filtered: number }> {
     // Held tokens and the watchlist first: they are appended last by discovery and must never be cut by the cap.
     const d = this.d, held = new Set(this.books().flatMap(b => b.ledger.state.positions.map(p => p.mint))), watched = new Set(this.watchlist());
-    const order = (m: string) => held.has(m) ? 0 : tokens.get(m)!.sources.includes('graduated') ? 1 : watched.has(m) ? 2 : 3;
+    const order = (m: string) => held.has(m) ? 0 : this.launchList.has(m) || tokens.get(m)!.sources.includes('graduated') ? 1 : watched.has(m) ? 2 : 3;
     const mints = [...tokens.keys()].sort((a, b) => order(a) - order(b)).slice(0, DESK.maxStagedPerScan);
     const pairs = mints.length ? await d.dex.getPairsForTokens(mints) : [];
     const list: Staged[] = [];
@@ -535,7 +560,7 @@ export class DeskEngine {
       // Custom strategies see every priced token: a $5M runner is outside FAIR's bands but may be exactly what one wants.
       const ruleHints = this.customIds().filter(id => this.profile(id).enabled && ruleMarketHint(this.profile(id).rule!, metrics));
       if ('filtered' in tier && !ruleHints.length && !held.has(mint)) { filtered++; this.candidates.delete(mint); this.transition(mint, pair.baseToken.symbol ?? null, 'FILTERED', tier.filtered); continue; }
-      list.push({ found, pair, tier: 'filtered' in tier ? 'CUSTOM' : tier.tier, metrics, crashHint: crashMarketHint(metrics), ruleHints });
+      list.push({ found, pair, tier: 'filtered' in tier ? 'CUSTOM' : tier.tier, metrics, crashHint: crashMarketHint(metrics), ruleHints, launch: this.launchList.get(mint) ?? null });
     }
     return { list, filtered };
   }
@@ -547,7 +572,7 @@ export class DeskEngine {
   /** Deep evidence (RPC, website, X, trade flow) for the most tradeable-looking tokens first; CRASH signals lead. */
   private deepDue(list: Staged[], now: number): Staged[] {
     const crash = this.strategies.CRASH.enabled;
-    const priority = (s: Staged) => (crash && s.crashHint ? 2e9 : 0) + (s.ruleHints.length ? 1.5e9 : 0) + (s.tier === 'TRENDING' ? 1e9 : 0) +
+    const priority = (s: Staged) => (s.launch ? 3e9 : 0) + (crash && s.crashHint ? 2e9 : 0) + (s.ruleHints.length ? 1.5e9 : 0) + (s.tier === 'TRENDING' ? 1e9 : 0) +
       ((s.metrics.volume5mUsd ?? 0) > DESK.gates.minVolume5mUsd ? 1e8 : 0) + ((s.metrics.liquidityUsd ?? 0) > DESK.gates.minLiquidityUsd ? 1e7 : 0) + (s.metrics.volume5mUsd ?? 0);
     return list.filter(s => !this.deep.has(s.found.mint) || now - this.deep.get(s.found.mint)!.at > DESK.deepAnalysisTtlMs)
       .sort((a, b) => priority(b) - priority(a)).slice(0, DESK.maxDeepAnalysesPerScan);
@@ -605,7 +630,7 @@ export class DeskEngine {
    * for a few of them. Failures leave the previous snapshot; they never block the scan.
    */
   private async refreshHolders(list: Staged[], now: number): Promise<void> {
-    const h = DESK.holders, rank = (s: Staged) => (s.ruleHints.length ? 3e9 : 0) + (s.crashHint ? 2e9 : 0) + (s.tier === 'TRENDING' ? 1e9 : 0) + (s.metrics.volume5mUsd ?? 0);
+    const h = DESK.holders, rank = (s: Staged) => (s.launch ? 4e9 : 0) + (s.ruleHints.length ? 3e9 : 0) + (s.crashHint ? 2e9 : 0) + (s.tier === 'TRENDING' ? 1e9 : 0) + (s.metrics.volume5mUsd ?? 0);
     const due = list.filter(s => {
       const last = this.latestHolders(s.found.mint);
       return !last || now - last.at > h.ttlMs || (!this.holderCountUnsupported && (last.countAt === null || now - last.countAt > h.countTtlMs));
@@ -641,6 +666,8 @@ export class DeskEngine {
     const c = analyze({ found: s.found, pair: s.pair, metrics: s.metrics, tier: s.tier, onchain, onchainAt: deep?.at ?? held?.at ?? null,
       social: deep?.social ?? null, watch, now, maxWashRatio: this.d.cfg.rs.maxWashRatio, launch: this.launches.get(mint)?.value ?? null });
     c.crash = crashCheck(c);
+    if (s.launch) c.launch = { score: s.launch.score, reasons: s.launch.reasons, x: s.launch.x.url, website: s.launch.site?.url ?? s.launch.meta?.website ?? null,
+      launchedAt: s.launch.at, signal: launchEntryCheck(c, s.launch, now) };
     const rules = this.customIds().filter(id => this.profile(id).enabled).map(id => [id, ruleCheck(this.profile(id).rule!, c)] as const);
     if (rules.length) c.rules = Object.fromEntries(rules);
     return c;
@@ -817,6 +844,31 @@ export class DeskEngine {
     this.event('WAITING', `${id} · no Jupiter route to sell (${errorMessage(error)}) since ${hhmm(p.noRouteSince)}: pool drained or delisted; retrying every ${x.retryMs / 60_000} min, ${after}`, ctx);
   }
 
+  /**
+   * Launch radar: new pump.fun launches since the last scan, within a time budget (a slow poll finishes in the
+   * background and is used next scan). A launch that reaches the shortlist is alerted once.
+   */
+  private async pollLaunches(now: number): Promise<void> {
+    const feed = this.d.launches;
+    if (!feed) return;
+    this.launchPoll ??= feed.poll(now).then(() => undefined).catch(() => undefined).finally(() => { this.launchPoll = null; });
+    await Promise.race([this.launchPoll, new Promise(r => setTimeout(r, 10_000).unref?.())]);
+    for (const l of feed.recent(Date.now())) {
+      if (l.score < LAUNCH_ENTRY.minScore || this.launchList.has(l.mint)) continue;
+      l.shortlistedAt = Date.now(); this.launchList.set(l.mint, l);
+      const age = Math.max(0, Math.round((Date.now() - l.at) / 60_000));
+      this.event('WATCHLIST', `LAUNCH radar: ${l.symbol} "${l.name}" ${age} min old · score ${l.score} · ${l.reasons.join(' · ')}`, { mint: l.mint, symbol: l.symbol });
+      this.alertOnce(`radar:${l.mint}`, `LAUNCH radar: ${l.symbol} (${age} min old)`, `${l.name} · ${l.reasons.join(' · ')}\n${fomoUrl(l.mint)}`);
+    }
+    for (const [mint, l] of this.launchList) if (Date.now() - l.at > 2 * 60 * 60_000) this.launchList.delete(mint);
+  }
+  private alertOnce(key: string, title: string, body: string): void {
+    if (this.launchAlerts.has(key) || !this.d.notify) return;
+    this.launchAlerts.add(key);
+    if (this.launchAlerts.size > 5_000) this.launchAlerts.delete(this.launchAlerts.values().next().value!);
+    void this.d.notify(title, body).catch(() => undefined);
+  }
+
   private rememberName(mint: string, pair: DexPair): void {
     const cap = pair.marketCap ?? pair.fdv ?? null;
     if (cap === null) return;
@@ -911,7 +963,9 @@ export class DeskEngine {
       if (skip) { note(c.mint, `${skip.code} at ${hhmm(skip.at)}; retry after ${hhmm(skip.at + DESK.entrySkipMs)}`); continue; }
       pool.push(c);
     }
-    pool.sort((a, b) => id === 'CRASH' ? crashRank(b) - crashRank(a) : id === 'FAIR' ? composite(b) - composite(a) : (b.metrics.volume1hUsd ?? 0) - (a.metrics.volume1hUsd ?? 0));
+    pool.sort((a, b) => id === 'CRASH' ? crashRank(b) - crashRank(a) : id === 'FAIR' ? composite(b) - composite(a)
+      : id === 'LAUNCH' ? (b.launch?.score ?? 0) - (a.launch?.score ?? 0) || (b.launch?.launchedAt ?? 0) - (a.launch?.launchedAt ?? 0)
+      : (b.metrics.volume1hUsd ?? 0) - (a.metrics.volume1hUsd ?? 0));
     if (!pool.length) {
       if (id === 'FAIR' && this.drill && this.d.mode === 'PAPER') return this.drillEnter(ledger, stopped, recentExit);
       if (id === 'FAIR') this.message = 'No qualified entry candidate';
@@ -937,7 +991,8 @@ export class DeskEngine {
         continue;
       }
       attempts++; this.notes.delete(id);
-      this.event('QUALIFIED', id === 'CRASH' ? `CRASH entry selected: ${c.crash?.summary ?? ''}` : id === 'FAIR' ? `FAIR entry candidate selected (composite ${composite(c).toFixed(0)})`
+      this.event('QUALIFIED', id === 'CRASH' ? `CRASH entry selected: ${c.crash?.summary ?? ''}` : id === 'LAUNCH' ? `LAUNCH entry selected: ${c.launch?.signal.summary ?? ''}`
+        : id === 'FAIR' ? `FAIR entry candidate selected (composite ${composite(c).toFixed(0)})`
         : `${id} entry selected: ${c.rules?.[id]?.summary ?? ''}`,
         { mint: c.mint, symbol: c.symbol, detail: { strategy: id } });
       const code = await this.execute('BUY', { strategy: id, mint: c.mint, symbol: c.symbol, decimals: c.onchain.decimals, pairAddress: c.pair.address, heldRaw: 0n,
@@ -1271,6 +1326,12 @@ export class DeskEngine {
       operational: d.operational,
       strategies: this.ids().map(id => this.strategyView(id)),
       presets: PRESETS,
+      launches: [...this.launchList.values()].sort((a, b) => b.at - a.at).slice(0, 25).map(l => {
+        const c = this.candidates.get(l.mint);
+        return { mint: l.mint, symbol: l.symbol, name: l.name, at: l.at, score: l.score, reasons: l.reasons, x: l.x.url, website: l.site?.url ?? l.meta?.website ?? null,
+          marketCapUsd: c?.metrics.marketCapUsd ?? null, signal: c?.launch?.signal.signal ?? false,
+          status: this.heldBy(l.mint) ? `held by ${this.heldBy(l.mint)}` : c?.entryNotes?.LAUNCH ?? c?.launch?.signal.summary ?? 'waiting for market data' };
+      }),
       capital: {
         plannedStartingCapitalUsd: d.capital.plannedStartingCapitalUsd, baseEntryUsd: d.capital.baseEntryUsd, reserveSol: sol(DESK.reserveLamports),
         maxDragPct: Number(DESK.maxDragBps) / 100, slippageBps: d.capital.slippageBps,

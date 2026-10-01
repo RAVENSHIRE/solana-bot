@@ -13,7 +13,7 @@ import type { Candidate, CandidateMetrics, CrashSignal, GateResult } from './typ
  * Safety is not configurable: mint authority, freeze authority and dangerous token extensions must pass for every
  * entry, and a pool needs real liquidity so an exit can be quoted.
  */
-export const BUILTIN_STRATEGIES = ['FAIR', 'CRASH'] as const;
+export const BUILTIN_STRATEGIES = ['FAIR', 'CRASH', 'LAUNCH'] as const;
 
 const num = z.number().finite();
 const opt = <T extends z.ZodTypeAny>(t: T) => t.nullable().default(null);
@@ -21,7 +21,7 @@ const pct100 = num.min(0).max(100);
 
 export const ruleSpecSchema = z.object({
   id: z.string().regex(/^[A-Z][A-Z0-9_]{1,15}$/, '2–16 characters, A–Z, 0–9 and _, starting with a letter')
-    .refine(id => !(BUILTIN_STRATEGIES as readonly string[]).includes(id), 'FAIR and CRASH are built in'),
+    .refine(id => !(BUILTIN_STRATEGIES as readonly string[]).includes(id), 'FAIR, CRASH and LAUNCH are built in'),
   label: z.string().trim().min(1).max(40),
   summary: z.string().trim().max(400).default(''),
   entry: z.object({

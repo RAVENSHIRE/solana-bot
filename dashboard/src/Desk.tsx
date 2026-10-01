@@ -20,7 +20,7 @@ const EXPLAIN: Record<string, string> = {
   INSTANCE_LOCK: 'Another dashboard process owns data-desk. Close it first.', SCANNER_OFF: 'Start the scanner first.',
   RESET_TEST_ONLY: 'Reset is only available in TEST.', INVALID_STRATEGY: 'Unknown strategy.',
   STRATEGY_HAS_POSITIONS: 'This strategy still holds a position (TEST or LIVE). Sell or wait for its exit before deleting it.',
-  BUILTIN_STRATEGY: 'FAIR and CRASH are built in: they can be switched off, not edited or deleted.',
+  BUILTIN_STRATEGY: 'FAIR, CRASH and LAUNCH are built in: they can be switched off, not edited or deleted.',
   CONFIG_LOCKED: 'The desk runs with DESK_DEPLOYMENT_MODE=LOCKED: strategies are fixed at startup.',
   WATCH_SELL_NEEDS_LOCAL_KEY: 'Automatic selling works only for the local-key wallet (DESK_LIVE_SIGNER=local-key). Other wallets (FOMO, Phantom) get alerts: choose ALERT.',
   WATCH_UNAVAILABLE: 'The watch starts with the desk; check the desk error above.', WATCH_LIMIT: 'At most 50 watched tokens.',
@@ -69,6 +69,7 @@ export function DeskPanel({ t }: { t: TradingSession }) {
         <Telemetry events={d.events} />
         <PreflightCard p={d.preflights[0] ?? null} live={live} />
       </div>
+      <div id="desk-launches" className="desk-anchor"><LaunchRadar d={d} /></div>
       <div id="desk-candidates" className="desk-anchor"><Candidates list={d.candidates} probe={live ? null : mint => void t.desk('probe', { mint })} busy={!!t.busy} /></div>
       <div id="desk-positions" className="desk-anchor"><Positions d={d} busy={!!t.busy || !t.online} exit={p => {
         const how = !live ? 'This is a TEST position: the sale is paper only.' : localKey ? 'The local key signs the sale immediately (REAL FUNDS).'
@@ -479,6 +480,8 @@ function CandidateDetail({ c, probe, busy }: { c: Candidate; probe: ((mint: stri
         <td className={`gate-${g.status.toLowerCase()}`}>{g.status}{!g.blocking && g.status !== 'PASS' ? ' (flag)' : ''}</td><td>{g.actual}</td><td>{g.required}</td></tr>)}</tbody></table>
         {c.crash && <><h4>CRASH entry checks · {c.crash.signal ? 'SIGNAL' : 'no signal'}</h4><table className="gates"><tbody>{c.crash.checks.map(g => <tr key={g.key}><td>{g.label}</td>
           <td className={`gate-${g.status.toLowerCase()}`}>{g.status}{!g.blocking && g.status !== 'PASS' ? ' (flag)' : ''}</td><td>{g.actual}</td><td>{g.required}</td></tr>)}</tbody></table></>}
+        {c.launch && <><h4>LAUNCH entry checks · {c.launch.signal.signal ? 'SIGNAL' : 'no signal'} · score {c.launch.score}</h4><p className="desk-note">{c.launch.reasons.join(' · ')}</p>
+          <table className="gates"><tbody>{c.launch.signal.checks.map(g => <tr key={g.key}><td>{g.label}</td><td className={`gate-${g.status.toLowerCase()}`}>{g.status}{!g.blocking && g.status !== 'PASS' ? ' (flag)' : ''}</td><td>{g.actual}</td><td>{g.required}</td></tr>)}</tbody></table></>}
         {Object.entries(c.rules ?? {}).map(([id, r]) => <Fragment key={id}><h4>{id} entry checks · {r.signal ? 'SIGNAL' : 'no signal'}</h4><table className="gates"><tbody>
           {r.checks.map(g => <tr key={g.key}><td>{g.label}</td><td className={`gate-${g.status.toLowerCase()}`}>{g.status}</td><td>{g.actual}</td><td>{g.required}</td></tr>)}</tbody></table></Fragment>)}
         <p className="desk-note">Analytical scores, not guarantees of future performance. Fundamentals never override a failed gate.</p></div>
@@ -624,5 +627,26 @@ function Watch({ t, d }: { t: TradingSession; d: DeskStatus }) {
         {!w.rules.length && <tr><td colSpan={8}>Nothing watched yet. Add a token you hold, e.g. with a market-cap floor at your exit level.</td></tr>}</tbody></table></div>
     {w.alerts.length > 0 && <details open><summary>Alerts ({w.alerts.length})</summary><ul className="watch-alerts">{w.alerts.slice(0, 10).map(a =>
       <li key={`${a.ruleId}-${a.at}`}><strong>{ago(a.at)} · {a.title}</strong> — {a.body}</li>)}</ul></details>}
+  </section>;
+}
+
+/**
+ * Launch radar: fresh pump.fun launches with their own X account and a live website (the @glabuz Meme Industries
+ * pattern), shortlisted seconds after creation. The LAUNCH strategy buys the best of them 3–12 minutes in; each find
+ * is also an alert with a FOMO link, to buy by hand.
+ */
+function LaunchRadar({ d }: { d: DeskStatus }) {
+  const list = d.launches ?? [], mins = (at: number) => `${Math.max(0, Math.round((Date.now() - at) / 60_000))} min`;
+  return <section className="panel desk-card" aria-label="Launch radar">
+    <div className="card-head"><h3>Launch radar · new pump.fun launches with their own X account and a website</h3>
+      <small>About 50 launches a minute are read from the chain; few have both. LAUNCH buys 3–12 min after creation at $8K–$40K.</small></div>
+    <div className="wallet-table"><table><thead><tr><th>Token</th><th>Age</th><th>Score</th><th>Why</th><th>X</th><th>Website</th><th>Market cap</th><th>Status</th></tr></thead>
+      <tbody>{list.map(l => <tr key={l.mint} className={l.signal ? 'status-qualified' : ''}>
+        <td title={l.mint}><strong>{l.symbol}</strong> <Fomo mint={l.mint} /><br /><small>{l.name.slice(0, 40)}</small></td>
+        <td>{mins(l.at)}</td><td>{l.score}</td><td><small>{l.reasons.join(' · ')}</small></td>
+        <td>{l.x ? <a href={l.x} target="_blank" rel="noreferrer">X</a> : '--'}</td>
+        <td>{l.website ? <a href={l.website} target="_blank" rel="noreferrer">{(() => { try { return new URL(l.website).hostname; } catch { return 'site'; } })()}</a> : '--'}</td>
+        <td>{cap(l.marketCapUsd)}</td><td><small>{l.signal ? 'ENTRY-READY · ' : ''}{l.status}</small></td></tr>)}
+        {!list.length && <tr><td colSpan={8}>No launch with its own X account and a live website yet. The radar runs while TEST or LIVE scans.</td></tr>}</tbody></table></div>
   </section>;
 }

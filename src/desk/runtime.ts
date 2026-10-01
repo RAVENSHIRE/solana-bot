@@ -13,6 +13,7 @@ import { Logger } from '../utils/logger';
 import { acquireProcessLock } from '../utils/fs';
 import { JupiterClient } from '../execution/jupiter-client';
 import { TransactionSender } from '../execution/tx-sender';
+import { LaunchFeed } from './launches';
 import { HoldingsWatch, notifier, walletHoldings, type Holding } from './watch';
 import { StrategyAssistant } from './assistant';
 import { walletHistory, type WalletHistory } from './wallet-history';
@@ -93,17 +94,18 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
     try { configured = env.WALLET_PUBLIC_KEY ? new PublicKey(env.WALLET_PUBLIC_KEY.trim()) : null; } catch { configured = null; }
     // TEST only ever gets an address (never a signer).
     const paperAddress = configured ?? localSigner?.publicKey ?? null;
+    // One radar for both modes (only the running one polls), and one set of phone alerts for the desk and the watch.
+    const alerts = notifier(env), launches = new LaunchFeed(rpc);
     const sender = new TransactionSender(rpc, logger, { confirmTimeoutMs: cfg.execution.confirmTimeoutMs, pollIntervalMs: 1500, rebroadcastIntervalMs: 2000 });
     const engines = {
       // TEST needs only an address to build and simulate; without Phantom it uses the public key from .env, never a secret.
-      PAPER: await DeskEngine.create({ ...shared, mode: 'PAPER', sender: null,
+      PAPER: await DeskEngine.create({ ...shared, launches, notify: alerts.notify, mode: 'PAPER', sender: null,
         wallet: () => context.wallet('PAPER') ?? (paperAddress ? { owner: paperAddress, signer: null } : null) }),
       // LOCAL_KEY: signed in this process and independent of the browser session; PHANTOM: the browser session signs.
-      LIVE: await DeskEngine.create({ ...shared, mode: 'LIVE', sender, signerKind: live.signer, liveMaxEntries: live.maxEntries,
+      LIVE: await DeskEngine.create({ ...shared, launches, notify: alerts.notify, mode: 'LIVE', sender, signerKind: live.signer, liveMaxEntries: live.maxEntries,
         ...(localSigner ? { authorized: () => true, wallet: () => ({ owner: localSigner.publicKey, signer: localSigner }) }
           : { wallet: () => context.wallet('LIVE') }) }),
     };
-    const alerts = notifier(env);
     const watch = await HoldingsWatch.open({ file: path.join(o.dataDir, 'watch.json'), dex: shared.dex, notify: alerts.notify, channels: alerts.channels,
       balance: async (owner, mint) => {
         const accounts = await rpc.execute('watch:balance', c => c.getParsedTokenAccountsByOwner(new PublicKey(owner), { mint: new PublicKey(mint) }, 'confirmed'));

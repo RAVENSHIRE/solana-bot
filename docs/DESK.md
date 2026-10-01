@@ -134,6 +134,54 @@ Setup and data:
 - Sent to Claude: your messages, your existing custom strategies, and the named wallet's swap summary.
 - Requests use structured output and Anthropic's server-side fallback for declined requests.
 
+### LAUNCH: the launch radar (the @glabuz pattern)
+
+On 1 Oct @glabuz turned $500 into ~$15K on Meme Industries (`FFrRBPP9…pump`) by entering at ~$20K:
+
+| UTC | Event | Curve market cap |
+| --- | --- | --- |
+| 16:07:22 | created on pump.fun | $6K → $14K in the first minute |
+| 16:08:41 | the project's own X account @MemeInds posts (79 s after creation); custom website onsolchain.lol | ~$16K, flat for 4 minutes |
+| 16:12 | first jump | $17.5K → $30K |
+| 16:16:06 | graduates to PumpSwap | ~$47K; $800K+ two hours later |
+
+The signal is the quality of the launch itself. Only a few of the ~50 pump.fun launches per minute have an own X account and a real project website that links back to it.
+
+**How the radar works:**
+
+- Every scan reads the new launches straight from the chain (pump.fun's mint authority, `TSLvdd1…`) together with their metadata (X, website, Telegram).
+- It checks the website of every launch that has an X link.
+- It scores each launch (`launches.ts`):
+
+  | Signal | Points |
+  | --- | --- |
+  | Own X account | 3 |
+  | Live project website with a title | 3 |
+  | Website links the same X account | 2 |
+  | Telegram | 1 |
+  | Real description | 1 |
+
+  Links to platforms and news sites don't count as a project website.
+
+- From a score of 6 the launch is shortlisted: it appears under *Launch radar*, an alert with a FOMO link goes to your phone, and the token is analysed like any candidate.
+
+**LAUNCH** (built-in strategy, ON in TEST, OFF in LIVE) buys a shortlisted launch:
+
+- **Entry** (all of these):
+  - 3–12 minutes after creation, the window in which Jupiter routes the bonding curve (it refuses tokens that are seconds old);
+  - market cap $8K–$40K;
+  - 5m volume ≥ $1K and ≥ 10 buys;
+  - top-10 wallets ≤ 35 %, largest wallet ≤ 12 %, developer ≤ 10 % when known;
+  - mint and freeze authority revoked;
+  - not a copycat.
+- **Exits:**
+  - stop −40 % (not in the first 60 s);
+  - trailing stop 35 % once 2× is reached;
+  - max hold 4 h;
+  - no re-entry for 4 h.
+
+An "entry-ready" alert goes out with the FOMO link, so you can buy by hand in FOMO at the same moment. These rules are not backtested: watch the LAUNCH ledger in TEST before switching it on in LIVE.
+
 ### FOMO
 
 FOMO has no public API: its token pages are share links into the app. What the desk does instead:

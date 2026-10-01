@@ -86,6 +86,7 @@ function Icon({ name, size = 20 }: { name: string; size?: number }) {
 const SECTIONS = [
   { id: 'desk-overview', label: 'Overview', icon: 'grid' },
   { id: 'desk-strategies', label: 'Strategies', icon: 'target' },
+  { id: 'desk-launches', label: 'Launches', icon: 'chart' },
   { id: 'desk-candidates', label: 'Candidates', icon: 'list' },
   { id: 'desk-positions', label: 'Positions', icon: 'wallet' },
   { id: 'desk-watch', label: 'Watch', icon: 'clock' },
