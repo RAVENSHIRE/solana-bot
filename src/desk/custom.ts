@@ -132,7 +132,21 @@ export const SCALP_PRESET: RuleSpecInput = {
   sizing: { capitalUsd: 5.45, entryUsd: 2, maxOpenPositions: 2, slippageBps: 400, exitSlippageBps: 1_000, maxDragPct: 10 },
   reentryCooldownMin: 30,
 };
-export const PRESETS: Record<string, RuleSpecInput> = { RUNNER: RUNNER_PRESET, MIGRATION: MIGRATION_PRESET, CONSOL: CONSOL_PRESET, SCALP: SCALP_PRESET };
+/**
+ * CRASH as it ran on the first TEST night (30 Sep, 32 trades, 15 wins, +$4.91), before the backtest rules: pools up to an
+ * hour old, any 5m pump from +10 %, no market-cap cap, a tight −15 % stop and a 4-minute time stop. Its profit lock
+ * (exit 15 points below a ≥ +40 % peak) becomes a trailing stop. Run it next to CRASH in TEST to compare like for like.
+ */
+export const CRASH_V1_PRESET: RuleSpecInput = {
+  id: 'CRASH_V1', label: 'CRASH V1 (first night)',
+  summary: 'The original CRASH rules from the first TEST night, to run side by side with the current CRASH',
+  entry: { maxPoolAgeMin: 60, minPriceChange5mPct: 10, maxPriceChange5mPct: 200, minVolume5mUsd: 20_000, minBuySellRatio: 1.3,
+    minLiquidityUsd: 10_000, maxTop10WalletPct: 50, maxLargestWalletPct: 15 },
+  exits: { takeProfitPct: 100, stopLossPct: 15, trailingActivationPct: 40, trailingStopPct: 11, maxHoldMin: 4, graceSec: 0 },
+  sizing: { capitalUsd: 10, entryUsd: 2, maxOpenPositions: 3, slippageBps: 250, exitSlippageBps: 1_000, maxDragPct: 5 },
+  reentryCooldownMin: 10,
+};
+export const PRESETS: Record<string, RuleSpecInput> = { RUNNER: RUNNER_PRESET, MIGRATION: MIGRATION_PRESET, CONSOL: CONSOL_PRESET, SCALP: SCALP_PRESET, CRASH_V1: CRASH_V1_PRESET };
 
 const usd = (n: number | null) => n === null ? 'UNKNOWN' : `$${n >= 1000 ? Math.round(n).toLocaleString('en-US') : n.toFixed(2)}`;
 const pct = (n: number | null) => n === null ? 'UNKNOWN' : `${n.toFixed(1)}%`;

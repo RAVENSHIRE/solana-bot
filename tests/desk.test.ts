@@ -791,7 +791,7 @@ test('a held token without a Jupiter route never pauses Jupiter for other tokens
 });
 
 test('the four play presets are valid specs; consolidation plays are never stopped out in their first minute', () => {
-  for (const id of ['RUNNER', 'MIGRATION', 'CONSOL', 'SCALP']) assert.equal(parseRuleSpec(PRESETS[id]!).id, id);
+  for (const id of ['RUNNER', 'MIGRATION', 'CONSOL', 'SCALP', 'CRASH_V1']) assert.equal(parseRuleSpec(PRESETS[id]!).id, id);
   const consol = strategyProfiles({}, deskCapital({}), { takeProfitPct: 20, stopLossPct: 12, trailingActivationPct: 8, trailingStopPct: 6, maxHoldMin: 240 }) && ruleProfile(parseRuleSpec(PRESETS.CONSOL!), true);
   const at = (heldMs: number, pnlPct: number) => exitReason(consol.exits, { pnlPct, peakPct: Math.max(pnlPct, 0), fromPeakPct: pnlPct, heldMs });
   assert.equal(at(30_000, -45), null, 'a −45% wick in the first 30 s does not stop out');

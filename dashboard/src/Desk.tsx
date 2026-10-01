@@ -193,6 +193,7 @@ const FIELDS: Array<{ group: Group | null; key: string; label: string; optional:
 const PRESET_HINT: Record<string, string> = {
   RUNNER: 'established runners, >1,000 holders, trailing stop', MIGRATION: 'your migration play, $60K–$300K right after graduation',
   CONSOL: 'your "Crash Strategy": $800K–$1.2M consolidation re-entry', SCALP: 'your 15-minute catalyst scalp, $400K–$1M',
+  CRASH_V1: 'the original CRASH rules from the first night, to compare with today\'s CRASH',
 };
 const BLANK: Spec = { id: 'MY_STRATEGY', label: 'My strategy', summary: '', entry: { minLiquidityUsd: 20_000 },
   exits: { stopLossPct: 30, maxHoldMin: 240, graceSec: 0 }, sizing: { capitalUsd: 5.45, entryUsd: 2, maxOpenPositions: 2, slippageBps: 300, exitSlippageBps: 500, maxDragPct: 8 }, reentryCooldownMin: 60 };

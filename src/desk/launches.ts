@@ -80,6 +80,15 @@ export function scoreLaunch(meta: LaunchMeta | null, x: XLink, site: WebsiteChec
   return { score, reasons };
 }
 
+/** What a clone copies: the X handle, the website host, the name with ticker. */
+export function launchKeys(l: Pick<Launch, 'x' | 'site' | 'meta' | 'name' | 'symbol'>): string[] {
+  const keys = [`name:${l.name.trim().toLowerCase()}|${l.symbol.trim().toLowerCase()}`];
+  if (l.x.handle) keys.push(`x:${l.x.handle.toLowerCase()}`);
+  const site = l.site?.url ?? projectSite(l.meta?.website ?? null);
+  if (site) { try { keys.push(`site:${new URL(site).hostname.replace(/^www\./, '')}`); } catch { /* unparsable */ } }
+  return keys;
+}
+
 export interface LaunchSource { poll(now: number): Promise<Launch[]>; recent(now: number): Launch[] }
 
 /** Reads new launches from the pump.fun mint authority's signatures, one poll per scan. Never throws. */
@@ -122,7 +131,13 @@ export class LaunchFeed implements LaunchSource {
     for (let i = 0; i < events.length; i += LAUNCH.metadataConcurrency) {
       fresh.push(...await Promise.all(events.slice(i, i + LAUNCH.metadataConcurrency).map(e => this.enrich(e))));
     }
-    for (const l of fresh) this.launches.set(l.mint, l);
+    // Clones copy the original's X account, website or name within minutes (KEN ×3 and ROPAD ×2 on the first live run).
+    // Only the earliest launch keeps its score; every later one is marked a clone and never shortlisted.
+    for (const l of fresh.sort((a, b) => a.at - b.at)) {
+      const keys = launchKeys(l), original = [...this.launches.values()].find(o => o.mint !== l.mint && o.at <= l.at && launchKeys(o).some(k => keys.includes(k)));
+      if (original) Object.assign(l, { score: 0, reasons: [`CLONE of ${original.symbol} ${original.mint.slice(0, 4)}…${original.mint.slice(-4)} (same X account, website or name, launched earlier)`, ...l.reasons] });
+      this.launches.set(l.mint, l);
+    }
     this.recent(now);
     return fresh;
   }

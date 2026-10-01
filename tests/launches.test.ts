@@ -49,3 +49,19 @@ test('the feed reads only new launches each poll, fetches metadata, and checks t
   assert.deepEqual(await feed.poll(1_790_870_920_000), []); assert.deepEqual(untils, [undefined, 'S2'], 'the next poll starts after the newest signature');
   assert.equal(feed.recent(1_790_870_920_000).length, 2); assert.equal(feed.recent(1_790_870_900_000 + LAUNCH.keepMs + 60_000).length, 0, 'old launches age out');
 });
+
+test('clones (same X account, website or name as an earlier launch) lose their score; only the original can be shortlisted', async () => {
+  const sigs = [{ signature: 'C3', blockTime: 300, err: null }, { signature: 'C2', blockTime: 200, err: null }, { signature: 'C1', blockTime: 100, err: null }];
+  const logs: Record<string, string[]> = { C1: [createLog('Kencoin', 'KEN', 'https://meta/1', key(11))], C2: [createLog('Kencoin', 'KEN', 'https://meta/2', key(12))],
+    C3: [createLog('Other name', 'OTH', 'https://meta/3', key(13))] };
+  const conn = { getSignaturesForAddress: async () => sigs, _rpcRequest: async (_m: string, [sig]: [string]) => ({ result: { meta: { logMessages: logs[sig] ?? [] } } }) };
+  const rpc = { execute: async (_l: string, fn: (c: never) => unknown) => fn(conn as never) } as never;
+  const meta = { description: 'The dog before doge, chapter zero of the story.', twitter: 'https://x.com/kenonpump', website: 'https://kendoge.lol' };
+  const fetcher = (async () => new Response(JSON.stringify(meta))) as unknown as typeof fetch;
+  const feed = new LaunchFeed(rpc, fetcher, async () => site({ url: 'https://kendoge.lol/', title: '$KEN', xHandles: ['kenonpump'] }));
+  const fresh = await feed.poll(400_000);
+  const by = (m: number) => fresh.find(l => l.mint === key(m).toBase58())!;
+  assert.equal(by(11).score, 9, 'the first launch keeps its score');
+  assert.equal(by(12).score, 0); assert.match(by(12).reasons[0]!, /^CLONE of KEN /);
+  assert.equal(by(13).score, 0, 'a different name with the same X account and website is a clone too');
+});

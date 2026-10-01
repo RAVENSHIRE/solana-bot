@@ -163,6 +163,7 @@ The signal is the quality of the launch itself. Only a few of the ~50 pump.fun l
 
   Links to platforms and news sites don't count as a project website.
 
+- Clones are marked **CLONE** and never shortlisted: a later launch that copies an earlier one's X account, website or name (on the first live run KEN appeared 3× and ROPAD 2×).
 - From a score of 6 the launch is shortlisted: it appears under *Launch radar*, an alert with a FOMO link goes to your phone, and the token is analysed like any candidate.
 
 **LAUNCH** (built-in strategy, ON in TEST, OFF in LIVE) buys a shortlisted launch:
