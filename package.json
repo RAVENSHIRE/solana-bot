@@ -38,6 +38,7 @@
     "desk:paper": "node --import tsx src/scripts/desk-paper.ts",
     "desk:replay": "node --import tsx src/scripts/desk-replay.ts",
     "desk:backtest": "node --import tsx src/scripts/desk-backtest.ts",
+    "desk:golden": "node --import tsx src/scripts/desk-golden.ts",
     "test:desk": "node --import tsx --test tests/desk.test.ts"
   },
   "dependencies": {

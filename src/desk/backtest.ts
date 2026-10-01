@@ -101,3 +101,53 @@ export function summarize(trades: SimTrade[]): Summary {
     medianPct: n ? (n % 2 ? r[(n - 1) / 2]! : (r[n / 2 - 1]! + r[n / 2]!) / 2) : 0, totalUsd: trades.reduce((a, t) => a + t.pnlUsd, 0),
     profitFactor: loss > 0 ? gain / loss : gain > 0 ? Infinity : 0, worstPct: n ? r[0]! : 0, bestPct: n ? r[n - 1]! : 0 };
 }
+
+// ------------------------------------------------------------------ GOLDEN POCKET
+
+/** GOLDEN POCKET exits: the pattern's own stop, then a trailing stop and/or a take profit just under the resistance the pattern ran to. */
+export interface PocketExit {
+  /** TRAIL rides the move; RESISTANCE sells everything just under the resistance; SPLIT sells half there and trails the rest. */
+  mode: 'TRAIL' | 'RESISTANCE' | 'SPLIT';
+  trailing: { activationPct: number; stopPct: number } | null;
+  /** Take profit this far below the resistance (the owner: 5–10 %). */
+  belowResistancePct: number;
+  maxHoldMin: number;
+}
+export interface PocketFill { at: number; price: number; stop: number; resistance: number }
+
+/** Market-cap candles: every price × supply, so pattern levels read as market caps. */
+export const capSeries = (s: PoolSeries): PoolSeries => ({ ...s, candles: s.candles.map(k => ({ ...k, o: k.o * s.supply, h: k.h * s.supply, l: k.l * s.supply, c: k.c * s.supply })),
+  priceRef: s.priceRef * s.supply, supply: 1 });
+
+/**
+ * One GOLDEN POCKET trade on market-cap candles: filled inside a candle, so that candle's low is checked against the
+ * stop first (pessimistic), then each leg is replayed under its exit rules and pays the sized impact, fees and costs.
+ */
+export function pocketTrade(s: PoolSeries, fill: PocketFill, x: PocketExit, costs: Costs): SimTrade {
+  const bar = s.candles.find(k => k.t === fill.at);
+  const stopLossPct = (1 - fill.stop / fill.price) * 100;
+  const net = (exitPrice: number, size: number) => {
+    const gross = sizedReturn(size, fill.price, exitPrice, s.liquidityRefUsd / 2, s.priceRef);
+    return (1 + gross) * (1 - costs.venueFeePct / 100) ** 2 - 1;
+  };
+  const trade = (exitAt: number, exitPrice: number, reason: string, peakPct: number, pnlUsd: number): SimTrade => ({ mint: s.mint, symbol: s.symbol, entryAt: fill.at,
+    entryPrice: fill.price, exitAt, exitPrice, reason, peakPct, returnPct: pnlUsd / costs.sizeUsd * 100, pnlUsd });
+  if (bar && bar.l <= fill.stop) {
+    const exitPrice = fill.stop * (1 - costs.stopSlipPct / 100);
+    return trade(fill.at, exitPrice, 'STOP_LOSS', 0, net(exitPrice, costs.sizeUsd) * costs.sizeUsd - costs.fixedUsd);
+  }
+  const tpPct = Math.max(3, (fill.resistance * (1 - x.belowResistancePct / 100) / fill.price - 1) * 100);
+  const legs: Array<{ weight: number; rules: ExitRules }> = [];
+  const base = { stopLossPct, maxHoldMin: x.maxHoldMin, giveback: null };
+  if (x.mode !== 'TRAIL') legs.push({ weight: x.mode === 'SPLIT' ? 0.5 : 1, rules: { ...base, takeProfitPct: tpPct, trailing: null } });
+  if (x.mode !== 'RESISTANCE') legs.push({ weight: x.mode === 'SPLIT' ? 0.5 : 1, rules: { ...base, takeProfitPct: Infinity, trailing: x.trailing } });
+  let pnlUsd = -costs.fixedUsd, exitAt = fill.at, peakPct = 0, value = 0;
+  const reasons: string[] = [];
+  for (const leg of legs) {
+    const r = replayExit(s.candles, fill.at, fill.price, leg.rules, x.maxHoldMin * MINUTE + MINUTE);
+    const exitPrice = STOPS.has(r.reason) ? r.exitPrice * (1 - costs.stopSlipPct / 100) : r.exitPrice;
+    pnlUsd += net(exitPrice, costs.sizeUsd * leg.weight) * costs.sizeUsd * leg.weight;
+    exitAt = Math.max(exitAt, r.exitAt); peakPct = Math.max(peakPct, r.peakPct); value += exitPrice * leg.weight; reasons.push(r.reason);
+  }
+  return trade(exitAt, value, [...new Set(reasons)].join('+'), peakPct, pnlUsd);
+}
