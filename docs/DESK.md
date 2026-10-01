@@ -12,6 +12,16 @@ The dashboard's **Trading desk** tab runs one pipeline in two environments:
 
 TEST and LIVE never run at the same time and never share data. Stopping keeps all telemetry and ledgers.
 
+## Starting the dashboard on Windows
+
+Use `dashboard\start-background.cmd`. It starts the dashboard minimized and writes its output to `data-desk\dashboard.log`; follow the log with:
+
+```
+Get-Content data-desk\dashboard.log -Wait
+```
+
+A console window that is clicked, or has text selected, pauses every program that writes to it (Windows QuickEdit). A dashboard started with `npm start` in a visible window can therefore freeze until the window gets a key press. On 1 Oct it stopped answering for minutes. With the output in a file this cannot happen.
+
 ## Operational controls and restart
 
 Strategy toggles, TEST drill and TEST reset are switched in the dashboard and saved per mode (`DESK_DEPLOYMENT_MODE=EDITABLE`, the default). For an unattended deployment set `DESK_DEPLOYMENT_MODE=LOCKED` in `.env`: they are then fixed at startup by the flags below and rejected by the server; Pause, Stop and EXIT NOW remain available. The startup flags are `DESK_PAPER_FAIR_ENABLED`, `DESK_PAPER_CRASH_ENABLED`, `DESK_LIVE_FAIR_ENABLED`, `DESK_LIVE_CRASH_ENABLED`; LIVE CRASH defaults to false. All keys are allowlisted and validated at startup.
