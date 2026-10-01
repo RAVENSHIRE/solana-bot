@@ -14,6 +14,10 @@ import { acquireProcessLock } from '../utils/fs';
 import { JupiterClient } from '../execution/jupiter-client';
 import { TransactionSender } from '../execution/tx-sender';
 import { HoldingsWatch, notifier } from './watch';
+import { StrategyAssistant } from './assistant';
+import { walletHistory, type WalletHistory } from './wallet-history';
+import { selectPair } from './discovery';
+import { SOL_MINT } from '../core/types';
 import { DeskEngine, type DeskWallet } from './engine';
 import { DeskReject } from './guard';
 import { XClient } from './social';
@@ -36,7 +40,7 @@ const ENV_KEYS = ['RPC_ENDPOINTS', 'RPC_MAX_RPS', 'RPC_TIMEOUT_MS', 'JUPITER_API
   'CRASH_EXIT_MODE', 'CRASH_TRAIL_ACTIVATION_PCT', 'CRASH_TRAIL_STOP_PCT', 'CRASH_RIDE_MAX_HOLD_MIN', 'CRASH_REENTRY_MIN',
   'DESK_LIVE_SIGNER', 'DESK_LIVE_MAX_ENTRIES', 'DESK_DEPLOYMENT_MODE', 'DESK_PAPER_FAIR_ENABLED', 'DESK_PAPER_CRASH_ENABLED',
   'DESK_LIVE_FAIR_ENABLED', 'DESK_LIVE_CRASH_ENABLED', 'DESK_FAIR_LOSS_REENTRY_MIN', 'DESK_CRASH_LOSS_REENTRY_MIN',
-  'DESK_FAIR_FRESH_SIGNAL', 'DESK_CRASH_FRESH_SIGNAL', 'DESK_NTFY_TOPIC', 'DESK_NTFY_SERVER', 'DESK_TELEGRAM_BOT_TOKEN', 'DESK_TELEGRAM_CHAT_ID'];
+  'DESK_FAIR_FRESH_SIGNAL', 'DESK_CRASH_FRESH_SIGNAL', 'DESK_NTFY_TOPIC', 'DESK_NTFY_SERVER', 'DESK_TELEGRAM_BOT_TOKEN', 'DESK_TELEGRAM_CHAT_ID', 'ANTHROPIC_API_KEY'];
 export async function deskEnvironment(repo: string): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = {};
   try {
@@ -57,6 +61,10 @@ export interface DeskHandle {
   liveSigner?: LiveSignerKind;
   /** Exit rules and alerts for tokens held outside the desk's strategies. */
   watch?: HoldingsWatch;
+  /** Strategy assistant (Claude); null without ANTHROPIC_API_KEY in .env. */
+  assistant?: StrategyAssistant | null;
+  /** A wallet's recent swaps, for the assistant. */
+  walletHistory?: (wallet: string) => Promise<WalletHistory>;
 }
 export interface DeskContext { wallet: (mode: DeskMode) => DeskWallet | null; authorized: () => boolean }
 
@@ -103,7 +111,13 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
       },
       // Selling needs the local key: a Phantom session cannot be relied on to be open when a floor breaks.
       sell: localSigner ? s => engines.LIVE.sellHolding(s) : null, sellWallet: localSigner?.publicKey.toBase58() ?? null });
-    return { engines, capital, operational, liveSigner: live.signer, watch, close: async () => {
+    const assistant = env.ANTHROPIC_API_KEY?.trim() ? new StrategyAssistant(env.ANTHROPIC_API_KEY.trim()) : null;
+    const history = async (wallet: string) => {
+      const sol = selectPair(await shared.dex.getPairsForTokens([SOL_MINT]), SOL_MINT, Date.now())?.priceUsd;
+      if (!sol) throw new DeskReject('SOL_PRICE_UNAVAILABLE');
+      return walletHistory({ wallet, solUsd: sol, rpc, dex: shared.dex });
+    };
+    return { engines, capital, operational, liveSigner: live.signer, watch, assistant, walletHistory: history, close: async () => {
       await watch.settled();
       for (const e of Object.values(engines)) { e.stop('shutdown'); await e.settled(); await e.persist(); }
       await data.flush(); await lock.close(); await fs.unlink(lockPath);

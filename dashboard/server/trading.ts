@@ -6,6 +6,8 @@ import { SigningBroker } from '../../src/phantom/signing-broker';
 import type { DeskWallet } from '../../src/desk/engine';
 import { DeskReject } from '../../src/desk/guard';
 import { parseRuleSpec } from '../../src/desk/custom';
+import { assistantErrorCode, parseChat } from '../../src/desk/assistant';
+import { historyText, type WalletHistory } from '../../src/desk/wallet-history';
 import { createDesk, deskEnvironment, type DeskContext, type DeskHandle } from '../../src/desk/runtime';
 import type { DeskMode, DeskStatus } from '../../src/desk/types';
 import type { WatchView } from '../../src/desk/watch';
@@ -95,7 +97,7 @@ export class TradingService {
   }
 
   private view(sessionId?: string): { session: { address: string; expiresAt: number } | null; pending: { id: string; transactionBase64: string; expiresAt: number } | null;
-    mode: DeskMode; desk: DeskStatus | null; deskError: string | null; watch: WatchView | null } {
+    mode: DeskMode; desk: DeskStatus | null; deskError: string | null; watch: WatchView | null; assistant: boolean } {
     let session = null, pending = null;
     if (sessionId) {
       const s = this.broker.status(sessionId); session = { address: s.address, expiresAt: s.expiresAt };
@@ -103,7 +105,38 @@ export class TradingService {
     }
     const c = this.broker.connection();
     const desk = this.desk?.engines[this.mode].status({ connected: c.connected, address: c.address }) ?? null;
-    return { session, pending, mode: this.mode, desk, deskError: this.deskError, watch: this.desk?.watch?.view() ?? null };
+    return { session, pending, mode: this.mode, desk, deskError: this.deskError, watch: this.desk?.watch?.view() ?? null, assistant: !!this.desk?.assistant };
+  }
+
+  /**
+   * Strategy chat with Claude. Proposals are returned for review in the editor, never saved here. One request at a
+   * time; a named wallet's swaps are read from the chain and reused for 10 minutes.
+   */
+  private assistantBusy = false;
+  private histories = new Map<string, { at: number; value: WalletHistory }>();
+  private async assistant(body: Record<string, unknown>, handle: DeskHandle) {
+    if (!handle.assistant) throw new DeskReject('ASSISTANT_NOT_CONFIGURED');
+    if (this.assistantBusy) throw new DeskReject('ASSISTANT_BUSY');
+    let messages;
+    try { messages = parseChat(body.messages); } catch { throw new DeskReject('INVALID_CHAT'); }
+    this.assistantBusy = true;
+    try {
+      let history: WalletHistory | null = null;
+      if (typeof body.wallet === 'string' && body.wallet.trim()) {
+        let wallet: string;
+        try { wallet = new PublicKey(body.wallet.trim()).toBase58(); } catch { throw new DeskReject('INVALID_ADDRESS'); }
+        const cached = this.histories.get(wallet);
+        history = cached && Date.now() - cached.at < 10 * 60_000 ? cached.value
+          : await handle.walletHistory!(wallet).catch(error => { throw error instanceof Error && error.name === 'DeskReject' ? error : new DeskReject('WALLET_HISTORY_UNAVAILABLE'); });
+        this.histories.set(wallet, { at: Date.now(), value: history });
+      }
+      const specs = Object.values(handle.engines.PAPER.strategies).flatMap(p => p?.rule ? [p.rule] : []);
+      const answer = await handle.assistant.ask({ messages, strategies: specs, walletHistory: history ? historyText(history) : null })
+        .catch(error => { throw new DeskReject(assistantErrorCode(error)); });
+      return { ...answer, wallet: history && { wallet: history.wallet, scanned: history.scanned, trades: history.trades,
+        tokens: history.tokens.map(t => ({ mint: t.mint, symbol: t.symbol, trades: t.trades.length, boughtUsd: t.boughtUsd, soldUsd: t.soldUsd,
+          firstBuyMcapUsd: t.firstBuyMcapUsd, lastSellMcapUsd: t.lastSellMcapUsd, nowMcapUsd: t.nowMcapUsd, stillHeld: t.stillHeld })) } };
+    } finally { this.assistantBusy = false; }
   }
 
   private async deskAction(action: string, body: Record<string, unknown>, handle: DeskHandle): Promise<void> {
@@ -221,10 +254,13 @@ export class TradingService {
       if (req.headers.origin !== origin || !this.validCapability(supplied)) throw new DeskReject('CAPABILITY_REQUIRED');
       if (!String(req.headers['content-type']).startsWith('application/json')) throw new DeskReject('JSON_REQUIRED');
       let text = '', size = 0;
-      for await (const chunk of req) { size += Buffer.byteLength(chunk); if (size > 8192) throw new DeskReject('BODY_TOO_LARGE'); text += chunk; }
+      // A strategy chat carries its history; everything else is a small command.
+      const limit = url.pathname === '/api/trading/assistant' ? 65_536 : 8192;
+      for await (const chunk of req) { size += Buffer.byteLength(chunk); if (size > limit) throw new DeskReject('BODY_TOO_LARGE'); text += chunk; }
       const body = JSON.parse(text) as Record<string, unknown>;
       if (!body || typeof body !== 'object' || Array.isArray(body)) throw new DeskReject('INVALID_BODY');
       const action = url.pathname.slice('/api/trading/'.length);
+      if (action === 'assistant') { this.json(res, 200, await this.assistant(body, await this.ensureDesk())); return true; }
       if (action === 'connect') {
         if (typeof body.address !== 'string') throw new DeskReject('INVALID_ADDRESS');
         const previous = this.broker.connection().address;

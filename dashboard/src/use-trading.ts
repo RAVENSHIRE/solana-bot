@@ -3,6 +3,7 @@ import { VersionedTransaction } from '@solana/web3.js';
 import { phantomProvider, type PhantomListener } from './phantom';
 import type { DeskMode, DeskStatus } from '../../src/desk/types';
 import type { WatchView } from '../../src/desk/watch';
+import type { RuleSpec } from '../../src/desk/custom';
 import type { BrowserSDK } from '@phantom/browser-sdk';
 import type { PollConfig, PollResult } from './poll-worker';
 
@@ -12,6 +13,13 @@ export interface TradingView {
   mode: DeskMode; desk: DeskStatus | null; deskError: string | null;
   /** Exit rules for tokens held outside the desk's strategies (null until the desk has started). */
   watch?: WatchView | null;
+  /** The strategy assistant is configured (ANTHROPIC_API_KEY in .env). */
+  assistant?: boolean;
+}
+export interface AssistantAnswer {
+  reply: string; strategy: RuleSpec | null; specError: string | null; model: string; stopReason: string | null;
+  wallet: null | { wallet: string; scanned: number; trades: number; tokens: Array<{ mint: string; symbol: string | null; trades: number; boughtUsd: number; soldUsd: number;
+    firstBuyMcapUsd: number | null; lastSellMcapUsd: number | null; nowMcapUsd: number | null; stillHeld: boolean }> };
 }
 export type DeskAction = 'select-mode' | 'start-test' | 'stop-test' | 'start-live' | 'pause' | 'resume' | 'stop-live' | 'probe' | 'drill-on' | 'drill-off' | 'strategy-save' | 'strategy-delete' | 'watch-add' | 'watch-remove' | 'watch-rearm' |
   'strategy' | 'reset-test' | 'exit';
@@ -90,6 +98,9 @@ export function useTradingSession() {
       autoRef.current = false; setAuto(false); seen.current.clear(); setRevision(v => v + 1);
     } catch (e) { setError(message(e)); } finally { setBusy(null); }
   };
+  /** Strategy chat with Claude; the caller shows its own progress and errors (it can take a minute). */
+  const ask = (messages: Array<{ role: 'user' | 'assistant'; content: string }>, wallet: string | null): Promise<AssistantAnswer> =>
+    post('assistant', { messages, ...(wallet ? { wallet } : {}) }) as Promise<AssistantAnswer>;
   /** Resolves true when the desk accepted the action. */
   const desk = async (action: DeskAction, extra: Record<string, unknown> = {}): Promise<boolean> => {
     // Stopping ends auto-signing even if the request itself fails. Pause only stops entries: exits must stay signable.
@@ -144,7 +155,7 @@ export function useTradingSession() {
     } finally { signing.current = false; setBusy(null); }
   }, [view, post, liveExecuting]);
   useEffect(() => { if (auto && liveExecuting && view?.pending) void approve(true); }, [auto, view, approve, liveExecuting]);
-  return { view, address: session?.address ?? null, connected: !!session, online, busy, error, auto, autoUnsupported, connect, desk, enableAuto,
+  return { view, address: session?.address ?? null, connected: !!session, online, busy, error, auto, autoUnsupported, connect, desk, ask, enableAuto,
     approve: () => approve(false), disconnect: async () => { invalidate(null); try { await sdk.current?.disconnect(); } catch (e) { setError(message(e)); } } };
 }
 export type TradingSession = ReturnType<typeof useTradingSession>;

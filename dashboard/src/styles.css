@@ -1303,6 +1303,14 @@ b {
 .watch-form{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px 12px;align-items:end;margin:4px 0 10px}
 .watch-form label{display:flex;flex-direction:column;gap:4px;min-width:0}.watch-form label span{font-size:11px;color:#7b8190}
 .watch-form input,.watch-form select{font:inherit;padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:#fff;min-width:0;width:100%;box-sizing:border-box}
+.strategy-chat{padding:12px 16px;margin-bottom:12px}.strategy-chat>summary{cursor:pointer;font-size:14px}
+.chat-log{display:flex;flex-direction:column;gap:10px;margin:12px 0;max-height:520px;overflow-y:auto}
+.chat-turn{border-radius:12px;padding:10px 12px;max-width:88%;white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px}
+.chat-turn p{margin:0}.chat-turn.user{align-self:flex-end;background:#eef2ff}.chat-turn.assistant{align-self:flex-start;background:#fff;border:1px solid var(--border)}
+.chat-proposal{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:10px;padding:10px;border-radius:10px;background:#e0f7ed}
+.chat-proposal span{flex:1 1 100%;font-size:13px;color:#3d4451}
+.chat-input{display:flex;flex-direction:column;gap:8px}.chat-input label{display:flex;flex-direction:column;gap:4px}.chat-input label span{font-size:11px;color:#7b8190}
+.chat-input textarea,.chat-input input{font:inherit;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:#fff;width:100%;box-sizing:border-box}
 .watch-alerts{margin:6px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:4px;font-size:13px}
 .strategy details summary{cursor:pointer;font-size:12px;color:#3c4452;padding:4px 0}
 .strategy details ul{margin:4px 0;padding-left:18px;font-size:12px}

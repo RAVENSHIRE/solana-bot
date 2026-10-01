@@ -102,6 +102,23 @@ Mint and freeze authority revoked and no dangerous token extensions always apply
 
 RUNNER has not been backtested: let it prove itself in TEST before switching it on in LIVE.
 
+### Strategy assistant (Claude)
+
+The *Strategy assistant* panel in *Strategies* is a chat with Claude (`claude-opus-5-5`). Describe how you pick, enter and exit coins. You can also put a wallet address in *Learn from wallet*: the desk then reads that wallet's last 60 transactions from the chain and gives Claude the swaps it finds, with the buys and sells per token, amounts, times and the estimated market cap at each trade (trade price × current supply).
+
+What happens with an answer:
+
+- Claude answers, asks at most two questions, or **proposes a strategy**.
+- A proposal is checked like any custom strategy; if it fails a check, the panel says why and you can ask Claude to fix it.
+- **Review in editor** opens the proposal in the rule editor. Nothing is saved or switched on until you press *Add strategy* there, and a new strategy starts in TEST only.
+- Follow-up messages ("tighter stop", "only above $1M") edit the same proposal.
+
+Setup and data:
+
+- Add `ANTHROPIC_API_KEY` to `.env` and restart the dashboard. The key stays in the local server and is never sent to the browser.
+- Sent to Claude: your messages, your existing custom strategies, and the named wallet's swap summary.
+- Requests use structured output and Anthropic's server-side fallback for declined requests.
+
 ### Watch: exit rules for tokens you hold yourself
 
 The *Watch* section (sidebar: Watch) guards tokens you bought outside the desk, on FOMO, in Phantom or anywhere else. Add the token's CA and the wallet that holds it, then set any of these levels:

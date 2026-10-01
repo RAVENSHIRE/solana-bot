@@ -160,6 +160,42 @@ test('custom strategies: one validated spec for both modes, toggled per mode, re
   } finally { await server.close(); }
 });
 
+test('strategy assistant: capability-checked, chat validated, wallet swaps read once and cached, proposals only returned', async () => {
+  const engines = { PAPER: engine('PAPER'), LIVE: engine('LIVE') };
+  (engines.PAPER.strategies as Record<string, unknown>).MINE = { enabled: true, rule: { id: 'MINE' } };
+  const asked: Array<{ messages: unknown[]; strategies: unknown[]; walletHistory?: string | null }> = [];
+  let reads = 0, configured = false;
+  const wallet = Keypair.fromSeed(new Uint8Array(32).fill(9)).publicKey.toBase58();
+  const factory: DeskFactory = async () => ({ engines: engines as unknown as Record<DeskMode, DeskEngine>, capital: { plannedStartingCapitalUsd: 5.45, baseEntryUsd: 2, slippageBps: 100 },
+    liveSigner: 'LOCAL_KEY', close: async () => {},
+    assistant: configured ? { ask: async (o: typeof asked[number]) => { asked.push(o); return { reply: 'Try RUNNER', strategy: null, specError: null, model: 'claude-opus-5-5', stopReason: 'end_turn' }; } } as never : null,
+    walletHistory: async (w: string) => { reads++; return { wallet: w, scanned: 5, trades: 1, note: 'n', tokens: [] }; } }) as DeskHandle;
+  const { base, post, close } = await serve(new TradingService(factory));
+  try {
+    const { capability } = await (await fetch(`${base}/api/trading/bootstrap`)).json();
+    const headers = { 'X-Local-Capability': capability };
+    const chat = [{ role: 'user', content: 'I buy after sideways hours' }];
+    assert.equal((await post('assistant', { messages: chat })).status, 403, 'capability required');
+    assert.equal((await (await post('assistant', { messages: chat }, headers)).json()).message, 'ASSISTANT_NOT_CONFIGURED');
+    assert.equal((await (await fetch(`${base}/api/trading`)).json()).assistant, false);
+  } finally { await close(); }
+  configured = true;
+  const second = await serve(new TradingService(factory));
+  try {
+    const { capability } = await (await fetch(`${second.base}/api/trading/bootstrap`)).json();
+    const headers = { 'X-Local-Capability': capability };
+    assert.equal((await (await fetch(`${second.base}/api/trading`)).json()).assistant, true);
+    assert.equal((await (await second.post('assistant', { messages: [{ role: 'assistant', content: 'x' }] }, headers)).json()).message, 'INVALID_CHAT');
+    assert.equal((await (await second.post('assistant', { messages: [{ role: 'user', content: 'x' }], wallet: 'nope' }, headers)).json()).message, 'INVALID_ADDRESS');
+    const long = [{ role: 'user', content: 'a'.repeat(5_000) }, { role: 'assistant', content: 'b'.repeat(5_000) }, { role: 'user', content: 'and now?' }];
+    const r = await (await second.post('assistant', { messages: long, wallet }, headers)).json();
+    assert.equal(r.reply, 'Try RUNNER', 'a chat longer than 8 KB is accepted on this route'); assert.equal(r.wallet.wallet, wallet);
+    assert.deepEqual(asked[0]!.strategies, [{ id: 'MINE' }]); assert.match(asked[0]!.walletHistory!, new RegExp(`^Wallet ${wallet}: no token swaps found`));
+    await second.post('assistant', { messages: [{ role: 'user', content: 'again' }], wallet }, headers);
+    assert.equal(reads, 1, 'the wallet is read once and reused');
+  } finally { await second.close(); }
+});
+
 test('desk settings come from an allowlist that never loads the local private key', async () => {
   const dir = await fs.mkdtemp(path.join(process.cwd(), '.trading-test-'));
   try {

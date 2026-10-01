@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import type { Candidate, DeskEvent, DeskStatus, Evidence, Preflight, Stage, StrategyView } from '../../src/desk/types';
 import type { RuleSpecInput } from '../../src/desk/custom';
 import type { WatchRule, WatchView } from '../../src/desk/watch';
-import type { TradingSession } from './use-trading';
+import type { AssistantAnswer, TradingSession } from './use-trading';
 import { money, numeric, short, time } from './format';
 
 const PIPELINE: Array<{ label: string; stages: Stage[] }> = [
@@ -24,6 +24,11 @@ const EXPLAIN: Record<string, string> = {
   CONFIG_LOCKED: 'The desk runs with DESK_DEPLOYMENT_MODE=LOCKED: strategies are fixed at startup.',
   WATCH_SELL_NEEDS_LOCAL_KEY: 'Automatic selling works only for the local-key wallet (DESK_LIVE_SIGNER=local-key). Other wallets (FOMO, Phantom) get alerts: choose ALERT.',
   WATCH_UNAVAILABLE: 'The watch starts with the desk; check the desk error above.', WATCH_LIMIT: 'At most 50 watched tokens.',
+  ASSISTANT_NOT_CONFIGURED: 'Add ANTHROPIC_API_KEY to .env and restart the dashboard.', ASSISTANT_BUSY: 'Claude is still answering the previous message.',
+  ASSISTANT_AUTH: 'Claude rejected the API key: check ANTHROPIC_API_KEY in .env.', ASSISTANT_RATE_LIMITED: 'Claude is rate-limited right now; try again in a minute.',
+  ASSISTANT_OFFLINE: 'Claude could not be reached (network).', ASSISTANT_UNAVAILABLE: 'Claude is unavailable right now; try again shortly.',
+  ASSISTANT_BAD_REQUEST: 'The chat was rejected; start a new chat.', INVALID_CHAT: 'The chat could not be sent; start a new chat.',
+  WALLET_HISTORY_UNAVAILABLE: 'The wallet\'s transactions could not be read (RPC). Try again, or leave the wallet empty.', INVALID_ADDRESS: 'That is not a Solana address.',
   POSITION_NOT_FOUND: 'That position is no longer open in the desk ledger (already sold, or held outside the desk: sell it in your wallet).',
   PHANTOM_PROVIDER: 'Phantom could not connect from this page: open the dashboard in the browser profile where the Phantom extension is installed and unlocked. With DESK_LIVE_SIGNER=local-key in .env, LIVE needs no Phantom connection at all.',
   AUTO_CONFIRM_UNAVAILABLE_FOR_DOMAIN: 'Phantom does not offer Auto-Confirm for this domain (only for domains it has approved). LIVE orders need your approval in Phantom within 15 s.',
@@ -216,6 +221,61 @@ function StrategyEditor({ spec, isNew, busy, save, cancel }: { spec: Spec; isNew
   </form>;
 }
 
+type ChatTurn = { role: 'user' | 'assistant'; content: string; answer?: AssistantAnswer };
+/**
+ * Strategy assistant: describe how you trade (or name a wallet whose trades show it) and Claude proposes a rule
+ * strategy. A proposal only opens in the editor; you review and add it, and it starts in TEST.
+ */
+function StrategyChat({ t, open }: { t: TradingSession; open: (spec: Spec) => void }) {
+  const [turns, setTurns] = useState<ChatTurn[]>([]), [text, setText] = useState(''), [wallet, setWallet] = useState('');
+  const [pending, setPending] = useState(false), [error, setError] = useState<string | null>(null);
+  const ready = !!t.view?.assistant;
+  const send = async () => {
+    const content = text.trim();
+    if (!content || pending) return;
+    const next: ChatTurn[] = [...turns, { role: 'user', content }];
+    setTurns(next); setText(''); setPending(true); setError(null);
+    try {
+      const answer = await t.ask(next.map(({ role, content: c }) => ({ role, content: c })), wallet.trim() || null);
+      // Claude sees its own earlier proposal in the history, so "make the stop tighter" edits the same strategy.
+      const remembered = answer.strategy ? `${answer.reply}\n\n[Proposed strategy: ${JSON.stringify(answer.strategy)}]` : answer.reply;
+      setTurns([...next, { role: 'assistant', content: remembered, answer }]);
+    } catch (e) { setError(e instanceof Error ? e.message : 'Assistant unavailable'); setTurns(turns); setText(content); }
+    finally { setPending(false); }
+  };
+  const lastWallet = [...turns].reverse().find(x => x.answer?.wallet)?.answer?.wallet ?? null;
+  return <details className="panel strategy-chat" open={turns.length > 0 || undefined}>
+    <summary><strong>Strategy assistant (Claude)</strong> — describe how you trade, or name a wallet whose trades show it</summary>
+    {!ready ? <p className="desk-note">Add <code>ANTHROPIC_API_KEY=…</code> (from console.anthropic.com) to <code>.env</code> in the repo root and restart the dashboard. The key stays in the local server.</p> : <>
+      <div className="chat-log" aria-live="polite">
+        {!turns.length && <p className="desk-note">For example: "I buy FOMO trending tokens with over 1,000 holders after they move sideways for an hour, and sell when they fall 25% from the top." Add a wallet address below and Claude also reads its recent swaps (entries, exits, market caps).</p>}
+        {turns.map((x, i) => <div key={i} className={`chat-turn ${x.role}`}>
+          <p>{x.role === 'assistant' ? x.answer?.reply ?? x.content : x.content}</p>
+          {x.answer?.strategy && <div className="chat-proposal"><strong>Proposed: {x.answer.strategy.label}</strong> <small>({x.answer.strategy.id})</small>
+            <span>{x.answer.strategy.summary}</span>
+            <button className="primary-action" type="button" onClick={() => open(x.answer!.strategy!)}>Review in editor</button></div>}
+          {x.answer?.specError && <p className="trading-error">The proposal does not pass the desk's checks ({x.answer.specError}). Ask Claude to fix it.</p>}
+        </div>)}
+        {pending && <p className="desk-note">Claude is thinking{wallet.trim() ? ' (and reading the wallet\'s trades)' : ''}… this can take up to a minute.</p>}
+      </div>
+      {lastWallet && <details><summary>Wallet {short(lastWallet.wallet)}: {lastWallet.trades} swaps in {lastWallet.tokens.length} tokens (last {lastWallet.scanned} transactions)</summary>
+        <div className="wallet-table"><table><thead><tr><th>Token</th><th>Swaps</th><th>Bought</th><th>Sold</th><th>First buy at</th><th>Last sell at</th><th>Now</th></tr></thead>
+          <tbody>{lastWallet.tokens.map(x => <tr key={x.mint}><td title={x.mint}>{x.symbol ?? short(x.mint)}{x.stillHeld ? ' · held' : ''}</td><td>{x.trades}</td>
+            <td>{money(x.boughtUsd)}</td><td>{money(x.soldUsd)}</td><td>{cap(x.firstBuyMcapUsd)}</td><td>{cap(x.lastSellMcapUsd)}</td><td>{cap(x.nowMcapUsd)}</td></tr>)}</tbody></table></div>
+        <p className="desk-note">Market caps are estimates: trade price × current supply, SOL at today's price.</p></details>}
+      {error && <p className="trading-error" role="alert">{describe(error)}</p>}
+      <form className="chat-input" onSubmit={e => { e.preventDefault(); void send(); }}>
+        <textarea rows={3} value={text} placeholder="How do you pick, enter and exit a coin?" onChange={e => setText(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void send(); } }} />
+        <label><span>Learn from wallet (optional)</span><input value={wallet} placeholder="your FOMO or Phantom address" onChange={e => setWallet(e.target.value)} /></label>
+        <div className="spec-actions"><button className="primary-action" type="submit" disabled={pending || !text.trim()}>{pending ? 'Waiting…' : 'Send'}</button>
+          {turns.length > 0 && <button className="source-button" type="button" disabled={pending} onClick={() => { setTurns([]); setError(null); }}>New chat</button>}</div>
+      </form>
+      <p className="desk-note">Sent to Claude ({'claude-opus-5-5'}): your messages, your custom strategies and, if given, the wallet's recent swaps. Proposals are never saved or switched on by themselves.</p>
+    </>}
+  </details>;
+}
+
 function Strategies({ d, t }: { d: DeskStatus; t: TradingSession }) {
   const busy = !!t.busy || !t.online, test = d.mode === 'PAPER', locked = d.operational?.deploymentMode === 'LOCKED';
   const [selected, setSelected] = useState('ALL');
@@ -253,6 +313,7 @@ function Strategies({ d, t }: { d: DeskStatus; t: TradingSession }) {
       {current?.spec && !editor && !locked && <button className="stop-action" disabled={busy} onClick={() => void remove(current)}>Delete</button>}
       <small>{test ? 'TEST' : 'LIVE'}: switches apply to this mode only. Custom strategies trade their own ledger{test ? ' and TEST sleeve' : ''}.</small>
     </div>
+    <StrategyChat t={t} open={spec => setEditor({ spec, isNew: !known.has(spec.id) })} />
     {editor && <StrategyEditor key={`${editor.spec.id}-${editor.isNew}`} spec={editor.spec} isNew={editor.isNew} busy={busy} save={s => void save(s)} cancel={() => setEditor(null)} />}
     <div className="strategies">{shown.map((s: StrategyView) => {
     const x = s.stats, row = (label: string, value: string) => <div><span>{label}</span><strong>{value}</strong></div>;
