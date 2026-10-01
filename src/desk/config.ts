@@ -62,6 +62,11 @@ export const DESK = Object.freeze({
   momentum: { minObservations: 2, minAcceleration: 1, minPriceChange5mPct: 0 },
   /** Candidates kept in memory and on the status API. */
   maxCandidates: 60,
+  /**
+   * Holders for more candidates than the deep analyses reach: the largest accounts every few minutes (standard RPC
+   * calls), and the holder count less often (DAS getTokenAccounts, 1,000 accounts per page, capped).
+   */
+  holders: { perScan: 8, ttlMs: 180_000, countPerScan: 3, countTtlMs: 600_000, countPages: 2 },
   maxEvents: 400,
 });
 
@@ -81,11 +86,18 @@ export const CRASH_DEFAULTS = Object.freeze({
   positionCheckMs: 2_000,
   /** +100 % = $2 unrealized on a $2 entry. */
   takeProfitPct: 100,
-  /** Once the return has peaked at or above lockPeakPct, exit when it falls givebackPts below that peak. */
-  lockPeakPct: 40,
+  /**
+   * Optional profit lock: once the return has peaked at or above lockPeakPct, exit when it falls givebackPts below
+   * that peak. Off (0) by default: in the backtest it cut the result by about 10 points in every variant.
+   */
+  lockPeakPct: 0,
   givebackPts: 15,
-  stopLossPct: 15,
-  maxHoldMin: 4,
+  /**
+   * Backtest (every pump.fun graduation over 12 h, 247 pools, docs/DESK.md): stops at 15–25 % were shaken out by
+   * normal volatility; 35 % held the edge with a worst trade near −38 %. A 10-minute hold beat 4 minutes.
+   */
+  stopLossPct: 35,
+  maxHoldMin: 10,
   /** QUICK takes the fixed profit; RIDE has no take profit and trails the move (the SI / GM runs went 8–20×). */
   exitMode: 'quick' as 'quick' | 'ride',
   rideTrailActivationPct: 50,
@@ -95,18 +107,23 @@ export const CRASH_DEFAULTS = Object.freeze({
   reentryMin: 10,
 });
 
+/**
+ * CRASH entry, set from the backtest: entering a pool that already moved more than +30 % in five minutes, or on less
+ * than $50K five-minute volume, lost money (the old rule, up to +200 % on $20K, averaged −11 % per trade); the early,
+ * well-traded part of the move in a pool at most 15 minutes old paid.
+ */
 export const CRASH_ENTRY = Object.freeze({
-  maxPoolAgeMin: 60,
+  maxPoolAgeMin: 15,
   minPriceChange5mPct: 10,
   /** Above this the move is already vertical; entering there is buying the top. */
-  maxPriceChange5mPct: 200,
-  minVolume5mUsd: 20_000,
+  maxPriceChange5mPct: 30,
+  minVolume5mUsd: 50_000,
   minBuySellRatio: 1.3,
   minBuys5m: 40,
   minLiquidityUsd: 10_000,
   minLiquidityToMarketCap: 0.03,
   /** Above this the early part of the move is gone; the backtest keeps this where entries still paid. */
-  maxMarketCapUsd: Number.POSITIVE_INFINITY,
+  maxMarketCapUsd: 300_000,
   maxTop10WalletPct: 50,
   maxLargestWalletPct: 15,
 });
@@ -193,7 +210,7 @@ export function strategyProfiles(env: NodeJS.ProcessEnv, capital: DeskCapital,
     CRASH_EXIT_SLIPPAGE_BPS: z.coerce.number().int().min(1).max(5_000).default(c.exitSlippageBps),
     CRASH_MAX_DRAG_BPS: z.coerce.number().int().min(50).max(2_500).default(c.maxDragBps),
     CRASH_MAX_POSITIONS: z.coerce.number().int().min(1).max(10).default(c.maxOpenPositions),
-    CRASH_TAKE_PROFIT_PCT: pctSetting(c.takeProfitPct), CRASH_LOCK_PEAK_PCT: pctSetting(c.lockPeakPct), CRASH_GIVEBACK_PTS: pctSetting(c.givebackPts),
+    CRASH_TAKE_PROFIT_PCT: pctSetting(c.takeProfitPct), CRASH_LOCK_PEAK_PCT: z.coerce.number().finite().min(0).max(1_000).default(c.lockPeakPct), CRASH_GIVEBACK_PTS: pctSetting(c.givebackPts),
     CRASH_STOP_LOSS_PCT: pctSetting(c.stopLossPct, 100), CRASH_MAX_HOLD_MIN: pctSetting(c.maxHoldMin, 240),
     CRASH_EXIT_MODE: z.enum(['quick', 'ride']).default(c.exitMode),
     CRASH_TRAIL_ACTIVATION_PCT: pctSetting(c.rideTrailActivationPct), CRASH_TRAIL_STOP_PCT: pctSetting(c.rideTrailStopPct, 95),
@@ -219,6 +236,6 @@ export function strategyProfiles(env: NodeJS.ProcessEnv, capital: DeskCapital,
         ? { takeProfitPct: Number.POSITIVE_INFINITY, stopLossPct: e.CRASH_STOP_LOSS_PCT, maxHoldMin: e.CRASH_RIDE_MAX_HOLD_MIN,
           trailing: { activationPct: e.CRASH_TRAIL_ACTIVATION_PCT, stopPct: e.CRASH_TRAIL_STOP_PCT }, giveback: null }
         : { takeProfitPct: e.CRASH_TAKE_PROFIT_PCT, stopLossPct: e.CRASH_STOP_LOSS_PCT, maxHoldMin: e.CRASH_MAX_HOLD_MIN, trailing: null,
-          giveback: { lockPeakPct: e.CRASH_LOCK_PEAK_PCT, points: e.CRASH_GIVEBACK_PTS } } },
+          giveback: e.CRASH_LOCK_PEAK_PCT > 0 ? { lockPeakPct: e.CRASH_LOCK_PEAK_PCT, points: e.CRASH_GIVEBACK_PTS } : null } },
   };
 }

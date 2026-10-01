@@ -34,9 +34,9 @@ Native reserve (0.003 SOL) and max drag (1.5 %) are the project's existing micro
 
 | | FAIR (fair launch) | CRASH |
 | --- | --- | --- |
-| Idea | Fair-launch trending tokens, every hard gate, momentum in two consecutive scans | Young pools pumping right now; 1–4 minute trades targeting +40–100 % |
-| Entry | QUALIFIED status (below) | One scan: pool ≤ 60 min, 5m price +10 % to +200 %, 5m volume ≥ $20K, buy/sell ≥ 1.3, ≥ 40 buys, AMM liquidity ≥ $10K and ≥ 3 % of market cap, mint + freeze authority revoked, no dangerous extensions, top-10 ≤ 50 % and largest wallet ≤ 15 % when known, liquidity not dropping. Launch fairness is shown but **not required** |
-| Exits | `RS_*` rules: stop loss, take profit, trailing stop, max hold | `CRASH_EXIT_MODE=quick` (default): take profit +100 % (= $2 unrealized on a $2 entry) · profit lock: once +40 % was reached, exit 15 points below the peak · stop loss −15 % · time stop 4 min. `CRASH_EXIT_MODE=ride`: no take profit · trailing stop 35 % from the peak once +50 % was reached · stop loss −15 % · time stop 60 min |
+| Idea | Fair-launch trending tokens, every hard gate, momentum in two consecutive scans | The early, well-traded part of a young pool's first move; trades of up to 10 minutes targeting +100 % |
+| Entry | QUALIFIED status (below) | One scan: pool ≤ 15 min, 5m price +10 % to +30 %, 5m volume ≥ $50K, market cap ≤ $300K, buy/sell ≥ 1.3, ≥ 40 buys, AMM liquidity ≥ $10K and ≥ 3 % of market cap, mint + freeze authority revoked, no dangerous extensions, top-10 ≤ 50 % and largest wallet ≤ 15 % when known, liquidity not dropping. Launch fairness is shown but **not required** |
+| Exits | `RS_*` rules: stop loss, take profit, trailing stop, max hold | `CRASH_EXIT_MODE=quick` (default): take profit +100 % (= $2 unrealized on a $2 entry) · stop loss −35 % · time stop 10 min · no profit lock unless `CRASH_LOCK_PEAK_PCT` is set. `CRASH_EXIT_MODE=ride`: no take profit · trailing stop 35 % from the peak once +50 % was reached · stop loss −35 % · time stop 60 min |
 | Re-entry after an exit | 30 min | `CRASH_REENTRY_MIN` (10 min) — a fresh signal only |
 | Checked | every 5 s | every 2 s |
 | Entry size / TEST sleeve | `DESK_BASE_ENTRY_USD` / `DESK_PLANNED_CAPITAL_USD` ($2 / $5.45) | `CRASH_ENTRY_USD` / `CRASH_CAPITAL_USD` ($2 / $10) |
@@ -49,7 +49,16 @@ Native reserve (0.003 SOL) and max drag (1.5 %) are the project's existing micro
 - Strategy cards show entry, sleeve, positions, realized/unrealized PnL, trades, win rate, average return and hold, profit factor and max drawdown (drill trades excluded), plus toggles. Disabling a strategy stops new entries; open positions keep their exits.
 - **CRASH is off in LIVE until you switch it on.** That click is saved in `data-desk/settings-LIVE.json`, as are all strategy and drill toggles per mode, so a restart never changes what the desk trades. CRASH trades need fast approvals: use Phantom Auto-Confirm. A rug can still happen inside one block — the exits limit, not remove, that risk.
 - **PAUSE ENTRIES** stops new positions only. Open positions keep their stop loss, take profit, trailing and time stops (in LIVE each exit still needs its Phantom signature). STOP ends everything.
-- QUICK vs RIDE on the tokens seen so far (minute candles, losses assumed first): SI's second leg from $312K — QUICK +45 %, RIDE +303 %; GM from $16K — QUICK +100 %, RIDE +37 %. Neither wins every time; `desk-replay` compares both on every closed trade.
+- **Why these rules (backtest, 30 Sep 2026):** every pump.fun graduation over 12 h (247 pools with minute candles, a fixed sample of the 698 that graduated), $2 per trade with sized impact, 0.3 % venue fee per side, $0.02 fixed cost and 3 % stop slippage:
+
+  | Rules | Trades | Win | Avg per trade | Median | Profit factor | Halves (time) |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | Old: pool ≤ 60 min, +10–200 %, ≥ $20K · SL 15 %, TP 100 %, lock 40/15, 4 min | 178 | 30 % | −8.8 % | −19 % | 0.53 | −5.8 % / −12.5 % |
+  | Old rules, RIDE | 172 | 11 % | −11.6 % | −19 % | 0.49 | −6.9 % / −17.4 % |
+  | Old rules with the old costs (full exit fee, rent never reclaimed) | 178 | 26 % | −18.8 % | −29 % | 0.28 | |
+  | **New: pool ≤ 15 min, +10–30 %, ≥ $50K, ≤ $300K · SL 35 %, TP 100 %, 10 min** | 36 | 53 % | **+24.3 %** | +12.6 % | 2.41 | +20.9 % / +27.1 % |
+
+  The entry rule carries the result: with the new exits the old entry still loses (−11 %/trade); chasing moves above +30 % or trading on less than $50K five-minute volume turns it negative. The profit lock cost about 10 points in every variant; stops at 15–25 % were shaken out. The new rules stay positive with 8 % stop slippage (+22.9 %), at $100 per trade (+22.1 %) and with the old costs (+14.3 %). **Limits:** one night of data; about 12,000 rule combinations were compared, so the best one is optimistic; buy/sell ratio, buy count and holder gates (which the desk also applies) are not in candles. Re-run `npm run desk:backtest` regularly and compare with TEST.
 - Other CRASH settings in `.env`: `CRASH_ENABLED`, `CRASH_TAKE_PROFIT_PCT`, `CRASH_LOCK_PEAK_PCT`, `CRASH_GIVEBACK_PTS`, `CRASH_STOP_LOSS_PCT`, `CRASH_MAX_HOLD_MIN`, `CRASH_TRAIL_ACTIVATION_PCT`, `CRASH_TRAIL_STOP_PCT`, `CRASH_RIDE_MAX_HOLD_MIN`.
 
 ### Going LIVE (Phantom)
@@ -111,6 +120,10 @@ Reads every pump.fun graduation of the last hours from the chain (the whole univ
 ### TEST sleeve cycles (no manual reset needed)
 
 When a TEST sleeve can no longer fund an entry and holds no open position, the desk archives it as a completed cycle (`ledger-PAPER[-CRASH].cycle-<time>.json`) and re-funds it at its planned capital. Trades, realized PnL, stats, the scale ladder, the ledger view and re-entry cooldowns all continue across cycles, also after a restart. LIVE never re-funds anything: the wallet is the budget.
+
+### Holders
+
+Each candidate shows its holder count and the share of the 10 largest wallets; its detail view lists the largest holders (from the 20 largest token accounts) with their share of supply, marked **wallet**, **pool / curve / program** (off-curve owners such as the PumpSwap vault or the bonding curve, which are excluded from concentration) or **DEV** (the pump.fun creator), each linked to Solscan, plus links to the token on FOMO and Solscan. The largest holders are refreshed every 3 minutes for the 8 most active candidates per scan (standard RPC calls); the holder count every 10 minutes for 3 per scan, through the DAS `getTokenAccounts` method (Helius and compatible RPCs, up to 2,000 owners, shown as "2,000+" beyond). An RPC without DAS shows the count as "?" with the reason.
 
 ### Why a token was not entered
 

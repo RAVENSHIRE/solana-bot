@@ -255,5 +255,8 @@ export function analyze(i: AnalysisInput): Candidate {
       token2022: o?.safety ? o.safety.isToken2022 : null, risks: o?.safety?.reasons ?? [], decimals: o?.holders?.decimals ?? (o?.safety ? o.safety.decimals : null) },
     evidence: evidenceList(input), gates: gateList, scores: scoreList, riskFlags,
     firstSeenAt: i.watch.firstSeenAt, updatedAt: i.now, deepAnalyzedAt: i.onchainAt, observations: i.watch.observations + 1, momentumStreak: streak, crash: null,
+    holders: o?.holders ? { count: o.holders.count ?? null, countCapped: o.holders.countCapped ?? false, countNote: o.holders.countNote ?? null,
+      top10WalletPct: o.holders.walletTop10Pct, largestWalletPct: o.holders.largestWalletPct, programOwnedPct: o.holders.programOwnedPct, at: o.holders.at ?? i.onchainAt ?? i.now,
+      top: (o.holders.top ?? []).map(h => ({ ...h, kind: o.developer?.creator === h.owner ? 'DEV' as const : h.kind })) } : null,
   };
 }

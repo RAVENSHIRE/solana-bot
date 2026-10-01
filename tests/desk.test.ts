@@ -181,6 +181,7 @@ function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' =
   const w = { priceFactor: 1, extraRent: 0, liquidity: 50_000, native: 45_000_000, sends: 0, signRequests: 0,
     graduations: [] as Array<{ signature: string; mint: string; ok: boolean; migrate: boolean; broken?: boolean }>,
     priorityCaps: [] as Array<{ side: 'BUY' | 'SELL'; maxLamports: number; notional: bigint }>,
+    dasUnsupported: false,
     last: null as null | { side: 'BUY' | 'SELL'; mint: string; inAmount: bigint; outAmount: bigint } };
   const holderMint = new Map<string, string>();
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -252,8 +253,12 @@ function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' =
     getFeeForMessage: async () => ({ value: 5_300 }),
     getMultipleAccountsInfo: async () => [],
     getSignaturesForAddress: async () => w.graduations.map(g => ({ signature: g.signature, blockTime: Math.floor(Date.now() / 1000) - 30, err: g.ok ? null : { InstructionError: [0, 'x'] } })),
-    _rpcRequest: async (method: string, [sig, config]: [string, { maxSupportedTransactionVersion?: number }]) => {
+    _rpcRequest: async (method: string, args: unknown) => {
+      // DAS holder count: two owners with a balance (one of them with two accounts) and an emptied account.
+      if (method === 'getTokenAccounts') return w.dasUnsupported ? { error: { code: -32601, message: 'Method not found' } }
+        : { result: { token_accounts: [{ owner: key(160).toBase58(), amount: 5 }, { owner: key(161).toBase58(), amount: 0 }, { owner: key(160).toBase58(), amount: 3 }, { owner: key(162).toBase58(), amount: '7' }] } };
       if (method !== 'getTransaction') throw new Error(`unexpected ${method}`);
+      const [sig, config] = args as [string, { maxSupportedTransactionVersion?: number }];
       const g = w.graduations.find(x => x.signature === sig)!, lp = key(222).toBase58();
       // Migrations may be version 1 transactions: a client that asks for version 0 at most is refused, like the real RPC.
       if ((config.maxSupportedTransactionVersion ?? -1) < 1) return { error: { message: 'Transaction version (1) is not supported by the requesting client' } };
@@ -444,20 +449,24 @@ test('LIVE restart refuses unresolved orders and token holdings missing from the
 
 // ---------------------------------------------------------------- CRASH strategy and parallel strategies
 
-const YOUNG_PUMP = { pairCreatedAt: NOW - 10 * 60_000, priceChange: { m5: 25, h1: 40 }, volume: { m5: 25_000, h1: 50_000 } };
+const YOUNG_PUMP = { pairCreatedAt: NOW - 10 * 60_000, priceChange: { m5: 25, h1: 40 }, volume: { m5: 60_000, h1: 120_000 }, marketCap: 200_000, fdv: 200_000 };
 const tokenKey = (n: number) => key(n).toBase58();
 
-test('CRASH rules: +100% take profit, profit lock after a +40% peak, 4-minute time stop, stop loss; FAIR keeps its trailing stop', () => {
-  const p = strategyProfiles({}, deskCapital({}), { takeProfitPct: 30, stopLossPct: 12, trailingActivationPct: 15, trailingStopPct: 8, maxHoldMin: 60 });
+test('CRASH rules (from the backtest): +100% take profit, 35% stop, 10-minute time stop, no profit lock unless configured; FAIR keeps its trailing stop', () => {
+  const rs = { takeProfitPct: 30, stopLossPct: 12, trailingActivationPct: 15, trailingStopPct: 8, maxHoldMin: 60 };
+  const p = strategyProfiles({}, deskCapital({}), rs);
   const c = p.CRASH.exits, f = p.FAIR.exits;
   assert.equal(p.CRASH.entryUsd, 2); assert.equal(p.CRASH.capitalUsd, CRASH_DEFAULTS.capitalUsd); assert.equal(p.CRASH.maxDragBps, 500n);
   const x = (pnlPct: number, peakPct = pnlPct, heldMs = 60_000, fromPeakPct = 0) => ({ pnlPct, peakPct, fromPeakPct, heldMs });
   assert.match(exitReason(c, x(101))!, /^TAKE_PROFIT/, '+100% = $2 unrealized on $2');
-  assert.equal(exitReason(c, x(35, 38)), null, 'below the +40% lock, a pullback is held');
-  assert.match(exitReason(c, x(30, 46))!, /^PROFIT_LOCK \+30\.00% after a \+46\.00% peak/);
-  assert.equal(exitReason(c, x(33, 46)), null);
-  assert.match(exitReason(c, x(5, 5, 4 * 60_000))!, /^MAX_HOLD 4 min/);
-  assert.match(exitReason(c, x(-15.5))!, /^STOP_LOSS/);
+  assert.equal(c.giveback, null); assert.equal(exitReason(c, x(30, 46)), null, 'no profit lock by default: a pullback from a peak is held');
+  assert.equal(exitReason(c, x(-25)), null, 'normal volatility is not stopped out');
+  assert.match(exitReason(c, x(-35.5))!, /^STOP_LOSS/);
+  assert.equal(exitReason(c, x(5, 5, 9 * 60_000)), null); assert.match(exitReason(c, x(5, 5, 10 * 60_000))!, /^MAX_HOLD 10 min/);
+  const locked = strategyProfiles({ CRASH_LOCK_PEAK_PCT: '40' }, deskCapital({}), rs).CRASH.exits;
+  assert.equal(exitReason(locked, x(35, 38)), null, 'below the +40% lock, a pullback is held');
+  assert.match(exitReason(locked, x(30, 46))!, /^PROFIT_LOCK \+30\.00% after a \+46\.00% peak/);
+  assert.equal(exitReason(locked, x(33, 46)), null);
   assert.match(exitReason(f, x(10, 20, 60_000, -9))!, /^TRAILING_STOP/);
   assert.equal(exitReason(f, x(101)) !== null && exitReason(f, x(29)) === null, true);
   assert.throws(() => strategyProfiles({ CRASH_SLIPPAGE_BPS: '500' }, deskCapital({}), { takeProfitPct: 30, stopLossPct: 12, trailingActivationPct: 15, trailingStopPct: 8, maxHoldMin: 60 }), /below CRASH_MAX_DRAG_BPS/);
@@ -479,7 +488,9 @@ test('CRASH entry check: a young pump with passing safety signals without a fair
   assert.equal(young.checks.find(g => g.key === 'fairLaunch')!.status, 'FAIL', 'the insider launch is shown…');
   assert.equal(young.checks.find(g => g.key === 'fairLaunch')!.blocking, false, '…but never required for CRASH');
   assert.match(run({ ...YOUNG_PUMP, pairCreatedAt: NOW - 3 * 3_600_000 }).summary, /^Pool age: 180 min/);
-  assert.match(run({ ...YOUNG_PUMP, priceChange: { m5: 350 } }).summary, /^5m price change: 350\.0%/, 'a vertical candle is not chased');
+  assert.match(run({ ...YOUNG_PUMP, priceChange: { m5: 45 } }).summary, /^5m price change: 45\.0%/, 'a move already above +30% in five minutes is not chased');
+  assert.match(run({ ...YOUNG_PUMP, pairCreatedAt: NOW - 20 * 60_000 }).summary, /^Pool age: 20 min/, 'only the first 15 minutes of a pool');
+  assert.match(run({ ...YOUNG_PUMP, volume: { m5: 30_000, h1: 60_000 } }).summary, /^5m volume: \$30,000/, 'thin volume is not traded');
   assert.equal(run(YOUNG_PUMP, { ...onchain, safety: { ...safety, hasMintAuthority: true } }).signal, false);
   assert.equal(run(YOUNG_PUMP, { ...onchain, safety: null } as never).signal, false, 'unknown safety never signals');
 });
@@ -536,10 +547,11 @@ test('CRASH enters a young pump in its first scan (no fair launch needed), exits
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-test('CRASH locks the profit when a +60% spike fades to +40%', async () => {
+test('with the optional profit lock configured, CRASH locks the profit when a +60% spike fades to +40%', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-lock-')), { w, shared } = world(YOUNG_PUMP, 'insider');
   try {
-    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    const strategies = strategyProfiles({ CRASH_LOCK_PEAK_PCT: '40' }, deskCapital({}), shared.cfg.rs);
+    const engine = await DeskEngine.create({ ...shared, strategies, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
     const check = async () => { (engine as unknown as { lastPositionCheckAt: Record<string, number> }).lastPositionCheckAt.CRASH = 0; engine.tick(); await engine.settled(); };
     engine.start(); await engine.pulse();
     w.priceFactor = 1.6; await check();
@@ -748,12 +760,12 @@ test('a sell spends at most 1% of its value on priority fee (floor 50,000 lampor
   try {
     const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
     engine.start(); await engine.pulse();
-    w.priceFactor = 0.8;
+    w.priceFactor = 0.6;
     (engine as unknown as { lastPositionCheckAt: Record<string, number> }).lastPositionCheckAt.CRASH = 0; engine.tick(); await engine.settled();
     const view = engine.status({ connected: false, address: null });
     assert.equal(view.positions.length, 0, 'the stop loss sold');
     const sell = w.priorityCaps.filter(c => c.side === 'SELL').at(-1)!;
-    assert.equal(sell.maxLamports, Number(sell.notional / 100n), '1% of the ~0.016 SOL the sell returns, not the full 300,000-lamport cap');
+    assert.equal(sell.maxLamports, Number(sell.notional / 100n), '1% of the ~0.012 SOL the sell returns, not the full 300,000-lamport cap');
     assert.ok(sell.maxLamports < 300_000);
     const row = view.ledger.find(e => e.side === 'SELL')!;
     assert.equal(row.rentOutstandingLamports, undefined); assert.match(row.note ?? '', /account rent 0\.00203928 SOL reclaimed/);
@@ -784,6 +796,22 @@ test('rent reclaim closes only empty desk-token accounts, simulates first, and n
   assert.equal(await reclaimRent({ ...d, mints: [OTHER.slice(0, 5)] }), null, 'nothing to close');
   gain = 3_000_000;
   await assert.rejects(reclaimRent({ ...d, mints: [SOLD] }), /RENT_SIMULATION_MISMATCH/); assert.equal(signed, 1, 'not signed');
+});
+
+test('holders: count of owners with a balance, largest holders marked wallet/program, and a clear note when the RPC cannot count', async () => {
+  for (const unsupported of [false, true]) {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-holders-')), { w, shared } = world(YOUNG_PUMP, 'insider');
+    w.dasUnsupported = unsupported;
+    try {
+      const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+      engine.start(); await engine.pulse();
+      const h = engine.status({ connected: false, address: null }).candidates.find(c => c.mint === MINT)!.holders!;
+      assert.equal(h.top[0]!.kind, 'PROGRAM', 'the pool vault (off-curve owner) is shown but not counted as a whale'); assert.equal(h.top[0]!.pct, 30);
+      assert.equal(h.top.filter(x => x.kind === 'WALLET').length, 10); assert.equal(h.top10WalletPct, 20);
+      if (!unsupported) { assert.equal(h.count, 2, 'distinct owners with a non-zero balance'); assert.equal(h.countCapped, false); }
+      else { assert.equal(h.count, null); assert.match(h.countNote!, /DAS getTokenAccounts/); }
+    } finally { await fs.rm(dir, { recursive: true, force: true }); }
+  }
 });
 
 test('strategy and drill toggles survive a restart; LIVE keeps CRASH off until the owner switches it on', async () => {

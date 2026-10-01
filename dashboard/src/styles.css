@@ -1327,6 +1327,9 @@ table.cand tr.stale td{color:#98a0ad}
 .cand-detail{display:flex;flex-direction:column;gap:8px;white-space:normal;text-align:left}
 .cand-detail .reasons{color:#3c4452}
 .cand-detail .warn{color:#8f1f1f;font-weight:600}
+.cand-detail .holders{margin:.5rem 0 .75rem}
+.cand-detail .holders h4{margin:0 0 .25rem}
+.cand-detail tr.holder-dev td{color:#8f1f1f;font-weight:600}
 .detail-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}
 .detail-grid summary{cursor:pointer;display:flex;justify-content:space-between;gap:8px;padding:4px 0}
 .detail-grid ul{margin:4px 0;padding-left:18px;font-size:12px}
