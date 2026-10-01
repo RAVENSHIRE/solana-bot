@@ -144,6 +144,26 @@ Setup and data:
 - Sent to Claude: your messages, your existing custom strategies, and the named wallet's swap summary.
 - Requests use structured output and Anthropic's server-side fallback for declined requests.
 
+### OPEN: the opening screen (your basic screen)
+
+From FIX6900 (`6bQ4…SmvC`) on 1 Oct: **$20K opening candle → $7K → $14K → $27K → $35K →** graduated, $500K+. The rules:
+
+1. **Strong open:** the first one-minute candle reaches at least **$10K** market cap.
+2. **Floor:** after that it never trades below **$6.7K**. Anything that does is a rug and is dropped.
+3. **Breakout:** it breaks back above its opening high (×1.3, so **$26K** after a $20K open). An alert goes out to your phone at once, and **OPEN** buys.
+4. **Hold for at least 6×** the first entry: no take profit and no trailing stop before that. The $6.7K floor is the stop; insiders dumping still sells it (rug defence). From 6× on, a 30 % trailing stop from the peak.
+5. **Scale in:** add a base entry at **2×** and again at **4×** the first entry price (`OPEN_ADD_AT=2,4` in `.env`; once each, in order, never while entries are paused or the TEST sleeve cannot fund it).
+
+How it works:
+- Every new pump.fun launch is picked up from the chain within seconds (the radar's decoder, before its slower website and X checks), and its **market cap is read straight from its bonding curve every 4 s**. One RPC call per 100 curves, so the opening candle is measured from the first seconds, long before DexScreener lists the token.
+- Launches first seen more than 45 s after creation are not judged (their opening candle is unknown). Strong opens are watched for 45 minutes or until they graduate.
+- The breakout alert names the opening high, the low and the breakout level, with a FOMO link. Copycats (a bigger, older token with the same name), impersonators and rugs found by the radar are never alerted.
+- The breakout starts a scan at once; OPEN buys while the breakout is under 5 minutes old, the market cap is above the floor and not more than 1.6× the breakout level, insiders hold under 50 %, the largest wallet holds at most 20 % when known, and the safety gates pass.
+- OPEN holds through graduation (no pre-graduation exit). Sizing: base entry ($2), TEST sleeve `OPEN_CAPITAL_USD` (default $15, enough for two positions with their adds), at most 2 positions, no re-entry for 4 h. ON in TEST, OFF in LIVE until you switch it on.
+- The *Opening screen* panel shows every strong open: opening candle, low, now, peak, status (watching, BREAKOUT, rug, graduated first, no breakout) and whether OPEN bought it. The sources line counts launches in their first minute, strong opens, breakouts and rugs.
+
+These rules come from one example and have not been backtested: watch the OPEN ledger in TEST first.
+
 ### LAUNCH: the launch radar (the @glabuz pattern)
 
 On 1 Oct @glabuz turned $500 into ~$15K on Meme Industries (`FFrRBPP9…pump`) by entering at ~$20K:
@@ -186,6 +206,8 @@ The signal is the quality of the launch itself. Only a few of the ~50 pump.fun l
   | Website shows this CA | +2 |
   | X or website shows another CA | score 0 (IMPERSONATOR) |
 
+- A launch named like a bigger, older Solana token (same name or ticker, $50K or more, at most 3 days older or still busier) is a **COPYCAT**: never shortlisted, never alerted. One DexScreener search per name, cached for 10 minutes. (On 1 Oct the FIX6900 copycat `3jxu74…cPVk` was alerted 8 minutes after the real FIX6900 graduated; a restart had cleared the radar's memory of the original.)
+- A "website" whose URL carries a contract address (e.g. `otcdesks.cash/coin/<CA>`, which prints whatever address is in its URL) is a per-token page: no website points, never proof of the CA.
 - Clones are marked **CLONE** and never shortlisted: a later launch that copies an earlier one's X account, website or name (on the first live run KEN appeared 3× and ROPAD 2×). If the project's own X account posts the clone's CA, the clone is the real token and the earlier "original" an impersonator.
 - **X reach** comes from the same X profile page (no key needed): followers, account creation date, post count, blue check, and the views, likes and replies of the recent posts. The more followers, the higher the launch ranks:
 

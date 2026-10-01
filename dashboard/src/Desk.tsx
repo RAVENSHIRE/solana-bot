@@ -20,7 +20,7 @@ const EXPLAIN: Record<string, string> = {
   INSTANCE_LOCK: 'Another dashboard process owns data-desk. Close it first.', SCANNER_OFF: 'Start the scanner first.',
   RESET_TEST_ONLY: 'Reset is only available in TEST.', INVALID_STRATEGY: 'Unknown strategy.',
   STRATEGY_HAS_POSITIONS: 'This strategy still holds a position (TEST or LIVE). Sell or wait for its exit before deleting it.',
-  BUILTIN_STRATEGY: 'FAIR, CRASH and LAUNCH are built in: they can be switched off, not edited or deleted.',
+  BUILTIN_STRATEGY: 'FAIR, CRASH, LAUNCH and OPEN are built in: they can be switched off, not edited or deleted.',
   CONFIG_LOCKED: 'The desk runs with DESK_DEPLOYMENT_MODE=LOCKED: strategies are fixed at startup.',
   WATCH_SELL_NEEDS_LOCAL_KEY: 'Automatic selling works only for the local-key wallet (DESK_LIVE_SIGNER=local-key). Other wallets (FOMO, Phantom) get alerts: choose ALERT.',
   WATCH_UNAVAILABLE: 'The watch starts with the desk; check the desk error above.', WATCH_LIMIT: 'At most 50 watched tokens.',
@@ -70,6 +70,7 @@ export function DeskPanel({ t }: { t: TradingSession }) {
         <Telemetry events={d.events} />
         <PreflightCard p={d.preflights[0] ?? null} live={live} />
       </div>
+      <div id="desk-opening" className="desk-anchor"><OpeningScreen d={d} /></div>
       <div id="desk-launches" className="desk-anchor"><LaunchRadar d={d} /></div>
       <div id="desk-candidates" className="desk-anchor"><Candidates list={d.candidates} probe={live ? null : mint => void t.desk('probe', { mint })} busy={!!t.busy} /></div>
       <div id="desk-positions" className="desk-anchor"><Positions d={d} busy={!!t.busy || !t.online} exit={p => {
@@ -635,6 +636,29 @@ function Watch({ t, d }: { t: TradingSession; d: DeskStatus }) {
         {!w.rules.length && <tr><td colSpan={8}>Nothing watched yet. Add a token you hold, e.g. with a market-cap floor at your exit level.</td></tr>}</tbody></table></div>
     {w.alerts.length > 0 && <details open><summary>Alerts ({w.alerts.length})</summary><ul className="watch-alerts">{w.alerts.slice(0, 10).map(a =>
       <li key={`${a.ruleId}-${a.at}`}><strong>{ago(a.at)} · {a.title}</strong> — {a.body}</li>)}</ul></details>}
+  </section>;
+}
+
+/**
+ * Opening screen (the owner's basic screen): every new pump.fun launch's market cap is read from its bonding curve every
+ * few seconds. A launch whose first one-minute candle reached $10K and that never fell below $6.7K is watched; when it
+ * breaks back above its opening high (×1.3) an alert goes out at once and OPEN buys, holds for at least 6× and adds.
+ */
+function OpeningScreen({ d }: { d: DeskStatus }) {
+  const o = d.opening, list = o?.list ?? [], k = (v: number | null) => v == null ? '--' : `$${(v / 1000).toFixed(1)}K`;
+  const mins = (at: number) => `${Math.max(0, Math.round((Date.now() - at) / 60_000))} min`;
+  const label: Record<string, string> = { STRONG: 'watching', SIGNAL: 'BREAKOUT', RUG: 'rug (below floor)', GRADUATED: 'graduated first', EXPIRED: 'no breakout' };
+  return <section className="panel desk-card" aria-label="Opening screen">
+    <div className="card-head"><h3>Opening screen · 10K+ opening candle, never below 6.7K, breakout above the open</h3>
+      <small>{o ? `${o.counts.OPENING ?? 0} launches in their first minute · ${o.counts.STRONG ?? 0} strong opens watched · ${o.counts.SIGNAL ?? 0} breakouts · ${o.counts.RUG ?? 0} fell below 6.7K · ${o.counts.WEAK ?? 0} weak opens skipped`
+        : 'Runs while TEST or LIVE scans.'} Market caps are read from each launch's bonding curve every 4 s.</small></div>
+    <div className="wallet-table"><table><thead><tr><th>Token</th><th>Age</th><th>Opening candle</th><th>Low</th><th>Now</th><th>Peak</th><th>Status</th><th>OPEN</th></tr></thead>
+      <tbody>{list.map(x => <tr key={x.mint} className={x.status === 'SIGNAL' ? 'launch-ready' : x.status === 'RUG' ? 'launch-fake' : ''}>
+        <td title={x.mint}><strong>{x.symbol}</strong> <Fomo mint={x.mint} /><br /><small>{x.name.slice(0, 32)}</small></td>
+        <td>{mins(x.at)}</td><td>{k(x.openHighUsd)}</td><td>{k(x.lowUsd)}</td><td>{k(x.lastUsd)}</td><td>{k(x.peakUsd)}</td>
+        <td title={x.detail}><small>{x.status === 'SIGNAL' ? `BREAKOUT at ${k(x.signalUsd)}` : label[x.status] ?? x.status}</small></td>
+        <td><small>{x.held ? `held by ${x.held}` : x.entry ?? (x.status === 'SIGNAL' ? 'waiting for market data' : '--')}</small></td></tr>)}
+        {!list.length && <tr><td colSpan={8}>No strong opening candle yet.</td></tr>}</tbody></table></div>
   </section>;
 }
 

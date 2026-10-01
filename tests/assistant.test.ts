@@ -31,7 +31,7 @@ test('assistant: one structured request to Claude with fallbacks; a valid propos
 test('assistant: an invalid proposal is reported, a refusal or a cut-off answer never yields a strategy', async () => {
   const bad = new StrategyAssistant('k', fakeClaude({ stop_reason: 'end_turn', parsed_output: { reply: 'x', strategy: { ...proposal, id: 'CRASH' } } }).client);
   const r = await bad.ask({ messages: [{ role: 'user', content: 'go' }], strategies: [] });
-  assert.equal(r.strategy, null); assert.match(r.specError!, /^id: FAIR, CRASH and LAUNCH are built in/);
+  assert.equal(r.strategy, null); assert.match(r.specError!, /^id: FAIR, CRASH, LAUNCH and OPEN are built in/);
   for (const stop of ['refusal', 'max_tokens']) {
     const a = new StrategyAssistant('k', fakeClaude({ stop_reason: stop, parsed_output: { reply: 'x', strategy: proposal } }).client);
     const out = await a.ask({ messages: [{ role: 'user', content: 'go' }], strategies: [] });

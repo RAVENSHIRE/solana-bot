@@ -811,7 +811,7 @@ test('custom strategy specs are validated: built-in ids, inverted bands, slippag
   const ok = parseRuleSpec(RUNNER_PRESET);
   assert.equal(ok.entry.minHolders, 1_000); assert.equal(ok.exits.takeProfitPct, null); assert.equal(ok.entry.requireXAccount, false);
   const bad = (patch: (s: RuleSpecInput) => void, re: RegExp) => { const s = structuredClone(RUNNER_PRESET); patch(s); assert.throws(() => parseRuleSpec(s), re); };
-  bad(s => { s.id = 'CRASH'; }, /^Error: INVALID_STRATEGY_SPEC: id: FAIR, CRASH and LAUNCH are built in/);
+  bad(s => { s.id = 'CRASH'; }, /^Error: INVALID_STRATEGY_SPEC: id: FAIR, CRASH, LAUNCH and OPEN are built in/);
   bad(s => { s.id = 'x y'; }, /INVALID_STRATEGY_SPEC: id/);
   bad(s => { s.entry.minMarketCapUsd = 30_000_000; }, /market cap: minimum above maximum/);
   bad(s => { s.sizing.slippageBps = 900; s.sizing.exitSlippageBps = 900; }, /must stay below/);
@@ -998,6 +998,71 @@ test('LAUNCH rug defence: insiders selling is a RUG exit (remembered); insiders 
       }
     } finally { await fs.rm(dir, { recursive: true, force: true }); }
   }
+});
+
+test('OPEN: a breakout above a strong opening candle is alerted at once, bought, scaled into at 2× and 4×, held to 6×, then trailed', async () => {
+  const curve = { dexId: 'pumpfun', liquidity: null, marketCap: 28_000, fdv: 28_000, pairCreatedAt: NOW - 6 * 60_000, priceChange: { m5: 12, h1: 40 } };
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-open-')), { w, shared } = world(curve);
+  try {
+    const signal = { mint: MINT, symbol: 'ABC', name: 'Fantasy Index 6900', at: Date.now() - 6 * 60_000, status: 'SIGNAL' as const, openHighUsd: 20_000, lowUsd: 7_000,
+      lastUsd: 27_000, peakUsd: 27_000, firstSampleAt: Date.now() - 350_000, lastSampleAt: Date.now(), signalAt: Date.now(), signalUsd: 27_000,
+      detail: '$20.0K open → low $7.0K (held $6.7K) → $27.0K: broke above the opening high', samples: [] };
+    let pending = [signal];
+    const tracker = { observe: () => undefined, poll: async () => { const out = pending; pending = []; return out; }, get: () => null, list: () => [signal],
+      counts: () => ({ OPENING: 3, STRONG: 1, SIGNAL: 1, WEAK: 9, RUG: 2, GRADUATED: 0, EXPIRED: 0, UNKNOWN_OPEN: 0 }) };
+    const alerts: Array<{ title: string; body: string }> = [];
+    // No 60 s settling period in this test (positions are seconds old).
+    const profiles = strategyProfiles({}, shared.capital, shared.cfg.rs);
+    profiles.OPEN = { ...profiles.OPEN, exits: { ...profiles.OPEN.exits, graceMs: 0 } };
+    const engine = await DeskEngine.create({ ...shared, strategies: profiles, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }), opening: tracker as never,
+      notify: async (title, body) => { alerts.push({ title, body }); } });
+    engine.setStrategy('CRASH', false); engine.setStrategy('LAUNCH', false); engine.start();
+    await engine.pulse();
+    const fresh = await engine.openingPass();
+    assert.equal(fresh.length, 1);
+    assert.deepEqual(alerts.map(a => a.title), ['OPEN: ABC broke out at $27.0K'], 'alerted at once, before any scan');
+    assert.match(alerts[0]!.body, /\$20\.0K open → low \$7\.0K \(held \$6\.7K\) → \$27\.0K/);
+    await engine.pulse();
+    let view = engine.status({ connected: false, address: null });
+    assert.equal(view.positions.length, 1, view.candidates.find(c => c.mint === MINT)?.open?.signal.summary); assert.equal(view.positions[0]!.strategy, 'OPEN');
+    assert.ok(engine.events.list().some(e => /^OPEN entry selected: open \$20\.0K · breakout \$27\.0K/.test(e.message)));
+    assert.equal(view.opening!.counts.SIGNAL, 1);
+    // 2× and 4× the first entry: one add each, in order.
+    w.priceFactor = 2.1; await engine.pulse();
+    w.priceFactor = 4.3; await engine.pulse();
+    view = engine.status({ connected: false, address: null });
+    const p = view.positions[0]!;
+    // (The test world quotes buys at a fixed price, so the average price itself does not move here.)
+    assert.equal(p.adds, 2); assert.ok(p.firstEntryPriceUsd! > 0, 'the first entry price is kept for the multiples');
+    assert.equal(engine.events.list().filter(e => /^OPEN · position increased \(add [12]\)/.test(e.message)).length, 2);
+    // A 35% pullback at 4.3× is held ("stay in for at least 6×"); after 6× the trailing stop sells.
+    w.priceFactor = 2.8; await engine.pulse();
+    assert.equal(engine.status({ connected: false, address: null }).positions.length, 1, 'held below 6×');
+    w.priceFactor = 7; await engine.pulse(); w.priceFactor = 4.5; await engine.pulse();
+    view = engine.status({ connected: false, address: null });
+    assert.equal(view.positions.length, 0, 'sold by the trailing stop after 6×');
+    assert.ok(engine.events.list().some(e => /^OPEN · exit signal: TRAILING_STOP/.test(e.message)));
+    const stats = view.strategies.find(s => s.id === 'OPEN')!.stats;
+    assert.equal(stats.trades, 1, 'the adds belong to one trade'); assert.ok(stats.netPnlUsd > 0);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('OPEN screen: a copycat breakout (bigger, older namesake) is never alerted or bought', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-open-copy-')), { w, shared } = world({ dexId: 'pumpfun', liquidity: null, marketCap: 28_000, fdv: 28_000 });
+  try {
+    w.searchPairs = [pairRaw({ pairAddress: key(78).toBase58(), baseToken: { address: key(79).toBase58(), symbol: 'ABC', name: 'Fantasy Index 6900' },
+      marketCap: 520_000, fdv: 520_000, pairCreatedAt: Date.now() - 30 * 60_000 })];
+    const signal = { mint: MINT, symbol: 'ABC', name: 'Fantasy Index 6900', at: Date.now() - 4 * 60_000, status: 'SIGNAL' as const, openHighUsd: 12_000, lowUsd: 8_000,
+      lastUsd: 16_000, peakUsd: 16_000, firstSampleAt: null, lastSampleAt: Date.now(), signalAt: Date.now(), signalUsd: 16_000, detail: 'x', samples: [] };
+    let pending = [signal];
+    const tracker = { observe: () => undefined, poll: async () => { const out = pending; pending = []; return out; }, get: () => null, list: () => [], counts: () => ({}) };
+    const alerts: string[] = [];
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }), opening: tracker as never, notify: async t => { alerts.push(t); } });
+    engine.start(); await engine.pulse();
+    assert.deepEqual(await engine.openingPass(), []);
+    assert.deepEqual(alerts, []);
+    assert.ok(engine.events.list().some(e => /^OPEN screen: ABC broke out \(x\) but COPYCAT of ABC .+ \(\$520,000, \d+ min older\) — no alert, never bought$/.test(e.message)));
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
 test('a sell spends at most 1% of its value on priority fee (floor 50,000 lamports), and TEST closes the emptied token account on paper', async () => {

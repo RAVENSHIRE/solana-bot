@@ -77,6 +77,8 @@ export interface Candidate {
   launch?: { score: number; reasons: string[]; x: string | null; website: string | null; launchedAt: number; signal: CrashSignal;
     /** X: the project's X account posted this CA; WEBSITE: its site shows it; IMPERSONATOR: either shows another CA. */
     ca?: { status: 'X' | 'WEBSITE' | 'IMPERSONATOR' | 'UNCONFIRMED'; detail: string } };
+  /** Opening screen: the breakout this candidate made (strong open, floor held), and the OPEN entry checks. */
+  open?: { openHighUsd: number | null; lowUsd: number | null; signalUsd: number | null; signalAt: number; detail: string; signal: CrashSignal };
   /** Custom strategies' entry checks, by strategy id (enabled strategies only). */
   rules?: Record<string, CrashSignal>;
   /** Largest holders and holder count; null until first read. */
@@ -119,6 +121,8 @@ export interface DeskPosition {
   entryLiquidityUsd?: number | null; creator?: string | null; creatorPctAtEntry?: number | null;
   /** LAUNCH: the creator and creation-slot buyers, their share at entry, and whether the token was still on its curve. */
   insiders?: string[] | null; insiderPctAtEntry?: number | null; onCurve?: boolean | null;
+  /** Scale-ins so far, and the first entry's price (multiples are measured from it). */
+  adds?: number; firstEntryPriceUsd?: number | null; peakMultiple?: number;
   /** Status view only: the strategy whose ledger holds the position. */
   strategy?: StrategyId;
   /** Status view only: EXIT NOW was requested and the sell is being attempted. */
@@ -181,6 +185,9 @@ export interface DeskStatus {
     followers?: number | null; bestViews?: number | null; accountAgeDays?: number | null; ownX?: boolean | null; insiders?: string | null; insiderPct?: number | null;
     rug?: string | null; xPosts?: number;
     review?: { verdict: 'STRONG' | 'OK' | 'WEAK' | 'SCAM'; idea: number; professionalism: number; aiGenerated: string; summary: string; scamSignals: string[] } | null }>;
+  /** Opening screen: launches with a strong opening candle, their breakouts and rugs. */
+  opening?: { counts: Record<string, number>; list: Array<{ mint: string; symbol: string; name: string; at: number; status: string; openHighUsd: number | null;
+    lowUsd: number | null; lastUsd: number | null; peakUsd: number | null; signalAt: number | null; signalUsd: number | null; detail: string; held: string | null; entry: string | null }> };
   /** X feed (X API search) state; absent when the desk has none. */
   xFeed?: { configured: boolean; lastPollAt: number | null; lastError: string | null; posts: number; signals: number };
   /** Templates for a new custom strategy (RUNNER: the owner's own style). */

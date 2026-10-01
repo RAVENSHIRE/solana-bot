@@ -148,6 +148,8 @@ export interface ExitRules {
   marketCap?: { floorUsd: number | null; targetUsd: number | null } | null;
   /** No stop loss or trailing stop this long after entry; take profit and targets still apply. */
   graceMs?: number;
+  /** The trailing stop only applies once the price reached this multiple of the first entry (OPEN: "stay in for at least 6×"). */
+  holdUntilMultiple?: number;
 }
 export interface StrategyProfile {
   id: StrategyId; label: string; summary: string; enabled: boolean;
@@ -160,10 +162,14 @@ export interface StrategyProfile {
   reentryCooldownMs: number;
   /** Custom rule strategy: the spec its entries are checked against. */
   rule?: RuleSpec;
+  /** Scale-in: add `addUsd` when the price reaches each multiple of the first entry (in order, once each). */
+  scaleIn?: Array<{ atMultiple: number; addUsd: number }>;
+  /** Sell a curve position before graduation while its insiders still hold a bag (default true). */
+  preGraduationExit?: boolean;
 }
 /** The built-in strategies; custom rule strategies are added at runtime (see custom.ts). */
-export type BuiltinStrategyId = 'FAIR' | 'CRASH' | 'LAUNCH';
-export const STRATEGY_IDS: readonly BuiltinStrategyId[] = ['FAIR', 'CRASH', 'LAUNCH'];
+export type BuiltinStrategyId = 'FAIR' | 'CRASH' | 'LAUNCH' | 'OPEN';
+export const STRATEGY_IDS: readonly BuiltinStrategyId[] = ['FAIR', 'CRASH', 'LAUNCH', 'OPEN'];
 
 export interface DeskOperational {
   version: 1;
@@ -233,7 +239,10 @@ export function strategyProfiles(env: NodeJS.ProcessEnv, capital: DeskCapital,
     CRASH_TRAIL_ACTIVATION_PCT: pctSetting(c.rideTrailActivationPct), CRASH_TRAIL_STOP_PCT: pctSetting(c.rideTrailStopPct, 95),
     CRASH_RIDE_MAX_HOLD_MIN: pctSetting(c.rideMaxHoldMin, 1_440),
     CRASH_REENTRY_MIN: z.coerce.number().finite().min(0).max(1_440).default(c.reentryMin),
+    OPEN_CAPITAL_USD: money(Math.max(capital.plannedStartingCapitalUsd, 15)),
+    OPEN_ADD_AT: z.string().regex(/^\s*(\d+(\.\d+)?\s*(,\s*\d+(\.\d+)?\s*)*)?$/).default('2,4'),
   }).parse(env);
+  const openAdds = e.OPEN_ADD_AT.split(',').map(v => Number(v.trim())).filter(v => Number.isFinite(v) && v > 1).sort((a, b) => a - b).slice(0, 5);
   const ride = e.CRASH_EXIT_MODE === 'ride';
   if (e.CRASH_SLIPPAGE_BPS >= e.CRASH_MAX_DRAG_BPS) throw new Error('CRASH_SLIPPAGE_BPS must be below CRASH_MAX_DRAG_BPS');
   if (e.CRASH_ENTRY_USD > e.CRASH_CAPITAL_USD) throw new Error('CRASH_ENTRY_USD exceeds CRASH_CAPITAL_USD');
@@ -259,8 +268,19 @@ export function strategyProfiles(env: NodeJS.ProcessEnv, capital: DeskCapital,
       capitalUsd: capital.plannedStartingCapitalUsd, entryUsd: capital.baseEntryUsd, slippageBps: 600, exitSlippageBps: 1_500, maxDragBps: 1_200n,
       maxOpenPositions: 2, positionCheckMs: 3_000, exitMode: 'rules', reentryCooldownMs: 4 * 60 * 60_000,
       exits: { takeProfitPct: Number.POSITIVE_INFINITY, stopLossPct: 40, maxHoldMin: 240, trailing: { activationPct: 100, stopPct: 35 }, giveback: null, graceMs: 60_000 } },
+    OPEN: { id: 'OPEN', label: 'OPEN', enabled: true,
+      summary: `The basic screen: a pump.fun launch whose first one-minute candle reached ${usdK(OPENING_RULES.minOpenUsd)}+, that never fell below ${usdK(OPENING_RULES.floorUsd)}, bought when it breaks back above its opening high (×${OPENING_RULES.breakoutOverOpen}); held for at least 6×, the ${usdK(OPENING_RULES.floorUsd)} floor as the stop, adding at ${openAdds.map(m => `${m}×`).join(' and ') || 'no step'}; TEST first`,
+      capitalUsd: e.OPEN_CAPITAL_USD, entryUsd: capital.baseEntryUsd, slippageBps: 600, exitSlippageBps: 1_500, maxDragBps: 1_200n,
+      maxOpenPositions: 2, positionCheckMs: 3_000, exitMode: 'rules', reentryCooldownMs: 4 * 60 * 60_000, preGraduationExit: false,
+      scaleIn: openAdds.map(atMultiple => ({ atMultiple, addUsd: capital.baseEntryUsd })),
+      exits: { takeProfitPct: Number.POSITIVE_INFINITY, stopLossPct: 85, maxHoldMin: 1_440, trailing: { activationPct: 0, stopPct: 30 }, giveback: null, graceMs: 60_000,
+        holdUntilMultiple: 6, marketCap: { floorUsd: OPENING_RULES.floorUsd, targetUsd: null } } },
   };
 }
+
+/** The opening screen's price rules (see opening.ts), shared with the OPEN strategy's floor. */
+export const OPENING_RULES = Object.freeze({ minOpenUsd: 10_000, floorUsd: 6_700, breakoutOverOpen: 1.3 });
+const usdK = (v: number) => `$${(v / 1000).toFixed(v % 1000 ? 1 : 0)}K`;
 
 /**
  * LAUNCH entry rules: the launch radar's quality score plus a clean, still-early curve. A launch whose own X account

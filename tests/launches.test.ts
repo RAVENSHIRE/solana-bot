@@ -30,6 +30,11 @@ test('launch score: own X account and a live project website that links back are
   assert.ok(scoreLaunch(meta, parseXLink(meta.twitter), null).score < LAUNCH.minScore, 'an X account alone is not enough');
   assert.equal(projectSite('https://www.reuters.com/business/x'), null); assert.equal(projectSite('https://x.com/a'), null);
   assert.equal(projectSite('http://onsolchain.lol'), null, 'https only'); assert.equal(projectSite('https://onsolchain.lol'), 'https://onsolchain.lol/');
+  // A per-token page prints whatever CA is in its URL (the FIX6900 copycat's "website" on 1 Oct): not a project site, never CA proof.
+  assert.equal(projectSite('https://otcdesks.cash/coin/3jxu74TqzGSbbauvpwUzfmT8a8PqCphYAeCkjK5YcPVk'), null);
+  assert.equal(projectSite('https://example.lol/?ca=3jxu74TqzGSbbauvpwUzfmT8a8PqCphYAeCkjK5YcPVk'), null);
+  const perToken = site({ url: 'https://otcdesks.cash/coin/3jxu74TqzGSbbauvpwUzfmT8a8PqCphYAeCkjK5YcPVk', title: 'OTC', xHandles: [] });
+  assert.equal(scoreLaunch({ ...meta, website: perToken.url }, parseXLink(meta.twitter), perToken).reasons[1], 'website is a platform, news or per-token page');
 });
 
 test('the feed reads only new launches each poll, fetches metadata, and checks the website only when an X link exists', async () => {

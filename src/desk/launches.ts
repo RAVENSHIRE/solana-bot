@@ -102,9 +102,17 @@ export function decodeCreate(logs: string[]): Omit<LaunchEvent, 'at' | 'signatur
 
 /** Links to platforms, news sites and aggregators are not a project website. */
 const NOT_A_PROJECT_SITE = /(^|\.)(x\.com|twitter\.com|t\.me|telegram\.(me|org)|pump\.fun|youtube\.com|youtu\.be|tiktok\.com|instagram\.com|facebook\.com|reddit\.com|linktr\.ee|medium\.com|github\.com|google\.[a-z.]+|dexscreener\.com|birdeye\.so|solscan\.io|gmgn\.ai|discord\.(gg|com)|twitch\.tv|kick\.com|wikipedia\.org|reuters\.com|bbc\.(com|co\.uk)|cnn\.com|nytimes\.com|bloomberg\.com|coindesk\.com|cointelegraph\.com|theguardian\.com|foxnews\.com|apple\.com|amazon\.[a-z.]+|ipfs\.io|imgur\.com|giphy\.com)$/i;
+/**
+ * A per-token page (the URL itself carries a contract address, e.g. otcdesks.cash/coin/<CA>) prints whatever address
+ * is in its URL: not a project website, and never proof of the CA (the FIX6900 copycat on 1 Oct).
+ */
+const ADDRESS_IN_URL = /(?:^|[/=?&#._-])[1-9A-HJ-NP-Za-km-z]{32,44}(?:$|[/?&#.])/;
 export function projectSite(raw: string | null): string | null {
   if (!raw) return null;
-  try { const u = new URL(raw); return u.protocol === 'https:' && !NOT_A_PROJECT_SITE.test(u.hostname) ? u.toString() : null; } catch { return null; }
+  try {
+    const u = new URL(raw);
+    return u.protocol === 'https:' && !NOT_A_PROJECT_SITE.test(u.hostname) && !ADDRESS_IN_URL.test(`${u.pathname}${u.search}`) ? u.toString() : null;
+  } catch { return null; }
 }
 
 const short = (a: string) => `${a.slice(0, 4)}…${a.slice(-4)}`;
@@ -113,7 +121,7 @@ const host = (site: WebsiteCheck | null) => { try { return new URL(site!.url!).h
 /** Whether the project's own X account and website show this mint, another one, or none yet. A post by the account wins. */
 export function launchCa(mint: string, x: XLink, site: WebsiteCheck | null, xPage: XPageCheck | null): LaunchCa {
   const onX = xPage?.status === 'READ' ? caVerdict(mint, xPage) : null;
-  const onSite = site?.status === 'AVAILABLE' ? caVerdict(mint, site) : null;
+  const onSite = site?.status === 'AVAILABLE' && projectSite(site.url) ? caVerdict(mint, site) : null;
   if (onX?.verdict === 'CONFIRMED') return { status: 'X', detail: `@${x.handle} posted this CA` };
   // A linked post's author (often a dev or a caller) posts many CAs: only the project's own account can contradict.
   if (onX?.verdict === 'CONTRADICTED' && x.kind === 'ACCOUNT') return { status: 'IMPERSONATOR', detail: `IMPERSONATOR: @${x.handle} shows CA ${short(onX.other!)}, not this token` };
@@ -193,10 +201,10 @@ export function scoreLaunch(meta: LaunchMeta | null, x: XLink, site: WebsiteChec
   else if (x.kind === 'POST') { score += 1; reasons.push(`links an X post by @${x.handle}`); }
   else if (x.kind === 'COMMUNITY') reasons.push('X community, no account');
   else reasons.push('no X link');
-  if (site?.status === 'AVAILABLE' && site.title) {
+  if (site?.status === 'AVAILABLE' && site.title && projectSite(site.url)) {
     score += 3; reasons.push(`website ${new URL(site.url!).hostname} ("${site.title.slice(0, 40)}")`);
     if (x.handle && site.xHandles.includes(x.handle.toLowerCase())) { score += 2; reasons.push('website links the same X account'); }
-  } else if (meta?.website) reasons.push(projectSite(meta.website) ? `website ${site?.detail ?? 'not checked'}` : 'website is a platform or news link');
+  } else if (meta?.website) reasons.push(projectSite(meta.website) ? `website ${site?.detail ?? 'not checked'}` : 'website is a platform, news or per-token page');
   else reasons.push('no website');
   if (meta?.telegram) { score += 1; reasons.push('Telegram'); }
   if ((meta?.description ?? '').trim().length >= 40) { score += 1; reasons.push('real description'); }
@@ -251,6 +259,8 @@ export interface LaunchFeedOptions {
   reviewAvailable?: (now: number) => boolean;
   /** The insiders reader; defaults to the chain (creation-slot buyers). */
   insiders?: ((l: Launch) => Promise<Insiders | null>) | null;
+  /** Called with each poll's new launches as soon as they are decoded, before metadata, website and X are read. */
+  onDecoded?: (events: LaunchEvent[], now: number) => void;
 }
 
 /** Reads new launches from the pump.fun mint authority's signatures, one poll per scan. Never throws. */
@@ -325,6 +335,7 @@ export class LaunchFeed implements LaunchSource {
         if (e && !this.launches.has(e.mint)) events.push({ ...e, at: (s.blockTime ?? Math.floor(now / 1000)) * 1000, signature: s.signature });
       } catch { /* one unreadable transaction never stops the radar */ }
     }));
+    if (events.length) { try { this.o.onDecoded?.(events, now); } catch { /* a listener never stops the radar */ } }
     const fresh: Launch[] = [];
     for (let i = 0; i < events.length; i += LAUNCH.metadataConcurrency) {
       fresh.push(...await Promise.all(events.slice(i, i + LAUNCH.metadataConcurrency).map(e => this.enrich(e, now))));

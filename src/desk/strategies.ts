@@ -1,4 +1,4 @@
-import { CRASH_ENTRY, LAUNCH_ENTRY, type ExitRules, type StrategyProfile } from './config';
+import { CRASH_ENTRY, LAUNCH_ENTRY, OPENING_RULES, type ExitRules, type StrategyProfile } from './config';
 import { RISK } from './launch-risk';
 import type { Candidate, CandidateMetrics, CrashSignal, DeskMode, GateResult, LedgerEntry, ScaleAdvice, StrategyStats } from './types';
 
@@ -110,8 +110,41 @@ export function launchEntryCheck(c: Candidate, l: { score: number; at: number; c
   return { signal, checks, summary };
 }
 
+/** OPEN entry: how fresh the breakout must be, and how far past it the desk still buys. */
+export const OPEN_ENTRY = Object.freeze({ maxSignalAgeMin: 5, maxOverSignal: 1.6, maxLargestWalletPct: 20 });
+
+/**
+ * OPEN entry (the owner's basic screen): the opening screen saw a strong open ($10K+ first candle) that held the $6.7K
+ * floor and broke back above its opening high. Bought while the breakout is fresh, still above the floor and not
+ * already far past the signal; never a rug, an impersonator or a launch whose insiders own the curve; safety gates pass.
+ */
+export function openEntryCheck(c: Candidate, s: { signalAt: number | null; signalUsd: number | null; openHighUsd: number | null },
+  launch: { rug?: string | null; ca?: { status: string; detail: string }; insiders?: { insiderPct: number; detail: string } | null } | null,
+  live: { lastUsd: number | null; lastSampleAt: number | null } | null, now: number): CrashSignal {
+  const r = OPEN_ENTRY, m = c.metrics;
+  const nowUsd = live?.lastUsd != null && live.lastSampleAt != null && now - live.lastSampleAt <= 30_000 ? live.lastUsd : m.marketCapUsd;
+  const age = s.signalAt === null ? null : (now - s.signalAt) / 60_000, limit = (s.signalUsd ?? 0) * r.maxOverSignal;
+  const safety = (key: string): GateResult => { const x = c.gates.find(y => y.key === key); return x ? { ...x, blocking: true } : { key, label: key, status: 'UNKNOWN', actual: 'not evaluated', required: 'PASS', blocking: true }; };
+  const rug = launch?.rug ?? (launch?.ca?.status === 'IMPERSONATOR' ? launch.ca.detail : null);
+  const k = (v: number | null) => v === null ? 'UNKNOWN' : `$${(v / 1000).toFixed(1)}K`;
+  const checks: GateResult[] = [
+    check('openFresh', 'Minutes since the breakout', age, v => v <= r.maxSignalAgeMin, age === null ? 'no signal' : `${age.toFixed(1)} min`, `≤ ${r.maxSignalAgeMin} min`),
+    check('openFloor', 'Market cap above the floor', nowUsd, v => v >= OPENING_RULES.floorUsd, k(nowUsd), `≥ ${k(OPENING_RULES.floorUsd)}`),
+    check('openChase', 'Not chased', nowUsd, v => v <= limit, k(nowUsd), `≤ ${k(limit)} (${r.maxOverSignal}× the breakout)`),
+    check('openRug', 'Rug checks (radar)', rug ? 0 : 1, v => v === 1, rug ?? 'clean', 'no rug sign'),
+    check('openInsiders', 'Insiders (dev + creation-slot buyers)', launch?.insiders ? launch.insiders.insiderPct : null, v => v < 50,
+      launch?.insiders ? launch.insiders.detail : 'unknown', '< 50% of supply', !!launch?.insiders),
+    check('openLargest', 'Largest single wallet', m.largestWalletPct, v => v <= r.maxLargestWalletPct, pct(m.largestWalletPct), `≤ ${r.maxLargestWalletPct}%`, m.largestWalletPct !== null),
+    safety('mintAuthority'), safety('freezeAuthority'), safety('contract'),
+  ];
+  const signal = checks.every(x => !x.blocking || x.status === 'PASS'), miss = checks.find(x => x.blocking && x.status !== 'PASS');
+  const summary = signal ? `open ${k(s.openHighUsd)} · breakout ${k(s.signalUsd)} · now ${k(nowUsd)} · ${age?.toFixed(1)} min since the breakout`
+    : `${miss!.label}: ${miss!.actual} (${miss!.required})`;
+  return { signal, checks, summary };
+}
+
 /** One rule set for both strategies; percentages are net of the entry fee (value vs cost). */
-export function exitReason(r: ExitRules, x: { pnlPct: number; peakPct: number; fromPeakPct: number; heldMs: number; marketCapUsd?: number | null }): string | null {
+export function exitReason(r: ExitRules, x: { pnlPct: number; peakPct: number; fromPeakPct: number; heldMs: number; marketCapUsd?: number | null; peakMultiple?: number | null }): string | null {
   const settling = x.heldMs < (r.graceMs ?? 0);
   if (x.pnlPct <= -r.stopLossPct && !settling) return `STOP_LOSS ${x.pnlPct.toFixed(2)}% ≤ -${r.stopLossPct}%`;
   const cap = x.marketCapUsd ?? null, mc = r.marketCap;
@@ -120,7 +153,9 @@ export function exitReason(r: ExitRules, x: { pnlPct: number; peakPct: number; f
   if (x.pnlPct >= r.takeProfitPct) return `TAKE_PROFIT ${x.pnlPct.toFixed(2)}% ≥ ${r.takeProfitPct}%`;
   if (r.giveback && x.peakPct >= r.giveback.lockPeakPct && x.pnlPct <= x.peakPct - r.giveback.points)
     return `PROFIT_LOCK ${x.pnlPct >= 0 ? '+' : ''}${x.pnlPct.toFixed(2)}% after a +${x.peakPct.toFixed(2)}% peak (gave back ≥ ${r.giveback.points} pts)`;
-  if (r.trailing && !settling && x.peakPct >= r.trailing.activationPct && x.fromPeakPct <= -r.trailing.stopPct) return `TRAILING_STOP ${x.fromPeakPct.toFixed(2)}% from peak`;
+  // OPEN: no profit-taking before the price reached the hold multiple of the first entry (the floor still protects).
+  const holding = r.holdUntilMultiple !== undefined && (x.peakMultiple ?? 0) < r.holdUntilMultiple;
+  if (r.trailing && !settling && !holding && x.peakPct >= r.trailing.activationPct && x.fromPeakPct <= -r.trailing.stopPct) return `TRAILING_STOP ${x.fromPeakPct.toFixed(2)}% from peak`;
   if (x.heldMs >= r.maxHoldMin * 60_000) return `MAX_HOLD ${r.maxHoldMin} min`;
   return null;
 }
@@ -132,7 +167,9 @@ export function exitRuleText(p: StrategyProfile): string[] {
     Number.isFinite(r.takeProfitPct) ? `Take profit at +${r.takeProfitPct}% (${usd(target)} unrealized on a ${usd(p.entryUsd)} entry)`
       : 'No take profit: the trailing stop rides the move',
     ...(r.giveback ? [`Profit lock: once +${r.giveback.lockPeakPct}% was reached, exit ${r.giveback.points} points below the peak`] : []),
-    ...(r.trailing ? [`Trailing stop ${r.trailing.stopPct}% from the peak after +${r.trailing.activationPct}%`] : []),
+    ...(r.trailing ? [r.holdUntilMultiple ? `Held until ${r.holdUntilMultiple}× the first entry, then a trailing stop ${r.trailing.stopPct}% from the peak`
+      : `Trailing stop ${r.trailing.stopPct}% from the peak after +${r.trailing.activationPct}%`] : []),
+    ...(p.scaleIn?.length ? [`Adds ${p.scaleIn.map(a => `$${a.addUsd} at ${a.atMultiple}×`).join(', ')} of the first entry price`] : []),
     `Stop loss at -${r.stopLossPct}%${r.graceMs ? ` (not in the first ${r.graceMs / 1000} s)` : ''}`,
     ...(r.marketCap?.floorUsd != null ? [`Exit when the market cap falls to ${usd(r.marketCap.floorUsd)}`] : []),
     ...(r.marketCap?.targetUsd != null ? [`Exit when the market cap reaches ${usd(r.marketCap.targetUsd)}`] : []),
@@ -149,7 +186,8 @@ export function strategyStats(entries: LedgerEntry[]): StrategyStats {
   let drillTrades = 0, failedOrders = 0;
   for (const e of [...entries].sort((a, b) => a.at - b.at)) {
     if (e.status === 'FAILED' || e.status === 'UNKNOWN') { failedOrders++; continue; }
-    if (e.side === 'BUY') { open.set(e.mint, e); continue; }
+    // A scale-in (ADD) belongs to the trade its first BUY opened.
+    if (e.side === 'BUY') { if (!(e.note?.startsWith('ADD') && open.has(e.mint))) open.set(e.mint, e); continue; }
     const buy = open.get(e.mint) ?? null;
     open.delete(e.mint);
     if (e.note?.startsWith('DRILL') || buy?.note?.startsWith('DRILL')) { drillTrades++; continue; }

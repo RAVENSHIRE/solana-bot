@@ -11,7 +11,8 @@ const position = z.object({ id: z.string(), mint: z.string(), symbol: z.string()
   lastValueLamports: raw.nullable(), lastPriceUsd: finite.nullable(), router: z.string(), route: z.string(), entrySignature: z.string().nullable(),
   rentLamports: raw, pairAddress: z.string(), entryLiquidityUsd: finite.nullable().optional(), creator: z.string().nullable().optional(),
   creatorPctAtEntry: finite.nullable().optional(), noRouteSince: z.number().int().nonnegative().nullable().optional(),
-  insiders: z.array(z.string()).max(16).nullable().optional(), insiderPctAtEntry: finite.nullable().optional(), onCurve: z.boolean().nullable().optional() }).strict();
+  insiders: z.array(z.string()).max(16).nullable().optional(), insiderPctAtEntry: finite.nullable().optional(), onCurve: z.boolean().nullable().optional(),
+  adds: z.number().int().min(0).max(20).optional(), firstEntryPriceUsd: finite.nullable().optional(), peakMultiple: finite.optional() }).strict();
 const entry = z.object({ id: z.string(), at: z.number().int(), mode: z.enum(['PAPER', 'LIVE']), txSignature: z.string().nullable(), mint: z.string(),
   symbol: z.string().nullable(), router: z.string(), route: z.string(), side: z.enum(['BUY', 'SELL']), quantity: z.string(), qtyRaw: raw,
   entryPriceUsd: finite.nullable(), exitPriceUsd: finite.nullable(), grossPnlUsd: finite.nullable(), networkFeeLamports: raw,
@@ -29,6 +30,8 @@ export interface Fill {
   inAmountRaw: bigint; outAmountRaw: bigint; solDeltaLamports: bigint; feeLamports: bigint; rentLamports: bigint;
   router: string; route: string; routerFeeUsd: number | null; txSignature: string | null; solUsd: number; at: number; note: string | null;
   entry?: { liquidityUsd: number | null; creator: string | null; creatorPct: number | null; insiders?: string[] | null; insiderPct?: number | null; onCurve?: boolean | null };
+  /** A scale-in: added to the open position (average price), not a new one. */
+  add?: boolean;
 }
 
 export const uiAmount = (rawAmount: bigint, decimals: number): string => {
@@ -74,7 +77,24 @@ export class DeskLedger {
     if (s.mode === 'LIVE' && !f.txSignature) throw new Error('LIVE_FILL_WITHOUT_SIGNATURE');
     if (f.txSignature && s.entries.some(e => e.txSignature === f.txSignature)) throw new Error('DUPLICATE_FILL');
     let entryRow: LedgerEntry;
-    if (f.side === 'BUY') {
+    if (f.side === 'BUY' && f.add) {
+      // Scale-in: the position grows at a new average price; its peak restarts from the value it has now.
+      const p = this.position(f.mint);
+      if (!p) throw new Error('UNTRACKED_POSITION');
+      if (f.outAmountRaw <= 0n || f.inAmountRaw <= 0n) throw new Error('INVALID_BUY_FILL');
+      const qty = exactNumber(f.outAmountRaw) / 10 ** f.decimals, oldQty = exactNumber(BigInt(p.qtyRaw)) / 10 ** p.decimals, inputUsd = lamportsUsd(f.inAmountRaw, f.solUsd);
+      const oldInputUsd = p.entryPriceUsd !== null ? p.entryPriceUsd * oldQty : p.costUsd, cost = f.inAmountRaw + fee;
+      p.firstEntryPriceUsd ??= p.entryPriceUsd;
+      p.qtyRaw = String(BigInt(p.qtyRaw) + f.outAmountRaw); p.costLamports = String(BigInt(p.costLamports) + cost); p.costUsd += lamportsUsd(cost, f.solUsd);
+      p.entryPriceUsd = oldQty + qty > 0 ? (oldInputUsd + inputUsd) / (oldQty + qty) : p.entryPriceUsd;
+      p.lastValueLamports = String(BigInt(p.lastValueLamports ?? p.peakValueLamports) + f.inAmountRaw); p.peakValueLamports = p.lastValueLamports;
+      p.adds = (p.adds ?? 0) + 1;
+      entryRow = this.row(f, status, { quantity: uiAmount(f.outAmountRaw, f.decimals), qtyRaw: f.outAmountRaw, entryPriceUsd: qty > 0 ? inputUsd / qty : null,
+        exitPriceUsd: null, grossPnlUsd: null, netPnlUsd: null, feeUsd });
+      entryRow.note = `ADD ${p.adds}${f.note ? ` · ${f.note}` : ''}`;
+      // The token account already exists: an add pays no account rent.
+      if (s.mode === 'PAPER') s.paperCashLamports = String(BigInt(s.paperCashLamports ?? '0') - f.inAmountRaw - fee);
+    } else if (f.side === 'BUY') {
       if (this.position(f.mint)) throw new Error('POSITION_ALREADY_OPEN');
       if (f.outAmountRaw <= 0n || f.inAmountRaw <= 0n) throw new Error('INVALID_BUY_FILL');
       const qty = exactNumber(f.outAmountRaw) / 10 ** f.decimals, inputUsd = lamportsUsd(f.inAmountRaw, f.solUsd);
