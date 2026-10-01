@@ -13,7 +13,7 @@ import { Logger } from '../utils/logger';
 import { acquireProcessLock } from '../utils/fs';
 import { JupiterClient } from '../execution/jupiter-client';
 import { TransactionSender } from '../execution/tx-sender';
-import { HoldingsWatch, notifier } from './watch';
+import { HoldingsWatch, notifier, walletHoldings, type Holding } from './watch';
 import { StrategyAssistant } from './assistant';
 import { walletHistory, type WalletHistory } from './wallet-history';
 import { selectPair } from './discovery';
@@ -65,6 +65,8 @@ export interface DeskHandle {
   assistant?: StrategyAssistant | null;
   /** A wallet's recent swaps, for the assistant. */
   walletHistory?: (wallet: string) => Promise<WalletHistory>;
+  /** What a wallet holds now (e.g. the FOMO wallet), to put tokens under Watch. */
+  holdings?: (wallet: string) => Promise<Holding[]>;
 }
 export interface DeskContext { wallet: (mode: DeskMode) => DeskWallet | null; authorized: () => boolean }
 
@@ -117,7 +119,8 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
       if (!sol) throw new DeskReject('SOL_PRICE_UNAVAILABLE');
       return walletHistory({ wallet, solUsd: sol, rpc, dex: shared.dex });
     };
-    return { engines, capital, operational, liveSigner: live.signer, watch, assistant, walletHistory: history, close: async () => {
+    return { engines, capital, operational, liveSigner: live.signer, watch, assistant, walletHistory: history,
+      holdings: wallet => walletHoldings({ wallet, rpc, dex: shared.dex }), close: async () => {
       await watch.settled();
       for (const e of Object.values(engines)) { e.stop('shutdown'); await e.settled(); await e.persist(); }
       await data.flush(); await lock.close(); await fs.unlink(lockPath);

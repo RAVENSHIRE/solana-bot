@@ -19,10 +19,10 @@ const SpecShape = z.object({
   entry: z.object({
     minMarketCapUsd: n, maxMarketCapUsd: n, minHolders: n, minPoolAgeMin: n, maxPoolAgeMin: n,
     minPriceChange5mPct: n, maxPriceChange5mPct: n, minPriceChange1hPct: n, maxPriceChange1hPct: n,
-    minVolume5mUsd: n, minVolume1hUsd: n, minBuySellRatio: n, minLiquidityUsd: z.number(),
+    minVolume5mUsd: n, minVolume1hUsd: n, minVolume1hToMcapPct: n, minBuySellRatio: n, minLiquidityUsd: z.number(),
     maxTop10WalletPct: n, maxLargestWalletPct: n, requireXAccount: z.boolean(),
   }),
-  exits: z.object({ takeProfitPct: n, stopLossPct: z.number(), trailingActivationPct: n, trailingStopPct: n, maxHoldMin: z.number(), marketCapFloorUsd: n, marketCapTargetUsd: n }),
+  exits: z.object({ takeProfitPct: n, stopLossPct: z.number(), trailingActivationPct: n, trailingStopPct: n, maxHoldMin: z.number(), graceSec: z.number(), marketCapFloorUsd: n, marketCapTargetUsd: n }),
   sizing: z.object({ capitalUsd: z.number(), entryUsd: z.number(), maxOpenPositions: z.number(), slippageBps: z.number(), exitSlippageBps: z.number(), maxDragPct: z.number() }),
   reentryCooldownMin: z.number(),
 });
@@ -39,7 +39,14 @@ How the desk works:
 - Exits are checked every 5 s with an executable quote: stop loss (% below cost), optional take profit (%), optional trailing stop (activates at +X%, exits Y% below the peak value), optional market-cap floor and target, and a max hold time (minutes; up to 43,200).
 - Sizing: TEST capital (a paper sleeve), entry size in $, max open positions (1–10), slippage and exit slippage in basis points (exit ≥ entry), max drag % (fees + price impact + slippage; slippage must stay below it; 0.5–25). Re-entry cooldown in minutes after an exit.
 
-Strategy fields (null = no rule): entry.minMarketCapUsd, maxMarketCapUsd, minHolders, minPoolAgeMin, maxPoolAgeMin, minPriceChange5mPct, maxPriceChange5mPct, minPriceChange1hPct, maxPriceChange1hPct, minVolume5mUsd, minVolume1hUsd, minBuySellRatio, minLiquidityUsd (required, ≥ 1000), maxTop10WalletPct, maxLargestWalletPct, requireXAccount; exits.takeProfitPct (null = ride), stopLossPct (required), trailingActivationPct + trailingStopPct (both or neither), maxHoldMin (required), marketCapFloorUsd < marketCapTargetUsd; sizing.*; reentryCooldownMin. Minimums must not exceed maximums.
+Strategy fields (null = no rule): entry.minMarketCapUsd, maxMarketCapUsd, minHolders, minPoolAgeMin, maxPoolAgeMin, minPriceChange5mPct, maxPriceChange5mPct, minPriceChange1hPct, maxPriceChange1hPct, minVolume5mUsd, minVolume1hUsd, minVolume1hToMcapPct (1h volume as % of market cap), minBuySellRatio, minLiquidityUsd (required, ≥ 1000), maxTop10WalletPct, maxLargestWalletPct, requireXAccount; exits.takeProfitPct (null = ride), stopLossPct (required), trailingActivationPct + trailingStopPct (both or neither), maxHoldMin (required), graceSec (seconds after entry without stop loss or trailing stop, 0–3600), marketCapFloorUsd < marketCapTargetUsd; sizing.*; reentryCooldownMin. Minimums must not exceed maximums.
+
+The owner's four plays (their framework; the desk sells a position in one piece, so a profit ladder becomes a trailing stop that activates at the first ladder step):
+1. Ultra-early (2K–12K market cap, bonding curve): volume spike in the first 3 minutes, enter after a 50–80% retrace. The desk cannot trade bonding curves yet: say so if asked.
+2. Migration (60K–300K, first hour after a pump.fun graduation): holder growth, 1h Vol/MC > 30%, organic social; ladder 2×/5×/10×, trail the rest 30%; exit if −50%.
+3. Consolidation re-entry ("Crash Strategy", 800K–1.2M after a 1–5M+ pump and dump): 12–72 h sideways base, volume steady, holders still growing; stop −30%; never stop out in the first minute (graceSec 60). Not the desk's built-in CRASH strategy, which trades young pumping pools for minutes.
+4. 15-minute scalp (400K–1M, catalyst): big candle + volume + buyers; take +20–100%, stop −30%, out within 15–30 minutes.
+Presets MIGRATION, CONSOL and SCALP implement 2–4; RUNNER rides established tokens with >1,000 holders.
 
 What the owner has told the desk about their style (use it, don't repeat it back):
 - Trades mostly on FOMO, picking from its trending and migrated lists.

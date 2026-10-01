@@ -93,6 +93,21 @@ Mint and freeze authority revoked and no dangerous token extensions always apply
 - The rules are saved in `data-desk/strategies.json` and shared by both modes; the on/off switch is saved per mode.
 - With `DESK_DEPLOYMENT_MODE=LOCKED`, adding, editing and deleting are refused.
 
+#### Your four plays as presets
+
+| Preset | Play | Entry | Exits |
+| --- | --- | --- | --- |
+| **MIGRATION** | Migration | $60K–$300K, pool < 1 h old (just graduated), 1h Vol/MC ≥ 30 %, ≥ 200 holders, top-10 ≤ 30 %, largest wallet ≤ 10 % | trailing stop 30 % once 2× is reached, stop −50 %, max 3 days, no stop-out in the first 60 s |
+| **CONSOL** | Consolidation re-entry ("Crash Strategy") | $800K–$1.2M, pool ≥ 12 h old, 1h change −10 % to +10 % (sideways), 5m 0 to +8 %, 1h volume ≥ $30K, ≥ 500 holders | trailing stop 30 % from 3×, stop −30 %, max 3 days, no stop-out in the first 60 s |
+| **SCALP** | 15-minute scalp | $400K–$1M, 5m +15 % to +80 %, 5m volume ≥ $50K, buy/sell ≥ 1.3 | take +60 %, stop −30 %, out after 25 min |
+| **RUNNER** | Established runners | see below | see below |
+
+The desk sells a position in one piece, so your profit ladder (2× / 5× / 10× / trail the rest) is approximated by a trailing stop that activates at the first ladder step. The desk's built-in **CRASH** strategy is *not* your Crash Strategy: CRASH trades young pumping pools for minutes; use **CONSOL** for consolidation re-entries.
+
+#### Copycats
+
+Before any entry the desk checks whether an older Solana token with the same ticker or name is at least 3× bigger (and ≥ $100K): every token the scanner has seen, then a DexScreener search. Such a clone is refused (`COPYCAT of …`). On 1 Oct the CRASH strategy bought a second "Jane" two minutes after it launched, while the real Jane was at $1M+; the clone rugged.
+
 #### Presets
 
 **RUNNER** (your style):
@@ -118,6 +133,15 @@ Setup and data:
 - Add `ANTHROPIC_API_KEY` to `.env` and restart the dashboard. The key stays in the local server and is never sent to the browser.
 - Sent to Claude: your messages, your existing custom strategies, and the named wallet's swap summary.
 - Requests use structured output and Anthropic's server-side fallback for declined requests.
+
+### FOMO
+
+FOMO has no public API: its token pages are share links into the app. What the desk does instead:
+
+- Every token in *Candidates*, *Open positions* and *Watch* has a **FOMO** link that opens it in the FOMO app.
+- *Watch → Load wallet holdings* lists what your FOMO wallet holds (paste its address), so you can set exit levels for each with one click and get alerts.
+- *Learn from wallet* in the strategy assistant reads your FOMO wallet's trades.
+- FOMO's *Migrated* list is pump.fun graduations, which the desk reads directly from the chain.
 
 ### Watch: exit rules for tokens you hold yourself
 

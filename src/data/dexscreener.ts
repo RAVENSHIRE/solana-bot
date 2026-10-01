@@ -60,6 +60,17 @@ export class DexScreenerClient {
   getLatestBoostedTokens(): Promise<string[]> { return this.listings('/token-boosts/latest/v1'); }
   getTopBoostedTokens(): Promise<string[]> { return this.listings('/token-boosts/top/v1'); }
   getLatestProfiles(): Promise<string[]> { return this.listings('/token-profiles/latest/v1'); }
+  /** Solana pairs whose token name or ticker matches `query` (DexScreener search); malformed rows are skipped. */
+  searchPairs(query: string): Promise<DexPair[]> {
+    const q = query.trim().slice(0, 40);
+    return this.data.read('dexscreener', `search:${q.toLowerCase()}`, 'analysis', () => this.http.get('/latest/dex/search', { q }), (raw, at) => {
+      const rows = (raw as { pairs?: unknown } | null)?.pairs;
+      return (Array.isArray(rows) ? rows : []).filter(p => (p as { chainId?: unknown } | null)?.chainId === 'solana').flatMap(p => {
+        const row = pairSchema.safeParse(p);
+        return row.success ? [{ ...row.data, meta: observation('dexscreener', at, row.data.baseToken.address, row.data.pairAddress) }] : [];
+      });
+    });
+  }
   async getPairsForTokens(mints: string[]): Promise<DexPair[]> {
     const unique = [...new Set(mints.map(m => parse(address, m, 'dexscreener')))].sort();
     const pairs = new Map<string, DexPair>();

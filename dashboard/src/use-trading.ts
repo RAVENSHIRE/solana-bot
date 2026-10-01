@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { VersionedTransaction } from '@solana/web3.js';
 import { phantomProvider, type PhantomListener } from './phantom';
 import type { DeskMode, DeskStatus } from '../../src/desk/types';
-import type { WatchView } from '../../src/desk/watch';
+import type { Holding, WatchView } from '../../src/desk/watch';
 import type { RuleSpec } from '../../src/desk/custom';
 import type { BrowserSDK } from '@phantom/browser-sdk';
 import type { PollConfig, PollResult } from './poll-worker';
@@ -101,6 +101,8 @@ export function useTradingSession() {
   /** Strategy chat with Claude; the caller shows its own progress and errors (it can take a minute). */
   const ask = (messages: Array<{ role: 'user' | 'assistant'; content: string }>, wallet: string | null): Promise<AssistantAnswer> =>
     post('assistant', { messages, ...(wallet ? { wallet } : {}) }) as Promise<AssistantAnswer>;
+  /** What a wallet (e.g. the FOMO wallet) holds now. */
+  const holdings = (wallet: string): Promise<{ wallet: string; holdings: Holding[] }> => post('holdings', { wallet }) as Promise<{ wallet: string; holdings: Holding[] }>;
   /** Resolves true when the desk accepted the action. */
   const desk = async (action: DeskAction, extra: Record<string, unknown> = {}): Promise<boolean> => {
     // Stopping ends auto-signing even if the request itself fails. Pause only stops entries: exits must stay signable.
@@ -155,7 +157,7 @@ export function useTradingSession() {
     } finally { signing.current = false; setBusy(null); }
   }, [view, post, liveExecuting]);
   useEffect(() => { if (auto && liveExecuting && view?.pending) void approve(true); }, [auto, view, approve, liveExecuting]);
-  return { view, address: session?.address ?? null, connected: !!session, online, busy, error, auto, autoUnsupported, connect, desk, ask, enableAuto,
+  return { view, address: session?.address ?? null, connected: !!session, online, busy, error, auto, autoUnsupported, connect, desk, ask, holdings, enableAuto,
     approve: () => approve(false), disconnect: async () => { invalidate(null); try { await sdk.current?.disconnect(); } catch (e) { setError(message(e)); } } };
 }
 export type TradingSession = ReturnType<typeof useTradingSession>;

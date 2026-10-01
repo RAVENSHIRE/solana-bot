@@ -22,13 +22,13 @@ import { assessAuthenticity, checkWebsite, parseXLink, XClient, type WebsiteChec
 import { analyze } from '../src/desk/analysis';
 import { DeskLedger } from '../src/desk/ledger';
 import { DeskEngine } from '../src/desk/engine';
-import { crashCheck, exitReason, scaleAdvice, strategyStats } from '../src/desk/strategies';
+import { crashCheck, exitReason, exitRuleText, scaleAdvice, strategyStats } from '../src/desk/strategies';
 import { replayExit, sizedReturn } from '../src/desk/replay';
 import { signals, simulatePool, summarize, type EntryRule, type PoolSeries } from '../src/desk/backtest';
 import { GraduationFeed } from '../src/desk/migrations';
 import { localKeySigner } from '../src/desk/local-signer';
 import { reclaimRent } from '../src/desk/rent';
-import { parseRuleSpec, RUNNER_PRESET, type RuleSpecInput } from '../src/desk/custom';
+import { PRESETS, parseRuleSpec, ruleMarketChecks, ruleProfile, RUNNER_PRESET, type RuleSpecInput } from '../src/desk/custom';
 import bs58 from 'bs58';
 import type { DeskEvent, LedgerEntry } from '../src/desk/types';
 
@@ -182,7 +182,7 @@ function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' =
   const w = { priceFactor: 1, extraRent: 0, liquidity: 50_000, native: 45_000_000, sends: 0, signRequests: 0,
     graduations: [] as Array<{ signature: string; mint: string; ok: boolean; migrate: boolean; broken?: boolean }>,
     priorityCaps: [] as Array<{ side: 'BUY' | 'SELL'; maxLamports: number; notional: bigint }>,
-    dasUnsupported: false, noRoute: false, sellQuotes: 0,
+    dasUnsupported: false, noRoute: false, sellQuotes: 0, searchPairs: [] as unknown[], searches: 0,
     last: null as null | { side: 'BUY' | 'SELL'; mint: string; inAmount: bigint; outAmount: bigint } };
   const holderMint = new Map<string, string>();
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -191,6 +191,7 @@ function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' =
   const fetcher: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     if (url.hostname === 'api.dexscreener.com') {
+      if (url.pathname === '/latest/dex/search') { w.searches++; return json({ schemaVersion: '1.0.0', pairs: w.searchPairs }); }
       if (url.pathname.startsWith('/token-')) return json(tokens.filter(t => t.listed !== false).map(t => ({ chainId: 'solana', tokenAddress: t.mint, description: 'Alpha does things', totalAmount: 100,
         links: [{ type: 'twitter', url: 'https://x.com/alphaproj' }, { label: 'Website', url: 'https://alpha.example' }] })));
       const mints = url.pathname.split('/').pop()!.split(',');
@@ -789,6 +790,18 @@ test('a held token without a Jupiter route never pauses Jupiter for other tokens
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
+test('the four play presets are valid specs; consolidation plays are never stopped out in their first minute', () => {
+  for (const id of ['RUNNER', 'MIGRATION', 'CONSOL', 'SCALP']) assert.equal(parseRuleSpec(PRESETS[id]!).id, id);
+  const consol = strategyProfiles({}, deskCapital({}), { takeProfitPct: 20, stopLossPct: 12, trailingActivationPct: 8, trailingStopPct: 6, maxHoldMin: 240 }) && ruleProfile(parseRuleSpec(PRESETS.CONSOL!), true);
+  const at = (heldMs: number, pnlPct: number) => exitReason(consol.exits, { pnlPct, peakPct: Math.max(pnlPct, 0), fromPeakPct: pnlPct, heldMs });
+  assert.equal(at(30_000, -45), null, 'a −45% wick in the first 30 s does not stop out');
+  assert.match(at(61_000, -45)!, /^STOP_LOSS/);
+  assert.ok(consol.exits.graceMs === 60_000 && exitRuleText(consol).some(r => r === 'Stop loss at -30% (not in the first 60 s)'));
+  const volMc = parseRuleSpec({ ...PRESETS.MIGRATION!, entry: { minVolume1hToMcapPct: 30, minLiquidityUsd: 1_000 } });
+  const metrics = { marketCapUsd: 100_000, volume1hUsd: 20_000, liquidityUsd: 20_000, migration: 'MIGRATED' } as never;
+  assert.deepEqual(ruleMarketChecks(volMc, metrics).find(g => g.key === 'ruleVolMc'), { key: 'ruleVolMc', label: '1h volume / market cap', status: 'FAIL', actual: '20.0%', required: '≥ 30%', blocking: true });
+});
+
 test('custom strategy specs are validated: built-in ids, inverted bands, slippage above the drag cap and half a trailing stop are refused', () => {
   const ok = parseRuleSpec(RUNNER_PRESET);
   assert.equal(ok.entry.minHolders, 1_000); assert.equal(ok.exits.takeProfitPct, null); assert.equal(ok.entry.requireXAccount, false);
@@ -843,6 +856,26 @@ test('a custom strategy trades a $5M token FAIR filters out: holders and safety 
     await engine.removeStrategy('BIG');
     assert.deepEqual(JSON.parse(await fs.readFile(path.join(dir, 'strategies.json'), 'utf8')).strategies, []);
     await fs.access(path.join(dir, 'ledger-PAPER-BIG.json'));
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('a copycat (same ticker as an older token 3× bigger) is never entered: the second "Jane" that rugged', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-copycat-')), { w, shared } = world(YOUNG_PUMP, 'insider');
+  try {
+    const original = pairRaw({ pairAddress: key(77).toBase58(), baseToken: { address: key(76).toBase58(), symbol: 'abc', name: 'Alpha original' },
+      marketCap: 1_400_000, fdv: 1_400_000, pairCreatedAt: NOW - 3 * 3_600_000 });
+    w.searchPairs = [original, { ...original, chainId: 'bsc' }, { chainId: 'solana', broken: true }];
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    engine.start(); await engine.pulse();
+    const view = engine.status({ connected: false, address: null });
+    assert.equal(view.positions.length, 0, 'the clone is refused');
+    assert.ok(engine.events.list().some(e => /^CRASH · entry refused: COPYCAT of abc .+ \(\$1,400,000 · 1\d\d min older\)$/.test(e.message)),
+      engine.events.list().filter(e => /COPYCAT|entry/.test(e.message)).map(e => e.message).join(' | '));
+    assert.match(view.candidates.find(c => c.mint === MINT)!.entryNotes!.CRASH!, /^COPYCAT/);
+    w.searchPairs = [];
+    const fresh = await DeskEngine.create({ ...shared, mode: 'PAPER', dir: await fs.mkdtemp(path.join(os.tmpdir(), 'desk-copycat-2-')), sender: null, wallet: () => ({ owner, signer: null }) });
+    fresh.start(); await fresh.pulse();
+    assert.equal(fresh.status({ connected: false, address: null }).positions.length, 1, 'without a bigger namesake the same signal is entered');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 

@@ -146,6 +146,8 @@ export interface ExitRules {
   giveback: { lockPeakPct: number; points: number } | null;
   /** Custom strategies: exit when the token's market cap falls to the floor or reaches the target. */
   marketCap?: { floorUsd: number | null; targetUsd: number | null } | null;
+  /** No stop loss or trailing stop this long after entry; take profit and targets still apply. */
+  graceMs?: number;
 }
 export interface StrategyProfile {
   id: StrategyId; label: string; summary: string; enabled: boolean;

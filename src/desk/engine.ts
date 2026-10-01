@@ -73,6 +73,8 @@ export class DeskEngine {
   private drillSkips = new Map<string, number>();
   /** `${strategy}:${mint}` → when and why the guard last blocked an entry; skipped for DESK.entrySkipMs. */
   private entrySkips = new Map<string, { at: number; code: string }>();
+  /** Every priced token seen, by lower-case ticker and name: the original a copycat imitates is usually among them. */
+  private names = new Map<string, Map<string, { mint: string; symbol: string | null; marketCapUsd: number; createdAt: number | null; at: number }>>();
   /** `${strategy}:${mint}` → why this scan did not enter a token (shown on the candidate). */
   private entryNotes = new Map<string, string>();
   /** TEST: sleeves that ran dry and were re-funded; their trades still count in the strategy stats. */
@@ -529,6 +531,7 @@ export class DeskEngine {
       const found = tokens.get(mint)!, pair = selectPair(pairs, mint, Date.now());
       if (!pair) { filtered++; this.transition(mint, null, 'FILTERED', 'No fresh SOL/USDC/USDT pool with a price'); continue; }
       const metrics = pairMetrics(pair, Date.now()), tier = tierFor(metrics);
+      this.rememberName(mint, pair);
       // Custom strategies see every priced token: a $5M runner is outside FAIR's bands but may be exactly what one wants.
       const ruleHints = this.customIds().filter(id => this.profile(id).enabled && ruleMarketHint(this.profile(id).rule!, metrics));
       if ('filtered' in tier && !ruleHints.length && !held.has(mint)) { filtered++; this.candidates.delete(mint); this.transition(mint, pair.baseToken.symbol ?? null, 'FILTERED', tier.filtered); continue; }
@@ -814,6 +817,43 @@ export class DeskEngine {
     this.event('WAITING', `${id} · no Jupiter route to sell (${errorMessage(error)}) since ${hhmm(p.noRouteSince)}: pool drained or delisted; retrying every ${x.retryMs / 60_000} min, ${after}`, ctx);
   }
 
+  private rememberName(mint: string, pair: DexPair): void {
+    const cap = pair.marketCap ?? pair.fdv ?? null;
+    if (cap === null) return;
+    for (const key of new Set([pair.baseToken.symbol, pair.baseToken.name].filter((k): k is string => !!k).map(k => k.trim().toLowerCase()))) {
+      const byMint = this.names.get(key) ?? new Map();
+      byMint.set(mint, { mint, symbol: pair.baseToken.symbol ?? null, marketCapUsd: cap, createdAt: pair.pairCreatedAt ?? null, at: Date.now() });
+      this.names.set(key, byMint);
+    }
+    if (this.names.size > 20_000) this.names.delete(this.names.keys().next().value!);
+  }
+
+  /**
+   * A copycat: an older Solana token with the same ticker or name is at least 3× bigger (and ≥ $100K). Fresh clones of a
+   * trending coin pump on the original's attention and are dumped within minutes (the second "Jane" on 1 Oct). Checked
+   * against every token the scanner has seen, then a DexScreener search; a failed search never blocks an entry.
+   */
+  private async copycatOf(c: Candidate): Promise<string | null> {
+    const keys = [c.symbol, c.name].filter((k): k is string => !!k && k.trim().length > 1).map(k => k.trim().toLowerCase());
+    if (!keys.length) return null;
+    const ours = c.metrics.marketCapUsd ?? 0, oursCreated = c.metrics.poolAgeMin === null ? Date.now() : Date.now() - c.metrics.poolAgeMin * 60_000;
+    const others: Array<{ mint: string; symbol: string | null; marketCapUsd: number; createdAt: number | null }> = keys.flatMap(k => [...(this.names.get(k)?.values() ?? [])]);
+    const original = (list: typeof others) => list.filter(o => o.mint !== c.mint && o.marketCapUsd >= Math.max(3 * ours, 100_000) && (o.createdAt === null || o.createdAt < oursCreated))
+      .sort((a, b) => b.marketCapUsd - a.marketCapUsd)[0] ?? null;
+    let found = original(others);
+    if (!found) {
+      try {
+        const pairs = await this.d.dex.searchPairs(c.symbol ?? c.name ?? '');
+        const match = pairs.filter(p => keys.includes((p.baseToken.symbol ?? '').trim().toLowerCase()) || keys.includes((p.baseToken.name ?? '').trim().toLowerCase()));
+        for (const p of match) this.rememberName(p.baseToken.address, p);
+        found = original(match.map(p => ({ mint: p.baseToken.address, symbol: p.baseToken.symbol ?? null, marketCapUsd: p.marketCap ?? p.fdv ?? 0, createdAt: p.pairCreatedAt ?? null })));
+      } catch { return null; }
+    }
+    if (!found) return null;
+    const older = found.createdAt ? ` · ${Math.round((oursCreated - found.createdAt) / 60_000)} min older` : '';
+    return `COPYCAT of ${found.symbol ?? 'a bigger token'} ${found.mint.slice(0, 4)}…${found.mint.slice(-4)} ($${Math.round(found.marketCapUsd).toLocaleString('en-US')}${older})`;
+  }
+
   /**
    * The held token's market cap now: the last scan's market cap moved by the price change since then, measured by the
    * executable quote. Null when the token was not seen in a recent scan.
@@ -890,6 +930,12 @@ export class DeskEngine {
       if (halt) { note(c.mint, halt); continue; }
       if (c.onchain.decimals === null) { note(c.mint, 'token decimals unknown; deferred'); continue; }
       if (this.heldBy(c.mint)) continue;
+      const copy = await this.copycatOf(c);
+      if (copy) {
+        note(c.mint, copy); this.entrySkips.set(`${id}:${c.mint}`, { at: Date.now(), code: 'COPYCAT' });
+        this.event('FILTERED', `${id} · entry refused: ${copy}`, { mint: c.mint, symbol: c.symbol, detail: { strategy: id } });
+        continue;
+      }
       attempts++; this.notes.delete(id);
       this.event('QUALIFIED', id === 'CRASH' ? `CRASH entry selected: ${c.crash?.summary ?? ''}` : id === 'FAIR' ? `FAIR entry candidate selected (composite ${composite(c).toFixed(0)})`
         : `${id} entry selected: ${c.rules?.[id]?.summary ?? ''}`,

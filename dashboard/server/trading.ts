@@ -261,6 +261,15 @@ export class TradingService {
       if (!body || typeof body !== 'object' || Array.isArray(body)) throw new DeskReject('INVALID_BODY');
       const action = url.pathname.slice('/api/trading/'.length);
       if (action === 'assistant') { this.json(res, 200, await this.assistant(body, await this.ensureDesk())); return true; }
+      if (action === 'holdings') {
+        // Read-only: what a wallet (e.g. the FOMO wallet) holds, to put tokens under Watch.
+        const handle = await this.ensureDesk();
+        let wallet: string;
+        try { wallet = new PublicKey(String(body.wallet ?? '').trim()).toBase58(); } catch { throw new DeskReject('INVALID_ADDRESS'); }
+        if (!handle.holdings) throw new DeskReject('WATCH_UNAVAILABLE');
+        const holdings = await handle.holdings(wallet).catch(() => { throw new DeskReject('HOLDINGS_UNAVAILABLE'); });
+        this.json(res, 200, { wallet, holdings }); return true;
+      }
       if (action === 'connect') {
         if (typeof body.address !== 'string') throw new DeskReject('INVALID_ADDRESS');
         const previous = this.broker.connection().address;

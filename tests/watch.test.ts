@@ -6,7 +6,7 @@ import path from 'node:path';
 import { Keypair } from '@solana/web3.js';
 import { normalizeDexPairs } from '../src/data/dexscreener';
 import { SOL_MINT } from '../src/core/types';
-import { HoldingsWatch, WATCH, notifier, watchReason, type WatchDeps, type WatchSell } from '../src/desk/watch';
+import { HoldingsWatch, WATCH, notifier, walletHoldings, watchReason, type WatchDeps, type WatchSell } from '../src/desk/watch';
 
 const key = (n: number) => Keypair.fromSeed(new Uint8Array(32).fill(n)).publicKey.toBase58();
 const MINT = key(31), WALLET = key(32), FOMO = key(33), POOL = key(34);
@@ -100,4 +100,16 @@ test('phone notifications are opt-in: ntfy topic and Telegram bot, never blockin
   assert.equal(calls[0]!.url, 'https://ntfy.sh/raven-desk-8f3k2'); assert.equal((calls[0]!.init.headers as Record<string, string>).Title, 'SINU: MCAP FLOOR');
   assert.equal(calls[1]!.url, 'https://api.telegram.org/bot123:abc_DEF/sendMessage'); assert.deepEqual(JSON.parse(String(calls[1]!.init.body)), { chat_id: '-42', text: 'SINU: MCAP FLOOR\nbelow $30M' });
   assert.deepEqual(notifier({ DESK_NTFY_TOPIC: 'a b', DESK_TELEGRAM_BOT_TOKEN: 'x' }).channels, []);
+});
+
+test('wallet holdings (e.g. the FOMO wallet): every token with a balance across both token programs, largest value first, with a FOMO link', async () => {
+  const other = key(35), acct = (mint: string, amount: string, decimals = 6) => ({ account: { data: { parsed: { info: { mint, tokenAmount: { amount, decimals } } } } } });
+  let calls = 0;
+  const rpc = { execute: async (_l: string, fn: (c: never) => Promise<unknown>) => fn({ getParsedTokenAccountsByOwner: async () => ({ value: calls++ === 0
+    ? [acct(MINT, '2000000'), acct(other, '5000000'), acct(key(36), '0')] : [acct(MINT, '1000000')] }) } as never) } as never;
+  const now = Date.now(), pair = (mint: string, price: string) => ({ chainId: 'solana', dexId: 'pumpswap', pairAddress: mint === MINT ? POOL : key(37), baseToken: { address: mint, symbol: mint === MINT ? 'SINU' : 'OTHER' },
+    quoteToken: { address: SOL_MINT, symbol: 'SOL' }, priceUsd: price, liquidity: { usd: 100_000 }, marketCap: 1_000_000, pairCreatedAt: now - 86_400_000, txns: { h1: { buys: 1, sells: 1 } } });
+  const list = await walletHoldings({ wallet: WALLET, rpc, dex: { getPairsForTokens: async () => normalizeDexPairs([pair(MINT, '0.5'), pair(other, '2')], now) } });
+  assert.deepEqual(list.map(h => [h.symbol, h.balance, h.valueUsd]), [['OTHER', 5, 10], ['SINU', 3, 1.5]], 'both programs summed, empty accounts dropped');
+  assert.equal(list[1]!.fomoUrl, `https://fomo.family/tokens/solana/${MINT}`);
 });

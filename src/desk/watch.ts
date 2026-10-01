@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
-import { PublicKey } from '@solana/web3.js';
+import { PublicKey, type Connection } from '@solana/web3.js';
+import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { z } from 'zod';
 import type { DexScreenerClient } from '../data/dexscreener';
 import { atomicWriteFile } from '../utils/fs';
@@ -213,4 +214,34 @@ export function notifier(env: NodeJS.ProcessEnv, fetcher: typeof fetch = fetch):
     channels.push('Telegram');
   }
   return { channels, notify: async (title, body) => { await Promise.allSettled(send.map(f => f(title, body))); } };
+}
+
+export interface Holding { mint: string; symbol: string | null; balance: number; valueUsd: number | null; marketCapUsd: number | null; fomoUrl: string }
+/** Link that opens the token in the FOMO app (or its web page). */
+export const fomoUrl = (mint: string) => `https://fomo.family/tokens/solana/${mint}`;
+
+/**
+ * The tokens a wallet holds now (e.g. the FOMO in-app wallet), largest value first, so each can be put under Watch
+ * with one click. Read-only: token accounts from the RPC, prices from DexScreener.
+ */
+export async function walletHoldings(o: { wallet: string; rpc: { execute<T>(label: string, fn: (c: Connection) => Promise<T>): Promise<T> };
+  dex: Pick<DexScreenerClient, 'getPairsForTokens'>; max?: number }): Promise<Holding[]> {
+  const owner = new PublicKey(o.wallet), balances = new Map<string, { raw: bigint; decimals: number }>();
+  for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+    const res = await o.rpc.execute('watch:holdings', c => c.getParsedTokenAccountsByOwner(owner, { programId }, 'confirmed'));
+    for (const a of res.value) {
+      const info = a.account.data.parsed.info as { mint: string; tokenAmount: { amount: string; decimals: number } };
+      const raw = BigInt(info.tokenAmount.amount);
+      if (raw <= 0n) continue;
+      const prev = balances.get(info.mint);
+      balances.set(info.mint, { raw: (prev?.raw ?? 0n) + raw, decimals: info.tokenAmount.decimals });
+    }
+  }
+  const mints = [...balances.keys()].slice(0, o.max ?? 60), now = Date.now();
+  const pairs = mints.length ? await o.dex.getPairsForTokens(mints).catch(() => []) : [];
+  return mints.map(mint => {
+    const b = balances.get(mint)!, pair = selectPair(pairs, mint, now), balance = Number(b.raw) / 10 ** b.decimals;
+    return { mint, symbol: pair?.baseToken.symbol ?? null, balance, valueUsd: pair?.priceUsd ? balance * pair.priceUsd : null,
+      marketCapUsd: pair ? pairMetrics(pair, now).marketCapUsd : null, fomoUrl: fomoUrl(mint) };
+  }).sort((a, b) => (b.valueUsd ?? -1) - (a.valueUsd ?? -1));
 }

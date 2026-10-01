@@ -32,6 +32,8 @@ export const ruleSpecSchema = z.object({
     minPriceChange5mPct: opt(num), maxPriceChange5mPct: opt(num),
     minPriceChange1hPct: opt(num), maxPriceChange1hPct: opt(num),
     minVolume5mUsd: opt(num.min(0)), minVolume1hUsd: opt(num.min(0)),
+    /** 1h volume as % of market cap ("Vol/MC > 30%"). */
+    minVolume1hToMcapPct: opt(num.min(0).max(10_000)),
     minBuySellRatio: opt(num.min(0)),
     /** Required: an exit needs a pool deep enough to be quoted. */
     minLiquidityUsd: num.min(1_000).default(10_000),
@@ -45,6 +47,8 @@ export const ruleSpecSchema = z.object({
     stopLossPct: num.positive().max(100),
     trailingActivationPct: opt(num.min(0).max(100_000)), trailingStopPct: opt(num.positive().max(95)),
     maxHoldMin: num.positive().max(30 * 24 * 60),
+    /** No stop loss or trailing stop in the first seconds after entry (consolidation plays need time to settle). */
+    graceSec: num.min(0).max(3_600).default(0),
     /** Exit when the token's market cap falls to this (your floor), or reaches this target. */
     marketCapFloorUsd: opt(num.positive()), marketCapTargetUsd: opt(num.positive()),
   }).strict(),
@@ -97,7 +101,38 @@ export const RUNNER_PRESET: RuleSpecInput = {
   sizing: { capitalUsd: 5.45, entryUsd: 2, maxOpenPositions: 2, slippageBps: 300, exitSlippageBps: 500, maxDragPct: 8 },
   reentryCooldownMin: 60,
 };
-export const PRESETS: Record<string, RuleSpecInput> = { RUNNER: RUNNER_PRESET };
+/**
+ * The owner's four plays (Meme Alpha Coach framework). The desk sells a position in one piece, so the profit ladder
+ * (2× / 5× / 10× / trail the rest) is approximated by a trailing stop that activates at the first ladder step.
+ */
+export const MIGRATION_PRESET: RuleSpecInput = {
+  id: 'MIGRATION', label: 'MIGRATION',
+  summary: 'Pump.fun graduations at $60K–$300K in their first hour, with Vol/MC > 30%, real holders and no whale; ride with a 30% trailing stop from 2×',
+  entry: { minMarketCapUsd: 60_000, maxMarketCapUsd: 300_000, maxPoolAgeMin: 60, minVolume1hToMcapPct: 30, minHolders: 200,
+    minLiquidityUsd: 15_000, maxTop10WalletPct: 30, maxLargestWalletPct: 10 },
+  exits: { takeProfitPct: null, stopLossPct: 50, trailingActivationPct: 100, trailingStopPct: 30, maxHoldMin: 3 * 24 * 60, graceSec: 60 },
+  sizing: { capitalUsd: 5.45, entryUsd: 2, maxOpenPositions: 2, slippageBps: 500, exitSlippageBps: 1_000, maxDragPct: 12 },
+  reentryCooldownMin: 60,
+};
+export const CONSOL_PRESET: RuleSpecInput = {
+  id: 'CONSOL', label: 'CONSOLIDATION',
+  summary: 'Re-entry after the first pump and dump: $800K–$1.2M, at least 12 h old, a sideways hour with volume still there; never stopped out in the first minute',
+  entry: { minMarketCapUsd: 800_000, maxMarketCapUsd: 1_200_000, minPoolAgeMin: 12 * 60, minPriceChange1hPct: -10, maxPriceChange1hPct: 10,
+    minPriceChange5mPct: 0, maxPriceChange5mPct: 8, minVolume1hUsd: 30_000, minHolders: 500, minLiquidityUsd: 50_000, maxTop10WalletPct: 40, maxLargestWalletPct: 10 },
+  exits: { takeProfitPct: null, stopLossPct: 30, trailingActivationPct: 200, trailingStopPct: 30, maxHoldMin: 3 * 24 * 60, graceSec: 60 },
+  sizing: { capitalUsd: 5.45, entryUsd: 2, maxOpenPositions: 2, slippageBps: 300, exitSlippageBps: 800, maxDragPct: 8 },
+  reentryCooldownMin: 120,
+};
+export const SCALP_PRESET: RuleSpecInput = {
+  id: 'SCALP', label: '15-MIN SCALP',
+  summary: 'Catalyst pumps at $400K–$1M: a big 5m candle with volume and buyers; take +60%, stop −30%, out within 25 minutes',
+  entry: { minMarketCapUsd: 400_000, maxMarketCapUsd: 1_000_000, minPriceChange5mPct: 15, maxPriceChange5mPct: 80, minVolume5mUsd: 50_000,
+    minBuySellRatio: 1.3, minLiquidityUsd: 40_000, maxTop10WalletPct: 40, maxLargestWalletPct: 10 },
+  exits: { takeProfitPct: 60, stopLossPct: 30, trailingActivationPct: null, trailingStopPct: null, maxHoldMin: 25, graceSec: 0 },
+  sizing: { capitalUsd: 5.45, entryUsd: 2, maxOpenPositions: 2, slippageBps: 400, exitSlippageBps: 1_000, maxDragPct: 10 },
+  reentryCooldownMin: 30,
+};
+export const PRESETS: Record<string, RuleSpecInput> = { RUNNER: RUNNER_PRESET, MIGRATION: MIGRATION_PRESET, CONSOL: CONSOL_PRESET, SCALP: SCALP_PRESET };
 
 const usd = (n: number | null) => n === null ? 'UNKNOWN' : `$${n >= 1000 ? Math.round(n).toLocaleString('en-US') : n.toFixed(2)}`;
 const pct = (n: number | null) => n === null ? 'UNKNOWN' : `${n.toFixed(1)}%`;
@@ -120,6 +155,8 @@ export function ruleMarketChecks(s: RuleSpec, m: CandidateMetrics): GateResult[]
     ...range('rule1h', '1h price change', m.priceChange1hPct, e.minPriceChange1hPct, e.maxPriceChange1hPct, pct, signed),
     ...range('ruleVol5m', '5m volume', m.volume5mUsd, e.minVolume5mUsd, null, usd, big),
     ...range('ruleVol1h', '1h volume', m.volume1hUsd, e.minVolume1hUsd, null, usd, big),
+    ...range('ruleVolMc', '1h volume / market cap', m.volume1hUsd !== null && m.marketCapUsd ? m.volume1hUsd / m.marketCapUsd * 100 : null,
+      e.minVolume1hToMcapPct, null, pct, v => `${v}%`),
     ...range('ruleBuySell', 'Buy/sell ratio (5m)', m.buySellRatio5m, e.minBuySellRatio, null, v => v?.toFixed(2) ?? 'UNKNOWN', v => String(v)),
     ...(m.migration === 'BONDING_CURVE' && m.liquidityUsd === null
       ? [{ key: 'ruleLiquidity', label: 'AMM liquidity', status: 'FAIL' as const, actual: 'bonding curve — no AMM pool yet', required: `≥ ${big(e.minLiquidityUsd)}`, blocking: true }]
@@ -159,7 +196,7 @@ export function ruleProfile(s: RuleSpec, enabled: boolean): StrategyProfile {
     positionCheckMs: DESK.exits.positionCheckMs, exitMode: 'rules', reentryCooldownMs: s.reentryCooldownMin * 60_000,
     exits: { takeProfitPct: x.takeProfitPct ?? Number.POSITIVE_INFINITY, stopLossPct: x.stopLossPct, maxHoldMin: x.maxHoldMin,
       trailing: x.trailingActivationPct !== null && x.trailingStopPct !== null ? { activationPct: x.trailingActivationPct, stopPct: x.trailingStopPct } : null,
-      giveback: null, marketCap: x.marketCapFloorUsd !== null || x.marketCapTargetUsd !== null ? { floorUsd: x.marketCapFloorUsd, targetUsd: x.marketCapTargetUsd } : null },
+      giveback: null, graceMs: x.graceSec * 1000, marketCap: x.marketCapFloorUsd !== null || x.marketCapTargetUsd !== null ? { floorUsd: x.marketCapFloorUsd, targetUsd: x.marketCapTargetUsd } : null },
     rule: s };
 }
 

@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import type { Candidate, DeskEvent, DeskStatus, Evidence, Preflight, Stage, StrategyView } from '../../src/desk/types';
 import type { RuleSpecInput } from '../../src/desk/custom';
-import type { WatchRule, WatchView } from '../../src/desk/watch';
+import type { Holding, WatchRule, WatchView } from '../../src/desk/watch';
 import type { AssistantAnswer, TradingSession } from './use-trading';
 import { money, numeric, short, time } from './format';
 
@@ -28,6 +28,7 @@ const EXPLAIN: Record<string, string> = {
   ASSISTANT_AUTH: 'Claude rejected the API key: check ANTHROPIC_API_KEY in .env.', ASSISTANT_RATE_LIMITED: 'Claude is rate-limited right now; try again in a minute.',
   ASSISTANT_OFFLINE: 'Claude could not be reached (network).', ASSISTANT_UNAVAILABLE: 'Claude is unavailable right now; try again shortly.',
   ASSISTANT_BAD_REQUEST: 'The chat was rejected; start a new chat.', INVALID_CHAT: 'The chat could not be sent; start a new chat.',
+  HOLDINGS_UNAVAILABLE: 'The wallet\'s token accounts could not be read (RPC). Try again.',
   WALLET_HISTORY_UNAVAILABLE: 'The wallet\'s transactions could not be read (RPC). Try again, or leave the wallet empty.', INVALID_ADDRESS: 'That is not a Solana address.',
   POSITION_NOT_FOUND: 'That position is no longer open in the desk ledger (already sold, or held outside the desk: sell it in your wallet).',
   PHANTOM_PROVIDER: 'Phantom could not connect from this page: open the dashboard in the browser profile where the Phantom extension is installed and unlocked. With DESK_LIVE_SIGNER=local-key in .env, LIVE needs no Phantom connection at all.',
@@ -175,19 +176,25 @@ const FIELDS: Array<{ group: Group | null; key: string; label: string; optional:
   { group: 'entry', key: 'minPriceChange5mPct', label: '5m change from (%)', optional: true }, { group: 'entry', key: 'maxPriceChange5mPct', label: '5m change to (%)', optional: true },
   { group: 'entry', key: 'minPriceChange1hPct', label: '1h change from (%)', optional: true }, { group: 'entry', key: 'maxPriceChange1hPct', label: '1h change to (%)', optional: true },
   { group: 'entry', key: 'minVolume5mUsd', label: 'Min 5m volume ($)', optional: true }, { group: 'entry', key: 'minVolume1hUsd', label: 'Min 1h volume ($)', optional: true },
+  { group: 'entry', key: 'minVolume1hToMcapPct', label: 'Min 1h Vol/MC (%)', optional: true },
   { group: 'entry', key: 'minBuySellRatio', label: 'Min buy/sell ratio (5m)', optional: true },
   { group: 'entry', key: 'maxTop10WalletPct', label: 'Max top-10 wallets (%)', optional: true }, { group: 'entry', key: 'maxLargestWalletPct', label: 'Max largest wallet (%)', optional: true },
   { group: 'exits', key: 'takeProfitPct', label: 'Take profit (%) — empty: ride', optional: true }, { group: 'exits', key: 'stopLossPct', label: 'Stop loss (%)', optional: false },
   { group: 'exits', key: 'trailingActivationPct', label: 'Trailing stop from (+%)', optional: true }, { group: 'exits', key: 'trailingStopPct', label: 'Trailing stop (% below peak)', optional: true },
   { group: 'exits', key: 'marketCapFloorUsd', label: 'Exit at market cap ≤ ($)', optional: true }, { group: 'exits', key: 'marketCapTargetUsd', label: 'Exit at market cap ≥ ($)', optional: true },
   { group: 'exits', key: 'maxHoldMin', label: 'Max hold (min)', optional: false },
+  { group: 'exits', key: 'graceSec', label: 'No stop-out in first (s)', optional: false },
   { group: 'sizing', key: 'capitalUsd', label: 'TEST capital ($)', optional: false }, { group: 'sizing', key: 'entryUsd', label: 'Entry size ($)', optional: false },
   { group: 'sizing', key: 'maxOpenPositions', label: 'Max open positions', optional: false }, { group: 'sizing', key: 'maxDragPct', label: 'Max drag (%)', optional: false },
   { group: 'sizing', key: 'slippageBps', label: 'Slippage (bps)', optional: false }, { group: 'sizing', key: 'exitSlippageBps', label: 'Exit slippage (bps)', optional: false },
   { group: null, key: 'reentryCooldownMin', label: 'Re-entry cooldown (min)', optional: false },
 ];
+const PRESET_HINT: Record<string, string> = {
+  RUNNER: 'established runners, >1,000 holders, trailing stop', MIGRATION: 'your migration play, $60K–$300K right after graduation',
+  CONSOL: 'your "Crash Strategy": $800K–$1.2M consolidation re-entry', SCALP: 'your 15-minute catalyst scalp, $400K–$1M',
+};
 const BLANK: Spec = { id: 'MY_STRATEGY', label: 'My strategy', summary: '', entry: { minLiquidityUsd: 20_000 },
-  exits: { stopLossPct: 30, maxHoldMin: 240 }, sizing: { capitalUsd: 5.45, entryUsd: 2, maxOpenPositions: 2, slippageBps: 300, exitSlippageBps: 500, maxDragPct: 8 }, reentryCooldownMin: 60 };
+  exits: { stopLossPct: 30, maxHoldMin: 240, graceSec: 0 }, sizing: { capitalUsd: 5.45, entryUsd: 2, maxOpenPositions: 2, slippageBps: 300, exitSlippageBps: 500, maxDragPct: 8 }, reentryCooldownMin: 60 };
 const fieldValue = (spec: Spec, f: typeof FIELDS[number]): unknown => f.group ? (spec[f.group] as Record<string, unknown>)[f.key] : (spec as unknown as Record<string, unknown>)[f.key];
 
 function StrategyEditor({ spec, isNew, busy, save, cancel }: { spec: Spec; isNew: boolean; busy: boolean; save: (s: Spec) => void; cancel: () => void }) {
@@ -303,7 +310,7 @@ function Strategies({ d, t }: { d: DeskStatus; t: TradingSession }) {
           <option value="ALL">All strategies ({d.strategies.length})</option>
           {d.strategies.map(s => <option key={s.id} value={s.id}>{s.label} — {s.enabled ? 'ON' : 'OFF'}{s.spec ? ' · custom' : ''}</option>)}
           {!locked && <optgroup label="Add a strategy">
-            {Object.entries(d.presets ?? {}).map(([k, p]) => <option key={k} value={`new:${k}`}>+ {p.label} preset{k === 'RUNNER' ? ' — your style: >1,000 holders, ride with a trailing stop' : ''}</option>)}
+            {Object.entries(d.presets ?? {}).map(([k, p]) => <option key={k} value={`new:${k}`}>+ {p.label} preset — {PRESET_HINT[k] ?? p.summary}</option>)}
             <option value="new:BLANK">+ Blank strategy</option>
           </optgroup>}
         </select></label>
@@ -353,7 +360,7 @@ function entryRuleText(s: Spec): string[] {
   const p = (n: number) => `${n > 0 ? '+' : ''}${n}%`;
   return [...band(e.minMarketCapUsd, e.maxMarketCapUsd, k, 'Market cap'), ...(e.minHolders != null ? [`Holders ≥ ${e.minHolders.toLocaleString('en-US')}`] : []),
     ...band(e.minPoolAgeMin, e.maxPoolAgeMin, n => `${n} min`, 'Pool age'), ...band(e.minPriceChange5mPct, e.maxPriceChange5mPct, p, '5m change'),
-    ...band(e.minPriceChange1hPct, e.maxPriceChange1hPct, p, '1h change'), ...band(e.minVolume5mUsd, null, k, '5m volume'), ...band(e.minVolume1hUsd, null, k, '1h volume'),
+    ...band(e.minPriceChange1hPct, e.maxPriceChange1hPct, p, '1h change'), ...band(e.minVolume5mUsd, null, k, '5m volume'), ...band(e.minVolume1hUsd, null, k, '1h volume'), ...band(e.minVolume1hToMcapPct, null, n => `${n}%`, '1h Vol/MC'),
     ...band(e.minBuySellRatio, null, n => String(n), 'Buy/sell ratio'), ...band(e.minLiquidityUsd ?? 10_000, null, k, 'Liquidity'),
     ...band(null, e.maxTop10WalletPct, n => `${n}%`, 'Top-10 wallets'), ...band(null, e.maxLargestWalletPct, n => `${n}%`, 'Largest wallet'),
     ...(e.requireXAccount ? ['X account linked'] : []), 'Always: mint and freeze authority revoked, no dangerous token extensions'];
@@ -412,7 +419,7 @@ function Candidates({ list, probe, busy }: { list: Candidate[]; probe: ((mint: s
       <th title="Owners with a balance · share of the 10 largest wallets (pools and curves excluded)">Holders</th><th>Dev</th><th>Website</th><th>X</th><th>X activity</th><th>Narrative</th><th>Mint / freeze</th><th>Risk flags</th></tr></thead>
       <tbody>{list.map(c => <Fragment key={c.mint}>
         <tr className={`status-${c.status.toLowerCase()}${c.stale ? ' stale' : ''}`} onClick={() => setOpen(open === c.mint ? null : c.mint)} aria-expanded={open === c.mint}>
-          <td title={c.mint}><strong>{c.symbol ?? '?'}</strong><br /><small>{short(c.mint)}</small></td>
+          <td title={c.mint}><strong>{c.symbol ?? '?'}</strong> <Fomo mint={c.mint} /><br /><small>{short(c.mint)}</small></td>
           <td>{c.tier === 'ULTRA_EARLY' ? 'Ultra-early' : c.tier === 'CUSTOM' ? 'Custom only' : 'Trending'}</td>
           <td>{c.stale ? <span className="badge-stale" title="Not re-assessed in the last scan; never traded on">STALE · {ago(c.updatedAt)}</span>
             : <span className={`badge-${c.status.toLowerCase()}`}>{c.status}</span>}<br /><small>{c.entryNotes?.FAIR ?? c.classification.replace('_', ' ')}</small></td>
@@ -493,7 +500,7 @@ function Positions({ d, busy, exit }: { d: DeskStatus; busy: boolean; exit: (p: 
     <div className="wallet-table"><table><thead><tr><th>Strategy</th><th>Token</th><th>Quantity (raw)</th><th>Entry price</th><th>Current price</th><th>Cost</th><th>Value</th><th>Unrealized</th><th>Route</th><th>Opened</th><th></th></tr></thead>
       <tbody>{d.positions.map(p => {
         const value = p.lastValueLamports && solUsd ? Number(p.lastValueLamports) / 1e9 * solUsd : null;
-        return <tr key={p.id}><td>{p.strategy ?? 'FAIR'}</td><td title={p.mint}>{p.symbol ?? short(p.mint)}</td><td>{p.qtyRaw}</td><td>{p.entryPriceUsd?.toPrecision(6) ?? '--'}</td>
+        return <tr key={p.id}><td>{p.strategy ?? 'FAIR'}</td><td title={p.mint}>{p.symbol ?? short(p.mint)} <Fomo mint={p.mint} /></td><td>{p.qtyRaw}</td><td>{p.entryPriceUsd?.toPrecision(6) ?? '--'}</td>
           <td>{p.lastPriceUsd?.toPrecision(6) ?? '--'}</td><td>{fine(p.costUsd)}</td><td>{fine(value)}</td><td>{fine(value === null ? null : value - p.costUsd)}</td>
           <td>{p.noRouteSince ? <span className="unknown" title="Jupiter finds no route to sell this token (pool drained or delisted). Re-quoted every 2 min; it exits if a route returns.">NO ROUTE since {ago(p.noRouteSince)}</span> : p.route}</td><td>{ago(p.openedAt)}</td>
           <td><button className="stop-action" disabled={busy || !!p.exitRequested} onClick={() => exit(p)}>{p.exitRequested ? 'SELLING…' : 'EXIT NOW'}</button></td></tr>;
@@ -525,6 +532,8 @@ function PathAudit({ d }: { d: DeskStatus }) {
   </section>;
 }
 
+/** Opens the token in the FOMO app (on the phone) or its FOMO page. */
+const Fomo = ({ mint }: { mint: string }) => <a className="fomo-link" href={`https://fomo.family/tokens/solana/${mint}`} target="_blank" rel="noreferrer" title="Open in FOMO" onClick={e => e.stopPropagation()}>FOMO</a>;
 const cap = (n: number | null | undefined) => n == null ? '--' : n >= 1e6 ? `$${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `$${(n / 1e3).toFixed(1)}K` : `$${n.toFixed(0)}`;
 /** Accepts 30000000, 30m, 30M, 450k, $1.2M. */
 const parseCap = (v: string): number | null => {
@@ -551,6 +560,11 @@ function Watch({ t, d }: { t: TradingSession; d: DeskStatus }) {
   const w: WatchView | null | undefined = t.view?.watch, busy = !!t.busy || !t.online;
   const [form, setForm] = useState({ mint: '', wallet: '', floor: '', target: '', trail: '', action: 'ALERT', note: '' });
   const [perm, setPerm] = useState<string>(() => typeof Notification === 'undefined' ? 'unsupported' : Notification.permission);
+  const [held, setHeld] = useState<{ wallet: string; holdings: Holding[] } | null>(null), [loading, setLoading] = useState(false), [heldError, setHeldError] = useState<string | null>(null);
+  const loadHoldings = async () => {
+    setLoading(true); setHeldError(null);
+    try { setHeld(await t.holdings(wallet)); } catch (e) { setHeldError(e instanceof Error ? e.message : 'HOLDINGS_UNAVAILABLE'); } finally { setLoading(false); }
+  };
   const seen = useRef<number | null>(null);
   const wallet = form.wallet.trim() || w?.sellWallet || d.wallet.address || '';
   // Browser notifications for alerts that arrive while this tab is open.
@@ -575,21 +589,30 @@ function Watch({ t, d }: { t: TradingSession; d: DeskStatus }) {
       <small>Market cap checked every 15 s, with or without the desk running. A rule fires after two checks in a row.</small></div>
     <form className="watch-form" onSubmit={e => { e.preventDefault(); void submit(); }}>
       {field('mint', 'Token (CA)', 'e.g. 9AQMJ…pump')}
-      {field('wallet', 'Wallet holding it', w.sellWallet ?? d.wallet.address ?? 'your FOMO or Phantom address')}
+      {field('wallet', 'Wallet holding it (e.g. your FOMO wallet)', w.sellWallet ?? d.wallet.address ?? 'your FOMO or Phantom address')}
       {field('floor', 'Exit at market cap ≤', 'e.g. 30M')}
       {field('trail', 'Trailing stop (% below peak)', 'e.g. 25')}
       {field('target', 'Take profit at market cap ≥', 'e.g. 80M')}
       <label><span>Action</span><select value={canSell ? form.action : 'ALERT'} disabled={!canSell} onChange={e => setForm({ ...form, action: e.target.value })}>
         <option value="ALERT">Alert me</option><option value="SELL">Sell everything automatically (local key)</option></select></label>
       {field('note', 'Note (shown in the alert)', 'e.g. my plan: out below 30M')}
-      <div className="spec-actions"><button className="primary-action" type="submit" disabled={busy || !form.mint.trim()}>Watch token</button></div>
+      <div className="spec-actions"><button className="primary-action" type="submit" disabled={busy || !form.mint.trim()}>Watch token</button>
+        <button className="source-button" type="button" disabled={loading || !wallet} onClick={() => void loadHoldings()}>{loading ? 'Loading…' : 'Load wallet holdings'}</button></div>
     </form>
+    {heldError && <p className="trading-error" role="alert">{describe(heldError)}</p>}
+    {held && <details open><summary>{short(held.wallet)} holds {held.holdings.length} token(s) — pick one to watch</summary>
+      <div className="wallet-table"><table><thead><tr><th>Token</th><th>Balance</th><th>Value</th><th>Market cap</th><th></th></tr></thead>
+        <tbody>{held.holdings.map(h => <tr key={h.mint}><td title={h.mint}><strong>{h.symbol ?? short(h.mint)}</strong> <Fomo mint={h.mint} /></td>
+          <td>{numeric(h.balance, 2)}</td><td>{h.valueUsd === null ? '--' : money(h.valueUsd)}</td><td>{cap(h.marketCapUsd)}</td>
+          <td>{w.rules.some(r => r.mint === h.mint && r.wallet === held.wallet) ? 'watched'
+            : <button className="source-button" type="button" onClick={() => setForm({ ...form, mint: h.mint, wallet: held.wallet })}>Set levels</button>}</td></tr>)}
+          {!held.holdings.length && <tr><td colSpan={5}>No tokens in this wallet.</td></tr>}</tbody></table></div></details>}
     <p className="desk-note">{w.sellWallet ? `Automatic selling is available for the local-key wallet ${short(w.sellWallet)} only; for FOMO or other wallets you get alerts. ` : 'Automatic selling needs DESK_LIVE_SIGNER=local-key; until then every rule alerts. '}
       Phone alerts: {w.channels.length ? w.channels.join(' + ') : 'off — add DESK_NTFY_TOPIC (ntfy app) or DESK_TELEGRAM_BOT_TOKEN + DESK_TELEGRAM_CHAT_ID to .env'}. Browser alerts: {perm === 'granted' ? 'on' : perm === 'unsupported' ? 'not supported here'
         : <button className="source-button" type="button" onClick={() => void Notification.requestPermission().then(setPerm)}>turn on</button>}</p>
     <div className="wallet-table"><table><thead><tr><th>Token</th><th>Wallet</th><th>Market cap</th><th>Peak since added</th><th>Rules</th><th>Balance</th><th>Status</th><th></th></tr></thead>
       <tbody>{w.rules.map(r => { const st = watchStatus(r); return <tr key={r.id}>
-        <td title={r.mint}><strong>{r.symbol ?? '?'}</strong><br /><small>{short(r.mint)}</small></td>
+        <td title={r.mint}><strong>{r.symbol ?? '?'}</strong> <Fomo mint={r.mint} /><br /><small>{short(r.mint)}</small></td>
         <td title={r.wallet}>{short(r.wallet)}{r.wallet === w.sellWallet ? <><br /><small>local key</small></> : null}</td>
         <td>{cap(r.lastMarketCapUsd)}</td><td>{cap(r.peakMarketCapUsd)}</td>
         <td>{[r.marketCapFloorUsd != null && `floor ${cap(r.marketCapFloorUsd)}`, r.trailingStopPct != null && `trail ${r.trailingStopPct}%`, r.marketCapTargetUsd != null && `target ${cap(r.marketCapTargetUsd)}`].filter(Boolean).join(' · ')}<br />
