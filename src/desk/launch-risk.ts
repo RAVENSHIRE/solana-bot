@@ -97,7 +97,7 @@ export async function readInsiders(rpc: Rpc, mint: string, creator: string | nul
   // The curve's own token account receives the supply at creation (pump.fun CreateV2 / Token-2022 included): not an insider.
   const curve = bondingCurveAddress(mint);
   for (const s of early) {
-    const res = await rpc.execute('risk:tx', c => rawRequest(c)._rpcRequest('getTransaction', [s.signature, { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }]));
+    const res = await rpc.execute('risk:tx', c => rawRequest(c)._rpcRequest('getTransaction', [s.signature, { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: 1 }]));
     const tx = (res.error ? null : res.result) as RawTx | null;
     // Without the creation itself the insiders are unknown, never "0 %" (an RPC rate limit is retried by the radar).
     if (!tx) { if (s.signature === createSignature) return null; continue; }
