@@ -18,9 +18,10 @@ const EXPLAIN: Record<string, string> = {
   INSTANCE_LOCK: 'Another dashboard process owns data-desk. Close it first.', SCANNER_OFF: 'Start the scanner first.',
   RESET_TEST_ONLY: 'Reset is only available in TEST.', INVALID_STRATEGY: 'Unknown strategy.',
   POSITION_NOT_FOUND: 'That position is no longer open in the desk ledger (already sold, or held outside the desk: sell it in your wallet).',
+  PHANTOM_PROVIDER: 'Phantom could not connect from this page: open the dashboard in the browser profile where the Phantom extension is installed and unlocked. With DESK_LIVE_SIGNER=local-key in .env, LIVE needs no Phantom connection at all.',
   AUTO_CONFIRM_UNAVAILABLE_FOR_DOMAIN: 'Phantom does not offer Auto-Confirm for this domain (only for domains it has approved). LIVE orders need your approval in Phantom within 15 s.',
 };
-const describe = (code: string | null) => code ? EXPLAIN[code] ?? code.replaceAll('_', ' ') : null;
+const describe = (code: string | null) => !code ? null : /supported wallet provider|wallet provider/i.test(code) ? EXPLAIN.PHANTOM_PROVIDER : EXPLAIN[code] ?? code.replaceAll('_', ' ');
 const fine = (v: number | null | undefined, d = 4) => v === null || v === undefined || !Number.isFinite(v) ? '--' : `${v < 0 ? '-' : ''}$${Math.abs(v).toFixed(d)}`;
 const sol = (lamports: string | null | undefined) => lamports == null ? '--' : `${(Number(lamports) / 1e9).toFixed(6)} SOL`;
 const ago = (at: number | null | undefined) => at ? new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '--';
@@ -46,20 +47,20 @@ export function DeskPanel({ t }: { t: TradingSession }) {
       <button className="primary-action" disabled={!!t.busy || !t.online} onClick={() => void t.approve()}>Review in Phantom</button>
     </div>}
     {d && <>
-      <Capital d={d} />
-      <Strategies d={d} t={t} />
+      <div id="desk-overview" className="desk-anchor"><Capital d={d} /></div>
+      <div id="desk-strategies" className="desk-anchor"><Strategies d={d} t={t} /></div>
       <Stages events={d.events} />
-      <div className="desk-grid">
+      <div id="desk-telemetry" className="desk-grid desk-anchor">
         <Telemetry events={d.events} />
         <PreflightCard p={d.preflights[0] ?? null} live={live} />
       </div>
-      <Candidates list={d.candidates} probe={live ? null : mint => void t.desk('probe', { mint })} busy={!!t.busy} />
-      <Positions d={d} busy={!!t.busy || !t.online} exit={p => {
+      <div id="desk-candidates" className="desk-anchor"><Candidates list={d.candidates} probe={live ? null : mint => void t.desk('probe', { mint })} busy={!!t.busy} /></div>
+      <div id="desk-positions" className="desk-anchor"><Positions d={d} busy={!!t.busy || !t.online} exit={p => {
         const how = !live ? 'This is a TEST position: the sale is paper only.' : localKey ? 'The local key signs the sale immediately (REAL FUNDS).'
           : 'Phantom will ask you to approve the sale within 15 s (REAL FUNDS).';
         if (window.confirm(`EXIT NOW: sell the whole ${p.symbol ?? p.mint} position at the current Jupiter quote (exit slippage applies)? ${how}`)) void t.desk('exit', { mint: p.mint });
-      }} />
-      <Ledger d={d} />
+      }} /></div>
+      <div id="desk-trades" className="desk-anchor"><Ledger d={d} /></div>
       <PathAudit d={d} />
     </>}
     {!d && !v?.deskError && <p className="trading-intro">Starting the local desk…</p>}
@@ -86,8 +87,9 @@ function Controls({ t, d }: { t: TradingSession; d: DeskStatus | null }) {
       {d?.scanning && <span className="chip on">SCANNING…</span>}
     </div>
     <div className="trading-actions">
-      {!t.connected ? <button className="source-button" disabled={!!t.busy} onClick={() => void t.connect()}>{t.busy === 'connect' ? 'Connecting…' : 'Connect Phantom'}</button>
-        : <button className="source-button" disabled={!!t.busy} onClick={() => void t.disconnect()}>Disconnect</button>}
+      {/* Phantom is only the signer for LIVE without the local key; TEST reads the .env address and never signs. */}
+      {live && !localKey && (!t.connected ? <button className="source-button" disabled={!!t.busy} onClick={() => void t.connect()}>{t.busy === 'connect' ? 'Connecting…' : 'Connect Phantom'}</button>
+        : <button className="source-button" disabled={!!t.busy} onClick={() => void t.disconnect()}>Disconnect</button>)}
       {!live ? <>
         <button className="primary-action" disabled={busy || running} onClick={() => void t.desk('start-test')}>START TEST</button>
         <button className="stop-action" disabled={busy || !running} onClick={() => void t.desk('stop-test')}>STOP TEST</button>
@@ -133,16 +135,9 @@ function Capital({ d }: { d: DeskStatus }) {
       {row('Actual USD value', money(c.walletUsd), c.solUsd ? `SOL ${money(c.solUsd)}` : undefined)}
       {row('Last wallet sync', ago(c.lastWalletSync))}
     </section>
-    <section><h3>Trading config</h3>
-      {row('Planned starting capital', money(c.plannedStartingCapitalUsd))}
-      {row('Base entry', money(c.baseEntryUsd))}
-      {row('Native SOL reserve', `${numeric(c.reserveSol, 3)} SOL`)}
-      {row('Max drag', `${numeric(c.maxDragPct, 1)}%`, `slippage tolerance ${c.slippageBps} bps counts toward it`)}
-    </section>
     <section><h3>{test ? 'TEST capital & PnL' : 'LIVE capital & PnL'}</h3>
       {test && row('TEST cash', money(c.paperCashUsd), 'all strategy sleeves; separate from wallet')}
       {!test && row('Available SOL', c.availableSol === null ? '--' : `${numeric(c.availableSol, 6)} SOL`)}
-      {row('Reserved SOL', `${numeric(c.reservedSol, 6)} SOL`, 'native reserve + token-account rent')}
       {row('Spendable capital', money(c.spendableUsd))}
       {row('Open positions', `${c.openPositions} · ${money(c.positionsValueUsd)}`)}
       {row('Unrealized PnL', fine(c.unrealizedPnlUsd))}

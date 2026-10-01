@@ -161,7 +161,8 @@ export function deskOperational(env: NodeJS.ProcessEnv = {}): DeskOperational {
   const bool = z.enum(['true', 'false']);
   const minutes = z.coerce.number().int().min(1).max(1_440);
   const e = z.object({
-    DESK_DEPLOYMENT_MODE: z.enum(['LOCKED', 'EDITABLE']).default('LOCKED'),
+    // EDITABLE: strategies and the TEST drill are switched in the dashboard (saved per mode). LOCKED fixes them at startup.
+    DESK_DEPLOYMENT_MODE: z.enum(['LOCKED', 'EDITABLE']).default('EDITABLE'),
     DESK_PAPER_FAIR_ENABLED: bool.default('true'), DESK_PAPER_CRASH_ENABLED: bool.default('true'),
     DESK_LIVE_FAIR_ENABLED: bool.default('true'), DESK_LIVE_CRASH_ENABLED: bool.default('false'),
     DESK_FAIR_LOSS_REENTRY_MIN: minutes.default(60), DESK_CRASH_LOSS_REENTRY_MIN: minutes.default(30),

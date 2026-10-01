@@ -29,7 +29,7 @@ function service(liveSigner: DeskHandle['liveSigner'] = 'PHANTOM', locked = fals
   let wallets: Parameters<DeskFactory>[0] | null = null;
   const factory: DeskFactory = async context => { wallets = context;
     return { engines: engines as unknown as Record<DeskMode, DeskEngine>, capital: { plannedStartingCapitalUsd: 5.45, baseEntryUsd: 2, slippageBps: 100 }, liveSigner,
-      operational: locked ? deskOperational({}) : undefined,
+      operational: locked ? deskOperational({ DESK_DEPLOYMENT_MODE: 'LOCKED' }) : undefined,
       close: async () => {} } as DeskHandle; };
   return { trading: new TradingService(factory), engines, context: () => wallets! };
 }

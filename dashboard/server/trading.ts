@@ -3,7 +3,6 @@ import path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { PublicKey } from '@solana/web3.js';
 import { SigningBroker } from '../../src/phantom/signing-broker';
-import { SigningError } from '../../src/execution/transaction-signer';
 import type { DeskWallet } from '../../src/desk/engine';
 import { DeskReject } from '../../src/desk/guard';
 import { createDesk, deskEnvironment, type DeskContext, type DeskHandle } from '../../src/desk/runtime';
@@ -15,6 +14,16 @@ export const deskFactory = (repo: string): DeskFactory => context => createDesk(
 
 const DESK_ACTIONS = new Set(['select-mode', 'start-test', 'stop-test', 'start-live', 'pause', 'resume', 'stop-live', 'probe', 'drill-on', 'drill-off',
   'strategy', 'reset-test', 'exit']);
+
+/**
+ * The reject code of a DeskReject or SigningError. Matched by name, not instanceof: the dashboard is an ES module
+ * package and the desk is CommonJS, so the desk's classes can be a second instance of the same module.
+ */
+function rejectCode(error: unknown): string | null {
+  if (!(error instanceof Error) || (error.name !== 'DeskReject' && error.name !== 'SigningError')) return null;
+  const code: unknown = (error as Error & { code?: unknown }).code;
+  return typeof code === 'string' ? code : null;
+}
 
 export class TradingService {
   readonly broker = new SigningBroker({ sessionTtlMs: 900_000 });
@@ -53,7 +62,7 @@ export class TradingService {
       if (this.closed) return handle.close().then(() => { throw new DeskReject('SERVICE_CLOSED'); });
       this.desk = handle; this.deskError = null; return handle;
     }).catch(error => {
-      this.deskError = error instanceof DeskReject ? error.code : 'DESK_UNAVAILABLE';
+      this.deskError = rejectCode(error) ?? 'DESK_UNAVAILABLE';
       throw error;
     }).finally(() => { this.opening = null; });
     return this.opening;
@@ -211,7 +220,7 @@ export class TradingService {
       } else { this.json(res, 404, { message: 'NOT_FOUND' }); return true; }
       this.json(res, 200, { ok: true });
     } catch (error) {
-      const code = error instanceof DeskReject || error instanceof SigningError ? error.code : 'TRADING_REQUEST_FAILED';
+      const code = rejectCode(error) ?? 'TRADING_REQUEST_FAILED';
       this.json(res, code.includes('CAPABILITY') || code.includes('ORIGIN') ? 403 : 400, { message: code });
     }
     return true;

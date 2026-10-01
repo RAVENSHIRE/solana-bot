@@ -1344,3 +1344,6 @@ table.gates td{padding:4px 6px;border-bottom:1px solid #eef0f2;text-align:left!i
   .events li span:last-child{grid-column:1/-1}
 }
 .probe-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.probe-row small{color:#7b8190;font-size:12px}
+
+/* Sidebar targets: keep the section heading visible below the top bar when jumping. */
+.desk-anchor{scroll-margin-top:72px}
