@@ -41,6 +41,8 @@ export function backtestData(o: BacktestDataOptions) {
   const birdeye = async (p: PoolInfo, spanMin: number, latest: boolean): Promise<VCandle[]> => {
     const now = Math.floor(Date.now() / 600_000) * 600_000;
     const to = Math.floor((latest ? now : Math.min(p.createdAt + spanMin * MINUTE, now)) / 1000), from = Math.max(Math.floor(p.createdAt / 1000) - 60, to - 999 * 60);
+    // A pool younger than the rounded "now" has no range to ask for yet.
+    if (to - from < 120) return [];
     const file = path.join(o.cacheDir, 'birdeye', `${p.mint}-${from}-${to}.json`);
     let list = await readJson<Array<{ unixTime: number; o: number; h: number; l: number; c: number; v: number }>>(file);
     if (!list && o.cachedOnly) return [];
@@ -50,6 +52,8 @@ export function backtestData(o: BacktestDataOptions) {
         { headers: { 'X-API-KEY': o.birdeyeKey!, 'x-chain': 'solana', accept: 'application/json' } }).catch(() => null);
       const body = res?.ok ? await res.json().catch(() => null) as { success?: boolean; data?: { items?: typeof list } } | null : null;
       if (body?.success) list = body.data?.items ?? [];
+      // A token Birdeye does not know (or a range it refuses) has no candles; it never stops the run.
+      else if (res?.status === 400 || res?.status === 404) list = [];
       else if (attempt >= 8) throw new Error(`birdeye: HTTP ${res?.status ?? 'network error'} for ${p.mint}`);
       else await sleep(res?.status === 429 ? 2_000 * (attempt + 1) : 3_000);
     }
