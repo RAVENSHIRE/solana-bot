@@ -37,8 +37,11 @@ const B58 = '[1-9A-HJ-NP-Za-km-z]';
 const ADDRESS = new RegExp(`(?<![1-9A-HJ-NP-Za-km-z])${B58}{32,44}(?![1-9A-HJ-NP-Za-km-z])`, 'g');
 /** Links that name a token mint (not a pool): pump.fun, Solscan, Birdeye, GMGN, Jupiter, FOMO, Raydium swap. */
 const TOKEN_LINK = new RegExp(`(?:pump\\.fun/(?:coin/)?|solscan\\.io/token/|birdeye\\.so/token/|gmgn\\.ai/sol/token/(?:[A-Za-z0-9]+_)?|jup\\.ag/(?:tokens/|swap/[A-Za-z0-9]+-)|fomo\\.family/tokens/solana/|outputMint=|outputCurrency=)(${B58}{32,44})`, 'gi');
-/** "CA: …", "contract address …", ca:"…" (a site's own config), "mint: …". */
-const LABELLED = new RegExp(`(?:\\bca\\b|contract(?:[\\s_-]*address)?|token[\\s_-]*address|\\bmint\\b)["'\\s:=\\-–>]{0,6}(${B58}{32,44})`, 'gi');
+/**
+ * "CA: …", "contract address …", ca:"…" (a site's own config). Not "mint": token lists and logo URLs use it for other
+ * tokens (stashd.fun lists PUMP, CARDS… as {"mint": …} and /api/logo?mint=…).
+ */
+const LABELLED = new RegExp(`(?:\\bca\\b|contract(?:[\\s_-]*address)?|token[\\s_-]*address)["'\\s:=\\-–>]{0,6}(${B58}{32,44})`, 'gi');
 /** Launchpad vanity suffixes: pump.fun and letsbonk mints. */
 const VANITY = /(?:pump|bonk)$/;
 const NOT_A_TOKEN = new Set(['So11111111111111111111111111111111111111112', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB']);

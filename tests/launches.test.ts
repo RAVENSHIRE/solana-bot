@@ -85,6 +85,8 @@ test('contract addresses on a page: the copy button, a CA label, a pump.fun link
   assert.deepEqual(caVerdict(FAKE, page), { verdict: 'CONTRADICTED', other: STASHD });
   assert.deepEqual(caVerdict(STASHD, page), { verdict: 'CONFIRMED', other: null });
   assert.deepEqual(caVerdict(FAKE, pageAddresses(`router ${JUP}`)), { verdict: 'NONE', other: null }, 'an unlabelled program id says nothing');
+  const basket = `<img src="/api/logo?mint=${JUP}&amp;u=1"/>{"CARDS":{"symbol":"CARDS","mint":"${PUMP_PROGRAM}"}}`;
+  assert.deepEqual(pageAddresses(basket).claimed, [], 'a token list or logo URL names other tokens, not the site\'s CA');
 });
 
 test('CA verdict: the account posting this CA confirms; another CA on X or the website marks an impersonator (score 0); the post wins over a stale site', () => {
