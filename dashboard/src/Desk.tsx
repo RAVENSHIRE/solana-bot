@@ -661,7 +661,7 @@ function LaunchRadar({ d }: { d: DeskStatus }) {
       <tbody>{list.map(l => <tr key={l.mint} className={l.signal ? 'launch-ready' : l.rug || l.ca?.status === 'IMPERSONATOR' ? 'launch-fake' : ''}>
         <td title={l.mint}><strong>{l.symbol}</strong> <Fomo mint={l.mint} /><br /><small>{l.name.slice(0, 40)}</small></td>
         <td>{mins(l.at)}</td><td>{l.score}</td><td title={l.ca?.detail}><small>{l.rug ? '✗ RUG' : ca(l.ca)}</small></td>
-        <td><small>{num(l.followers)} followers<br />{l.bestViews != null ? `${num(l.bestViews)} views` : '--'}{l.accountAgeDays != null ? ` · ${l.accountAgeDays < 1 ? `${Math.max(1, Math.round(l.accountAgeDays * 24))} h` : `${Math.round(l.accountAgeDays)} d`} old` : ''}
+        <td><small>{l.ownX === false ? <>narrative: someone else's account<br />({num(l.followers)} followers)</> : <>{num(l.followers)} followers</>}<br />{l.bestViews != null ? `${num(l.bestViews)} views` : '--'}{l.accountAgeDays != null ? ` · ${l.accountAgeDays < 1 ? `${Math.max(1, Math.round(l.accountAgeDays * 24))} h` : `${Math.round(l.accountAgeDays)} d`} old` : ''}
           {l.xPosts ? <><br />{l.xPosts} X-feed post{l.xPosts > 1 ? 's' : ''}</> : null}</small></td>
         <td title={l.insiders ?? undefined}><small>{l.insiderPct != null ? `${l.insiderPct.toFixed(1)}%` : 'reading'}</small></td>
         <td title={l.review ? `${l.review.summary}${l.review.scamSignals.length ? ` · Scam signs: ${l.review.scamSignals.join('; ')}` : ''}` : undefined}>

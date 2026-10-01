@@ -58,8 +58,8 @@ export interface DeskDeps {
   launches?: LaunchSource | null;
   /** X feed (X API search for posts naming a token); off without X_BEARER_TOKEN. */
   xfeed?: XFeed | null;
-  /** Whether shortlisted launches get a Claude review (status only). */
-  aiReview?: boolean;
+  /** Claude review of shortlisted launches: its status line; absent when off. */
+  aiReview?: (() => string) | null;
   /** Phone/desktop alerts (ntfy, Telegram) for launch-radar finds and entry-ready signals. */
   notify?: (title: string, body: string) => Promise<void>;
   /** LIVE: who signs (default PHANTOM) and how many new entries one LIVE session may open. */
@@ -502,7 +502,7 @@ export class DeskEngine {
       if (!row.sources.includes('x-feed')) row.sources.push('x-feed');
       found.tokens.set(x.mint, row);
     }
-    if (d.launches) this.sources['Launch radar (pump.fun, on-chain)'] = `${this.launchList.size} shortlisted · X pages read without a key${d.aiReview ? ' · Claude review on' : ''}`;
+    if (d.launches) this.sources['Launch radar (pump.fun, on-chain)'] = `${this.launchList.size} shortlisted · X pages read without a key · ${d.aiReview ? d.aiReview() : 'Claude review off'}`;
     if (d.xfeed) { const x = d.xfeed.status(); this.sources['X feed (X API search)'] = x.configured ? (x.lastError ?? `${x.signals} token posts from ${x.posts} posts`) : 'off — set X_BEARER_TOKEN in .env'; }
     const staged = await this.stage(found.tokens);
     // CRASH is time-critical: safety evidence for pumping young pools first, entries right after, and only then
@@ -1417,7 +1417,7 @@ export class DeskEngine {
         b.score - a.score || (b.reach?.followers ?? 0) - (a.reach?.followers ?? 0) || b.at - a.at).slice(0, 25).map(l => {
         const c = this.candidates.get(l.mint);
         return { mint: l.mint, symbol: l.symbol, name: l.name, at: l.at, score: l.score, reasons: l.reasons, x: l.x.url, website: l.site?.url ?? l.meta?.website ?? null, ca: l.ca,
-          followers: l.reach?.followers ?? null, bestViews: l.reach?.bestViews ?? null, accountAgeDays: l.reach?.accountAgeDays ?? null,
+          followers: l.reach?.followers ?? null, bestViews: l.reach?.bestViews ?? null, accountAgeDays: l.reach?.accountAgeDays ?? null, ownX: l.reach?.own ?? null,
           insiders: l.insiders?.detail ?? null, insiderPct: l.insiders?.insiderPct ?? null, rug: l.rug ?? null, xPosts: l.xSignals?.length ?? 0,
           review: l.review ? { verdict: l.review.verdict, idea: l.review.idea, professionalism: l.review.professionalism, aiGenerated: l.review.aiGenerated,
             summary: l.review.summary, scamSignals: l.review.scamSignals } : null,

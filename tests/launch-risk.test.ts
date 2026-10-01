@@ -4,9 +4,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Keypair } from '@solana/web3.js';
-import { KNOWN_RUGS, RISK, RugList, decodeCurve, insiderExit, readInsiders, tokenDeltas } from '../src/desk/launch-risk';
-import { parseXPage, readXPage } from '../src/desk/social';
-import { xReach } from '../src/desk/launches';
+import { KNOWN_RUGS, RISK, RugList, bondingCurveAddress, decodeCurve, insiderExit, readInsiders, tokenDeltas } from '../src/desk/launch-risk';
+import { parseXLink, parseXPage, readXPage } from '../src/desk/social';
+import { ownAccount, xReach } from '../src/desk/launches';
 
 const key = (n: number) => Keypair.fromSeed(new Uint8Array(32).fill(n)).publicKey.toBase58();
 const NOW = Date.parse('2026-10-01T19:30:00Z');
@@ -60,6 +60,8 @@ test('insiders: the creator and every wallet that bought in the creation slot (t
     meta: { err: null, preTokenBalances: [], postTokenBalances: [bal(owner, amount)] } });
   const txs: Record<string, ReturnType<typeof tx>> = { CREATE: tx(100, dev, 51_100_000_000_000n), B1: tx(100, b1, 31_400_000_000_000n), B2: tx(101, b2, 27_900_000_000_000n),
     LATE: tx(104, sniper, 24_300_000_000_000n) };
+  // pump.fun CreateV2: the curve's own token account receives the supply in the same transaction; it is not an insider.
+  txs.CREATE!.meta.postTokenBalances.push(bal(bondingCurveAddress(mint), 848_900_000_000_000n) as never);
   assert.equal(tokenDeltas(txs.B1 as never, mint).get(b1), 31_400_000_000_000n);
   const conn = { getSignaturesForAddress: async () => [{ signature: 'LATE', slot: 104, err: null }, { signature: 'B2', slot: 101, err: null }, { signature: 'B1', slot: 100, err: null },
       { signature: 'CREATE', slot: 100, err: null }],
@@ -70,6 +72,9 @@ test('insiders: the creator and every wallet that bought in the creation slot (t
   assert.equal(ins.creatorPct, 5.11); assert.equal(ins.insiderPct, 11.04);
   assert.equal(ins.detail, 'insiders hold 11.0%: dev 5.1% + 2 wallets in the creation slot');
   assert.equal(await readInsiders(rpc, mint, dev, 'UNKNOWN_SIG'), null, 'creation not found: unknown, never guessed');
+  const limited = { ...conn, _rpcRequest: async (_m: string, [sig]: [string]) => sig === 'CREATE' ? { error: { message: 'rate limited' } } : { result: txs[sig] } };
+  assert.equal(await readInsiders({ execute: async (_l: string, fn: (c: never) => unknown) => fn(limited as never) } as never, mint, dev, 'CREATE'), null,
+    'the creation transaction unreadable (RPC rate limit): unknown, never "0 %"');
 });
 
 test('insider exits: they sell → RUG; the curve is about to graduate while they still hold a bag → sell first (ETF −84%, Potato −90%)', () => {
@@ -102,4 +107,24 @@ test('rug list: persisted; a launch by the same creator, X account or website is
   const again = await RugList.open(file, KNOWN_RUGS);
   assert.equal(again.all().length, 2, 'persisted, seed not duplicated');
   assert.match(again.match({ mint: key(66), creator: null, xHandle: 'fakeproj', site: null })!, /rugged FAKE on 2026-10-01 \(RUG insiders sold\)/);
+});
+
+test('own account or narrative: a launch linking a celebrity post or a big old account gets no follower points, only the linked post\'s views', () => {
+  const now = NOW;
+  const page = (handle: string, followers: number, ageDays: number, postId = '1', views = 108_431) => ({ handle, status: 'READ' as const, detail: '', addresses: [], claimed: [],
+    profile: { handle, name: null, createdAt: now - ageDays * 86_400_000, followers, following: 1, tweets: 9_000, blueVerified: true, bio: null },
+    posts: [{ id: postId, author: handle, at: now - 3_600_000, text: 'stablecoins are the future of banking', views, likes: 900, replies: 40, reposts: 100, quotes: 5 }] });
+  // Bankcoin on 1 Oct: metadata linked a post by Circle's CEO (198K followers, 12-year-old account).
+  const bank = { name: 'Bankcoin', symbol: 'BANK', x: parseXLink('https://x.com/jerallaire/status/1'), site: null };
+  const ceo = page('jerallaire', 197_939, 4_532);
+  assert.equal(ownAccount(bank, ceo, now), false);
+  const r = xReach(ceo, now, { own: false, postId: '1' });
+  assert.equal(r.points, 1); assert.equal(r.own, false);
+  assert.deepEqual(r.reasons, ['narrative: @jerallaire (197,939 followers) is not the project\'s account; the linked post has 108,431 views (+1)']);
+  // An "own account" link to a 2M-follower, 6-year-old account that never posted the CA is someone else's too.
+  assert.equal(ownAccount({ name: 'Apple House', symbol: 'APPLEHOUSE', x: parseXLink('https://x.com/bigbrand'), site: null }, page('bigbrand', 2_000_427, 2_330), now), false);
+  // Ansemmas: the linked post is by @Ansemmas itself — the project's account.
+  assert.equal(ownAccount({ name: 'Ansemmas', symbol: 'Ansemmas', x: parseXLink('https://x.com/Ansemmas/status/2105703034915602595'), site: null }, page('Ansemmas', 401, 5), now), true);
+  assert.equal(ownAccount({ name: 'Proj', symbol: 'PRJ', x: parseXLink('https://x.com/devguy/status/5'), site: null, ca: { status: 'X', detail: '' } }, page('devguy', 88, 200), now), true,
+    'whoever posted this CA speaks for the project');
 });

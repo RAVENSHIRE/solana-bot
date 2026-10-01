@@ -178,7 +178,7 @@ export interface DeskStatus {
   /** Launch radar: recent shortlisted pump.fun launches (own X account + website). */
   launches?: Array<{ mint: string; symbol: string; name: string; at: number; score: number; reasons: string[]; x: string | null; website: string | null;
     ca?: { status: 'X' | 'WEBSITE' | 'IMPERSONATOR' | 'UNCONFIRMED'; detail: string }; marketCapUsd: number | null; signal: boolean; status: string;
-    followers?: number | null; bestViews?: number | null; accountAgeDays?: number | null; insiders?: string | null; insiderPct?: number | null;
+    followers?: number | null; bestViews?: number | null; accountAgeDays?: number | null; ownX?: boolean | null; insiders?: string | null; insiderPct?: number | null;
     rug?: string | null; xPosts?: number;
     review?: { verdict: 'STRONG' | 'OK' | 'WEAK' | 'SCAM'; idea: number; professionalism: number; aiGenerated: string; summary: string; scamSignals: string[] } | null }>;
   /** X feed (X API search) state; absent when the desk has none. */

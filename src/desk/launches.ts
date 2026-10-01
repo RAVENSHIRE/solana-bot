@@ -53,8 +53,11 @@ export interface LaunchMeta { description: string | null; twitter: string | null
 export interface LaunchCa { status: 'X' | 'WEBSITE' | 'IMPERSONATOR' | 'UNCONFIRMED'; detail: string }
 /** A post found by the X feed (X API search) that names this mint. */
 export interface XSignal { mint: string; handle: string; followers: number | null; accountCreatedAt: number | null; postId: string; postAt: number; views: number | null; likes: number; text: string }
-/** The X account's reach as read from its profile page. */
-export interface XReach { followers: number | null; bestViews: number | null; accountAgeDays: number | null; points: number; reasons: string[] }
+/**
+ * The X account's reach as read from its profile page. `own`: the project's own account; otherwise the launch links
+ * someone else's post or a big established account (a celebrity, a company): that is the narrative, not the project's audience.
+ */
+export interface XReach { followers: number | null; bestViews: number | null; accountAgeDays: number | null; points: number; reasons: string[]; own?: boolean }
 export interface Launch extends LaunchEvent {
   meta: LaunchMeta | null; x: XLink; site: WebsiteCheck | null; score: number; reasons: string[];
   /** The X profile page as last read, and when; the website's last read. */
@@ -67,7 +70,7 @@ export interface Launch extends LaunchEvent {
   /** When the X account was first seen to exist; later "not found" reads (two in a row) mean it was deleted. */
   xSeenAt?: number | null; xMissing?: number; xMissingAt?: number | null;
   reach?: XReach | null;
-  insiders?: Insiders | null;
+  insiders?: Insiders | null; insidersTries?: number; insidersRetryAt?: number;
   review?: LaunchReview | null;
   /** Posts from the X feed that name this mint. */
   xSignals?: XSignal[];
@@ -126,17 +129,46 @@ const DAY = 86_400_000;
  * The X account's reach from its profile page: followers (more is better), the views its own posts drew in the last
  * three days (Ansemmas: a 5-day-old account with 401 followers and a 21.7K-view post), and whether it is brand new.
  */
-export function xReach(page: XPageCheck | null, now: number): XReach {
-  const p = page?.profile ?? null;
-  if (!page || (page.status !== 'READ' && page.status !== 'NO_POSTS') || !p) return { followers: null, bestViews: null, accountAgeDays: null, points: 0, reasons: [] };
+export const REACH = Object.freeze({
+  /** An "own" account this big and old that never posted the CA is someone else's (Bankcoin linked Circle's CEO, 198K followers). */
+  bigAccountFollowers: 50_000, bigAccountAgeDays: 365,
+});
+const norm = (v: string | null | undefined) => (v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+/** Whether the linked X account is the project's own: its handle matches the name or ticker, the website links it, or it posted the CA. */
+export function ownAccount(l: { name: string; symbol: string; x: XLink; site: WebsiteCheck | null; ca?: LaunchCa | null }, page: XPageCheck | null, now = Date.now()): boolean {
+  const h = norm(l.x.handle);
+  if (!h) return false;
+  if (l.ca?.status === 'X') return true;
+  const p = page?.profile;
+  const big = (p?.followers ?? 0) >= REACH.bigAccountFollowers && p?.createdAt != null && now - p.createdAt > REACH.bigAccountAgeDays * DAY;
+  if (l.x.kind === 'ACCOUNT') return !big;
+  const n = norm(l.name), s = norm(l.symbol), linked = !!l.site?.xHandles.includes(l.x.handle!.toLowerCase());
+  return !big && (linked || [n, s].some(t => t.length >= 3 && (h.includes(t) || t.includes(h))));
+}
+
+/**
+ * The X account's reach from its profile page: followers (more is better), the views its own posts drew in the last
+ * three days (Ansemmas: a 5-day-old account with 401 followers and a 21.7K-view post), and whether it is brand new.
+ * For someone else's account (a linked post by a celebrity or caller) only the linked post's views count, as narrative.
+ */
+export function xReach(page: XPageCheck | null, now: number, o: { own?: boolean; postId?: string | null } = {}): XReach {
+  const p = page?.profile ?? null, own = o.own ?? true;
+  if (!page || (page.status !== 'READ' && page.status !== 'NO_POSTS') || !p) return { followers: null, bestViews: null, accountAgeDays: null, points: 0, reasons: [], own };
   const reasons: string[] = []; let points = 0;
   const f = p.followers, age = p.createdAt ? (now - p.createdAt) / DAY : null;
+  if (!own) {
+    const post = o.postId ? (page.posts ?? []).find(x => x.id === o.postId) ?? null : null;
+    const views = post?.views ?? null, add = views === null ? 0 : views >= 1_000_000 ? 2 : views >= 100_000 ? 1 : 0;
+    reasons.push(`narrative: @${page.handle} (${(f ?? 0).toLocaleString('en-US')} followers) is not the project's account${views !== null ? `; the linked post has ${views.toLocaleString('en-US')} views${add ? ` (+${add})` : ''}` : ''}`);
+    return { followers: f, bestViews: views, accountAgeDays: age, points: add, reasons, own };
+  }
   if (f !== null) {
     const add = f >= 10_000 ? 4 : f >= 2_000 ? 3 : f >= 500 ? 2 : f >= 100 ? 1 : f < 25 ? -1 : 0;
     points += add; reasons.push(`${f.toLocaleString('en-US')} followers${add ? ` (${add > 0 ? '+' : ''}${add})` : ''}`);
   }
-  const own = (page.posts ?? []).filter(x => (!x.author || x.author.toLowerCase() === page.handle.toLowerCase()) && now - x.at <= 3 * DAY);
-  const best = own.reduce<number | null>((m, x) => x.views !== null && (m === null || x.views > m) ? x.views : m, null);
+  const ownPosts = (page.posts ?? []).filter(x => (!x.author || x.author.toLowerCase() === page.handle.toLowerCase()) && now - x.at <= 3 * DAY);
+  const best = ownPosts.reduce<number | null>((m, x) => x.views !== null && (m === null || x.views > m) ? x.views : m, null);
   if (best !== null) {
     const add = best >= 50_000 ? 3 : best >= 10_000 ? 2 : best >= 2_000 ? 1 : 0;
     points += add; reasons.push(`best post ${best.toLocaleString('en-US')} views${add ? ` (+${add})` : ''}`);
@@ -145,7 +177,7 @@ export function xReach(page: XPageCheck | null, now: number): XReach {
     if (age < 1 && (f ?? 0) < 500) { points -= 1; reasons.push(`X account created ${Math.max(1, Math.round(age * 24))} h ago (−1)`); }
     else reasons.push(`X account ${age < 60 ? `${Math.round(age)} days` : `${(age / 365).toFixed(1)} years`} old`);
   }
-  return { followers: f, bestViews: best, accountAgeDays: age, points, reasons };
+  return { followers: f, bestViews: best, accountAgeDays: age, points, reasons, own };
 }
 
 export interface ScoreExtra { reach?: XReach | null; xPage?: XPageCheck | null; xSeenAt?: number | null; review?: LaunchReview | null; insiders?: Insiders | null;
@@ -338,9 +370,14 @@ export class LaunchFeed implements LaunchSource {
     const readInsidersFor = this.o.insiders === null ? null : this.o.insiders ?? ((l: Launch) => readInsiders(this.rpc, l.mint, l.creator, l.signature));
     if (readInsidersFor) for (const l of list) {
       if (this.insiderBusy.size >= LAUNCH.insiderConcurrency) break;
-      if (l.insiders !== undefined || this.insiderBusy.has(l.mint) || l.score < LAUNCH.insiderMinScore || now - l.at < 15_000) continue;
+      if (l.insiders !== undefined || this.insiderBusy.has(l.mint) || l.score < LAUNCH.insiderMinScore || now - l.at < 15_000 || now < (l.insidersRetryAt ?? 0)) continue;
       this.insiderBusy.add(l.mint);
-      this.track(readInsidersFor(l).catch(() => null).then(v => { l.insiders = v; this.rate(l, Date.now()); }).finally(() => this.insiderBusy.delete(l.mint)));
+      // A failed read is retried twice, 20 s apart; after that the insiders stay unknown (null), which does not block.
+      this.track(readInsidersFor(l).catch(() => null).then(v => {
+        const tries = (l.insidersTries ?? 0) + 1;
+        if (v === null && tries < 3) { l.insidersTries = tries; l.insidersRetryAt = Date.now() + 20_000; return; }
+        l.insiders = v; this.rate(l, Date.now());
+      }).finally(() => this.insiderBusy.delete(l.mint)));
     }
     const review = this.o.review;
     if (review) for (const l of list) {
@@ -378,7 +415,7 @@ export class LaunchFeed implements LaunchSource {
     // The project's own account posting this CA through the X feed confirms it like its profile page would.
     if (l.ca.status === 'UNCONFIRMED' && l.x.handle && (l.xSignals ?? []).some(x => x.handle.toLowerCase() === l.x.handle!.toLowerCase()))
       l.ca = { status: 'X', detail: `@${l.x.handle} posted this CA` };
-    l.reach = xReach(l.xPage, now);
+    l.reach = xReach(l.xPage, now, { own: ownAccount(l, l.xPage, now), postId: /\/status\/(\d+)/.exec(l.x.url ?? '')?.[1] ?? null });
     const { score, reasons } = scoreLaunch(l.meta, l.x, l.site, l.ca, { reach: l.reach, xPage: l.xPage, xSeenAt: l.xSeenAt, review: l.review, insiders: l.insiders,
       rug: l.rug, xSignals: l.xSignals });
     const clone = l.clone && l.ca.status !== 'X' ? l.clone : null;

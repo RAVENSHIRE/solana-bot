@@ -56,6 +56,7 @@ test('Claude review: one low-effort structured request with fallbacks; bounded p
   reply = { stop_reason: 'refusal', parsed_output: null };
   assert.equal(await r.review(input, NOW), null);
   assert.equal(r.available(NOW), false, 'two requests per hour in this test'); assert.equal(await r.review(input, NOW), null); assert.equal(calls.length, 2);
+  assert.equal(r.status(), 'Claude review: 1 done, 1 failed (refusal), 2/2 this hour');
   assert.equal(r.available(NOW + 3_600_001), true);
   const failing = new LaunchReviewer('k', { beta: { messages: { parse: async () => { throw new Error('offline'); } } } } as never);
   assert.equal(await failing.review(input, NOW), null);

@@ -59,6 +59,7 @@ export function reviewPrompt(i: ReviewInput, now: number): string {
 export class LaunchReviewer {
   private readonly client: Anthropic;
   private readonly used: number[] = [];
+  private readonly stats = { sent: 0, ok: 0, failed: 0, lastError: null as string | null };
   constructor(apiKey: string, client?: Anthropic, private readonly maxPerHour: number = REVIEW.maxPerHour) {
     this.client = client ?? new Anthropic({ apiKey, timeout: REVIEW.timeoutMs, maxRetries: 1 });
   }
@@ -69,10 +70,16 @@ export class LaunchReviewer {
     return this.used.length < this.maxPerHour;
   }
 
+  /** For the dashboard: reviews sent, answered, failed, and the last failure. */
+  status(): string {
+    const s = this.stats;
+    return `Claude review: ${s.ok} done${s.failed ? `, ${s.failed} failed (${s.lastError})` : ''}, ${this.used.length}/${this.maxPerHour} this hour`;
+  }
+
   /** Null on any failure, refusal or cut-off answer: a missing review never blocks or boosts a launch. */
   async review(input: ReviewInput, now = Date.now()): Promise<LaunchReview | null> {
     if (!this.available(now)) return null;
-    this.used.push(now);
+    this.used.push(now); this.stats.sent++;
     try {
       const response = await this.client.beta.messages.parse({
         model: REVIEW_MODEL, max_tokens: 4_000, system: SYSTEM,
@@ -81,11 +88,19 @@ export class LaunchReviewer {
         output_config: { effort: 'low', format: betaZodOutputFormat(Verdict) },
         betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default',
       });
-      if (response.stop_reason === 'refusal' || response.stop_reason === 'max_tokens' || !response.parsed_output) return null;
+      if (response.stop_reason === 'refusal' || response.stop_reason === 'max_tokens' || !response.parsed_output) {
+        this.stats.failed++; this.stats.lastError = response.stop_reason ?? 'no answer'; return null;
+      }
       const out = response.parsed_output;
+      this.stats.ok++;
       return { ...out, idea: Math.max(0, Math.min(10, out.idea)), professionalism: Math.max(0, Math.min(10, out.professionalism)),
         scamSignals: out.scamSignals.slice(0, 5).map(s => clip(s, 160)), summary: clip(out.summary, 300), model: response.model, at: now };
-    } catch { return null; }
+    } catch (error) {
+      this.stats.failed++;
+      this.stats.lastError = error instanceof Anthropic.AuthenticationError ? 'API key rejected' : error instanceof Anthropic.RateLimitError ? 'rate limited'
+        : error instanceof Anthropic.APIConnectionError ? 'offline' : error instanceof Anthropic.APIError ? `API ${error.status}` : 'failed';
+      return null;
+    }
   }
 }
 

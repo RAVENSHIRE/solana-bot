@@ -94,11 +94,14 @@ export async function readInsiders(rpc: Rpc, mint: string, creator: string | nul
   if (!create) return null;
   const early = sigs.filter(s => !s.err && s.slot <= create.slot + RISK.insiderSlots).slice(-RISK.maxEarlyTxs);
   const held = new Map<string, bigint>();
+  // The curve's own token account receives the supply at creation (pump.fun CreateV2 / Token-2022 included): not an insider.
+  const curve = bondingCurveAddress(mint);
   for (const s of early) {
     const res = await rpc.execute('risk:tx', c => rawRequest(c)._rpcRequest('getTransaction', [s.signature, { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }]));
-    const tx = res.result as RawTx | null;
-    if (!tx) continue;
-    for (const [owner, d] of tokenDeltas(tx, mint)) held.set(owner, (held.get(owner) ?? 0n) + d);
+    const tx = (res.error ? null : res.result) as RawTx | null;
+    // Without the creation itself the insiders are unknown, never "0 %" (an RPC rate limit is retried by the radar).
+    if (!tx) { if (s.signature === createSignature) return null; continue; }
+    for (const [owner, d] of tokenDeltas(tx, mint)) if (owner !== curve) held.set(owner, (held.get(owner) ?? 0n) + d);
   }
   const ranked = [...held.entries()].filter(([, v]) => v > 0n).sort((a, b) => (b[1] > a[1] ? 1 : b[1] < a[1] ? -1 : 0));
   const creatorRaw = creator ? held.get(creator) ?? 0n : 0n;

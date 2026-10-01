@@ -68,13 +68,14 @@ export function crashCheck(c: Candidate): CrashSignal {
  *   higher score — the runners that graduate before the curve window ends.
  */
 export function launchEntryCheck(c: Candidate, l: { score: number; at: number; ca?: { status: string; detail: string }; rug?: string | null;
-  insiders?: { insiderPct: number; detail: string } | null; reach?: { followers: number | null; bestViews: number | null } | null }, now: number): CrashSignal {
+  insiders?: { insiderPct: number; detail: string } | null; reach?: { followers: number | null; bestViews: number | null; own?: boolean } | null }, now: number): CrashSignal {
   const r = LAUNCH_ENTRY, g = r.migrated, m = c.metrics, age = (now - l.at) / 60_000;
   const confirmed = l.ca?.status === 'X' || l.ca?.status === 'WEBSITE', minAge = confirmed ? r.minAgeConfirmedMin : r.minAgeMin;
-  const reachOk = (l.reach?.followers ?? 0) >= g.minFollowers || (l.reach?.bestViews ?? 0) >= g.minBestViews;
+  // Only the project's own audience counts: a linked celebrity post is narrative, not reach.
+  const reachOk = l.reach?.own !== false && ((l.reach?.followers ?? 0) >= g.minFollowers || (l.reach?.bestViews ?? 0) >= g.minBestViews);
   const migrated = m.migration !== 'BONDING_CURVE' && age <= g.maxAgeMin && (m.marketCapUsd ?? 0) > r.maxMarketCapUsd;
   const safety = (key: string): GateResult => { const x = c.gates.find(y => y.key === key); return x ? { ...x, blocking: true } : { key, label: key, status: 'UNKNOWN', actual: 'not evaluated', required: 'PASS', blocking: true }; };
-  const reachText = `${l.reach?.followers ?? '?'} followers · best post ${l.reach?.bestViews ?? '?'} views`;
+  const reachText = l.reach?.own === false ? 'narrative only (links someone else\'s account)' : `${l.reach?.followers ?? '?'} followers · best post ${l.reach?.bestViews ?? '?'} views`;
   const checks: GateResult[] = [
     check('launchScore', 'Launch quality (X, website, CA, reach, review)', l.score, v => v >= (migrated ? g.minScore : r.minScore), String(l.score), `≥ ${migrated ? g.minScore : r.minScore}`),
     check('launchRug', 'Rug checks (X account, rug history, Claude review)', l.rug ? 0 : 1, v => v === 1, l.rug ?? 'clean', 'no rug sign'),

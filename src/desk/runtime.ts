@@ -111,10 +111,10 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
     const sender = new TransactionSender(rpc, logger, { confirmTimeoutMs: cfg.execution.confirmTimeoutMs, pollIntervalMs: 1500, rebroadcastIntervalMs: 2000 });
     const engines = {
       // TEST needs only an address to build and simulate; without Phantom it uses the public key from .env, never a secret.
-      PAPER: await DeskEngine.create({ ...shared, launches, xfeed, aiReview: !!reviewer, notify: alerts.notify, mode: 'PAPER', sender: null,
+      PAPER: await DeskEngine.create({ ...shared, launches, xfeed, aiReview: reviewer ? () => reviewer.status() : null, notify: alerts.notify, mode: 'PAPER', sender: null,
         wallet: () => context.wallet('PAPER') ?? (paperAddress ? { owner: paperAddress, signer: null } : null) }),
       // LOCAL_KEY: signed in this process and independent of the browser session; PHANTOM: the browser session signs.
-      LIVE: await DeskEngine.create({ ...shared, launches, xfeed, aiReview: !!reviewer, notify: alerts.notify, mode: 'LIVE', sender, signerKind: live.signer, liveMaxEntries: live.maxEntries,
+      LIVE: await DeskEngine.create({ ...shared, launches, xfeed, aiReview: reviewer ? () => reviewer.status() : null, notify: alerts.notify, mode: 'LIVE', sender, signerKind: live.signer, liveMaxEntries: live.maxEntries,
         ...(localSigner ? { authorized: () => true, wallet: () => ({ owner: localSigner.publicKey, signer: localSigner }) }
           : { wallet: () => context.wallet('LIVE') }) }),
     };
