@@ -97,7 +97,8 @@ export class LaunchReviewer {
         scamSignals: out.scamSignals.slice(0, 5).map(s => clip(s, 160)), summary: clip(out.summary, 300), model: response.model, at: now };
     } catch (error) {
       this.stats.failed++;
-      this.stats.lastError = error instanceof Anthropic.AuthenticationError ? 'API key rejected' : error instanceof Anthropic.RateLimitError ? 'rate limited'
+      this.stats.lastError = /credit balance is too low/i.test((error as Error).message ?? '') ? 'no API credits — add credits under Plans & Billing in the Anthropic console'
+        : error instanceof Anthropic.AuthenticationError ? 'API key rejected' : error instanceof Anthropic.RateLimitError ? 'rate limited'
         : error instanceof Anthropic.APIConnectionError ? 'offline' : error instanceof Anthropic.APIError ? `API ${error.status}` : 'failed';
       return null;
     }

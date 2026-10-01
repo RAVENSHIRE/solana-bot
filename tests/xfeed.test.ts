@@ -34,6 +34,9 @@ test('X feed: a rate limit waits for the window to reset; a bad token is reporte
   assert.deepEqual(await limited.poll(NOW + XFEED.pollMs), [], 'still waiting');
   const bad = new XFeed('tok', (async () => new Response('', { status: 403 })) as unknown as typeof fetch);
   await bad.poll(NOW); assert.equal(bad.status().lastError, 'X API HTTP 403 (token invalid or plan without search)');
+  assert.equal(bad.status().nextAllowedAt, NOW + 15 * 60_000, 'retried every 15 minutes, not every 30 s');
+  const unpaid = new XFeed('tok', (async () => new Response('{"title":"CreditsDepleted"}', { status: 402 })) as unknown as typeof fetch);
+  await unpaid.poll(NOW); assert.match(unpaid.status().lastError!, /^X API HTTP 402: payment required/);
   assert.deepEqual(postMints('new coin pump.fun/coin/' + MEME, []), [MEME]);
 });
 
@@ -60,5 +63,8 @@ test('Claude review: one low-effort structured request with fallbacks; bounded p
   assert.equal(r.available(NOW + 3_600_001), true);
   const failing = new LaunchReviewer('k', { beta: { messages: { parse: async () => { throw new Error('offline'); } } } } as never);
   assert.equal(await failing.review(input, NOW), null);
+  const broke = new LaunchReviewer('k', { beta: { messages: { parse: async () => { throw new Error('400 Your credit balance is too low to access the Anthropic API.'); } } } } as never);
+  await broke.review(input, NOW);
+  assert.match(broke.status(), /1 failed \(no API credits — add credits under Plans & Billing/);
   assert.match(reviewPrompt({ ...input, x: null, website: null }, NOW), /Website: none\nX: none$/);
 });

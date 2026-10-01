@@ -61,7 +61,13 @@ export class XFeed {
         this.state.lastError = 'X API rate limit; waiting for the window to reset';
         return [];
       }
-      if (!res.ok) { this.state.lastError = `X API HTTP ${res.status}${res.status === 401 || res.status === 403 ? ' (token invalid or plan without search)' : ''}`; return []; }
+      if (!res.ok) {
+        // 402: the X developer account has no paid search access or credits; 401/403: token or plan. Retried every 15 min.
+        this.state.lastError = res.status === 402 ? 'X API HTTP 402: payment required — this X developer account has no search credits or paid plan'
+          : `X API HTTP ${res.status}${res.status === 401 || res.status === 403 ? ' (token invalid or plan without search)' : ''}`;
+        if ([401, 402, 403].includes(res.status)) this.state.nextAllowedAt = now + 15 * 60_000;
+        return [];
+      }
       const body = Search.safeParse(await res.json());
       if (!body.success) { this.state.lastError = 'X API answered in an unexpected format'; return []; }
       this.state.lastError = null; this.state.nextAllowedAt = null; this.state.lastPollAt = now;

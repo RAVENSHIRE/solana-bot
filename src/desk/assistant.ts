@@ -107,6 +107,7 @@ export function parseChat(input: unknown): ChatTurn[] {
 export function assistantErrorCode(error: unknown): string {
   if (error instanceof Anthropic.AuthenticationError || error instanceof Anthropic.PermissionDeniedError) return 'ASSISTANT_AUTH';
   if (error instanceof Anthropic.RateLimitError) return 'ASSISTANT_RATE_LIMITED';
+  if (/credit balance is too low/i.test((error as Error)?.message ?? '')) return 'ASSISTANT_NO_CREDITS';
   if (error instanceof Anthropic.BadRequestError) return 'ASSISTANT_BAD_REQUEST';
   if (error instanceof Anthropic.APIConnectionError) return 'ASSISTANT_OFFLINE';
   if (error instanceof Anthropic.APIError) return 'ASSISTANT_UNAVAILABLE';

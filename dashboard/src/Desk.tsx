@@ -26,6 +26,7 @@ const EXPLAIN: Record<string, string> = {
   WATCH_UNAVAILABLE: 'The watch starts with the desk; check the desk error above.', WATCH_LIMIT: 'At most 50 watched tokens.',
   ASSISTANT_NOT_CONFIGURED: 'Add ANTHROPIC_API_KEY to .env and restart the dashboard.', ASSISTANT_BUSY: 'Claude is still answering the previous message.',
   ASSISTANT_AUTH: 'Claude rejected the API key: check ANTHROPIC_API_KEY in .env.', ASSISTANT_RATE_LIMITED: 'Claude is rate-limited right now; try again in a minute.',
+  ASSISTANT_NO_CREDITS: 'Your Anthropic API account has no credits: add credits under Plans & Billing in the Anthropic console.',
   ASSISTANT_OFFLINE: 'Claude could not be reached (network).', ASSISTANT_UNAVAILABLE: 'Claude is unavailable right now; try again shortly.',
   ASSISTANT_BAD_REQUEST: 'The chat was rejected; start a new chat.', INVALID_CHAT: 'The chat could not be sent; start a new chat.',
   HOLDINGS_UNAVAILABLE: 'The wallet\'s token accounts could not be read (RPC). Try again.',
