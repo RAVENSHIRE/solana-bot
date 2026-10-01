@@ -4,7 +4,9 @@
  * time halves. Shares the CRASH backtest's cache. Read-only.
  *
  *   npm run desk:golden -- [--env-dir .] [--hours 12] [--cache data-desk/backtest-cache] [--size 2] [--fixed-usd 0.02]
- *     [--gecko-ms 4000] [--max-pools N] [--cached-only] [--mints A,B] [--out golden.json]
+ *     [--source birdeye|gecko] [--gecko-ms 4000] [--max-pools N] [--min-volume 5000] [--cached-only] [--mints A,B] [--out golden.json]
+ *
+ * Candles come from Birdeye (BIRDEYE_API_KEY, one request per second) by default; --source gecko uses GeckoTerminal.
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -21,8 +23,7 @@ const fixedUsd = Number(arg('fixed-usd') ?? 0.02);
 const maxPools = Number(arg('max-pools') ?? Infinity);
 const minVolume24hUsd = Number(arg('min-volume') ?? 5_000);
 const MINUTE = 60_000;
-const { graduations, pools, candles } = backtestData({ cacheDir: path.resolve(arg('cache') ?? 'data-desk/backtest-cache'), hours,
-  geckoMs: Number(arg('gecko-ms') ?? 4_000), cachedOnly: process.argv.includes('--cached-only'), refreshPools: process.argv.includes('--refresh-pools') });
+const source = arg('source') ?? 'birdeye';
 
 // ------------------------------------------------------------------ grids
 
@@ -80,6 +81,10 @@ const row = (r: Result) => `n ${String(r.all.trades).padStart(3)} · win ${r.all
 
 async function main(): Promise<void> {
   const env = await deskEnvironment(path.resolve(arg('env-dir') ?? '.'));
+  if (source === 'birdeye' && !env.BIRDEYE_API_KEY) throw new Error('BIRDEYE_API_KEY not set in .env (or run with --source gecko)');
+  const { graduations, pools, candles, birdeyeCalls } = backtestData({ cacheDir: path.resolve(arg('cache') ?? 'data-desk/backtest-cache'), hours,
+    geckoMs: Number(arg('gecko-ms') ?? 4_000), cachedOnly: process.argv.includes('--cached-only'), refreshPools: process.argv.includes('--refresh-pools'),
+    birdeyeKey: source === 'birdeye' ? env.BIRDEYE_API_KEY : null });
   const endpoint = (env.RPC_ENDPOINTS ?? 'https://api.mainnet-beta.solana.com').split(',').map(s => s.trim()).find(s => /^https?:\/\//.test(s)) ?? 'https://api.mainnet-beta.solana.com';
   const grads = await graduations(new Connection(endpoint, 'confirmed'));
   const watch = (arg('mints') ?? '').split(',').map(m => m.trim()).filter(Boolean);
@@ -100,6 +105,7 @@ async function main(): Promise<void> {
     if (s) series.push(s);
     if ((i + 1) % 50 === 0) console.log(`  candles ${i + 1}/${active.length}`);
   }
+  if (source === 'birdeye') console.log(`candles: Birdeye token prices (USD), ${birdeyeCalls()} requests this run`);
   const split = [...series].sort((a, b) => a.createdAt - b.createdAt)[Math.floor(series.length / 2)]?.createdAt ?? 0;
   const costs: Costs = { sizeUsd, venueFeePct: 0.3, fixedUsd, stopSlipPct: 3 };
   console.log(`\n${series.length} pools with candles · ${new Date(Math.min(...series.map(s => s.createdAt))).toISOString()} → ${new Date(Math.max(...series.map(s => s.createdAt))).toISOString()}` +

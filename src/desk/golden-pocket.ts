@@ -1,3 +1,4 @@
+import { PublicKey, type Connection } from '@solana/web3.js';
 import type { Candle } from './replay';
 
 /**
@@ -157,4 +158,158 @@ function onlyUpStep(s: PocketState, u: OnlyUpRules, bar: Candle): PocketEntry | 
   }
   s.upHigh = Math.max(s.upHigh!, bar.h);
   return null;
+}
+
+// ------------------------------------------------------------------ live tracker
+
+
+export const PUMP_AMM_PROGRAM = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+const PUMP_PROGRAM_ID = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+/** pump.fun's PUMP token: some launches graduate into a PUMP-quoted pool (FIX6900, 6bQ4…SmvC). */
+export const PUMP_QUOTE_MINT = 'pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn';
+const QUOTE_DECIMALS: Record<string, number> = { [WSOL_MINT]: 9, [PUMP_QUOTE_MINT]: 6, EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: 6 };
+/** pump.fun tokens: 1B supply, 6 decimals. */
+const PUMP_SUPPLY = 1e9, BASE_DECIMALS = 6;
+
+/**
+ * The PumpSwap pool a pump.fun graduation creates: index 0, created by the pump.fun pool-authority of the mint
+ * (checked on chain on 1 Oct: 66hK2 → 827V45…, FIX6900 → 4qbokk…).
+ */
+export function pumpSwapPool(mint: string, quoteMint: string): string {
+  const m = new PublicKey(mint);
+  const [authority] = PublicKey.findProgramAddressSync([Buffer.from('pool-authority'), m.toBuffer()], new PublicKey(PUMP_PROGRAM_ID));
+  return PublicKey.findProgramAddressSync([Buffer.from('pool'), Buffer.alloc(2), authority.toBuffer(), m.toBuffer(), new PublicKey(quoteMint).toBuffer()],
+    new PublicKey(PUMP_AMM_PROGRAM))[0].toBase58();
+}
+/** PumpSwap Pool: base mint @43, quote mint @75, base vault @139, quote vault @171. */
+export function decodePumpSwapPool(data: Buffer): { baseMint: string; quoteMint: string; baseVault: string; quoteVault: string } | null {
+  if (data.length < 203) return null;
+  const key = (o: number) => new PublicKey(data.subarray(o, o + 32)).toBase58();
+  return { baseMint: key(43), quoteMint: key(75), baseVault: key(139), quoteVault: key(171) };
+}
+/** SPL token account (Token and Token-2022 alike): amount @64. */
+const tokenAmount = (data: Buffer | null | undefined) => data && data.length >= 72 ? Number(data.readBigUInt64LE(64)) : null;
+
+export const GOLDEN = Object.freeze({
+  pollMs: 4_000,
+  /** Pools and curves watched at once; the oldest finished ones go first. */
+  maxTracked: 400,
+  /** A pool whose address cannot be read is given up after this many polls. */
+  maxResolveTries: 5,
+  /** Finished patterns stay listed this long. */
+  keepMs: 30 * 60_000,
+});
+
+export type GoldenStage = 'CURVE' | 'AMM';
+export interface GoldenWatch {
+  mint: string; symbol: string | null; stage: GoldenStage; startAt: number; state: PocketState;
+  pool: string | null; vaults: { base: string; quote: string; quoteMint: string } | null; resolveTries: number;
+  lastUsd: number | null; lastSampleAt: number | null; peakUsd: number | null;
+}
+export interface GoldenSignal { mint: string; symbol: string | null; stage: GoldenStage; entry: PocketEntry; at: number; pool: string | null }
+type Rpc = { execute<T>(label: string, fn: (c: Connection) => Promise<T>): Promise<T> };
+
+/**
+ * Watches every fresh graduation's PumpSwap pool (both reserves read in one call per 50 pools every few seconds)
+ * and the opening screen's strong curves (their samples are passed in), runs each through the pattern, and reports
+ * each fill once. Held tokens stay sampled for the exits. Never throws.
+ */
+export class GoldenTracker {
+  private readonly watches = new Map<string, GoldenWatch>();
+  private readonly held = new Set<string>();
+  private pending: GoldenSignal[] = [];
+  constructor(private readonly rpc: Rpc, private readonly rules: Record<GoldenStage, PocketRules>) {}
+
+  /** Fresh graduations start being watched from their graduation time. */
+  watchGraduations(list: Array<{ mint: string; at: number; symbol?: string | null }>, now: number): void {
+    for (const g of list) {
+      const known = this.watches.get(g.mint);
+      if (known?.stage === 'AMM' || now - g.at > this.rules.AMM.maxPatternMin * 60_000) continue;
+      this.watches.set(g.mint, { mint: g.mint, symbol: g.symbol ?? known?.symbol ?? null, stage: 'AMM', startAt: g.at, state: pocketState(g.at), pool: null, vaults: null,
+        resolveTries: 0, lastUsd: null, lastSampleAt: null, peakUsd: null });
+    }
+    this.prune(now);
+  }
+  /** A curve market-cap sample from the opening screen (strong opens only). */
+  curveSample(c: { mint: string; symbol: string; at: number }, sampleAt: number, usd: number): void {
+    let w = this.watches.get(c.mint);
+    if (w?.stage === 'AMM') return;
+    if (!w) { w = { mint: c.mint, symbol: c.symbol, stage: 'CURVE', startAt: c.at, state: pocketState(c.at), pool: null, vaults: null, resolveTries: 0, lastUsd: null, lastSampleAt: null, peakUsd: null }; this.watches.set(c.mint, w); }
+    this.sample(w, sampleAt, usd);
+  }
+  /** Mints the desk holds: sampled until sold, whatever their pattern did. */
+  hold(mints: string[]): void { this.held.clear(); for (const m of mints) this.held.add(m); }
+
+  private sample(w: GoldenWatch, at: number, usd: number): void {
+    w.lastUsd = usd; w.lastSampleAt = at; w.peakUsd = Math.max(w.peakUsd ?? 0, usd);
+    const entry = pocketStep(w.state, this.rules[w.stage], { t: at, o: usd, h: usd, l: usd, c: usd });
+    if (entry) this.pending.push({ mint: w.mint, symbol: w.symbol, stage: w.stage, entry, at, pool: w.pool });
+  }
+  private active(w: GoldenWatch): boolean {
+    return this.held.has(w.mint) || w.state.phase === 'IMPULSE' || w.state.phase === 'DIP' || w.state.phase === 'BROKEN_OUT';
+  }
+  private prune(now: number): void {
+    for (const [mint, w] of this.watches) {
+      const end = w.startAt + this.rules[w.stage].maxPatternMin * 60_000;
+      if (!this.held.has(mint) && !this.active(w) && now - Math.min(end, w.lastSampleAt ?? end) > GOLDEN.keepMs) this.watches.delete(mint);
+      else if (!this.held.has(mint) && now > end + GOLDEN.keepMs) this.watches.delete(mint);
+    }
+    if (this.watches.size > GOLDEN.maxTracked) {
+      const drop = [...this.watches.values()].filter(w => !this.held.has(w.mint)).sort((a, b) => Number(this.active(a)) - Number(this.active(b)) || a.startAt - b.startAt)
+        .slice(0, this.watches.size - GOLDEN.maxTracked);
+      for (const w of drop) this.watches.delete(w.mint);
+    }
+  }
+
+  /** Reads every watched pool; returns the fills since the last poll (curve fills included). */
+  async poll(now: number, quoteUsd: (quoteMint: string) => number | null): Promise<GoldenSignal[]> {
+    const amm = [...this.watches.values()].filter(w => w.stage === 'AMM' && this.active(w));
+    // New pools: the canonical SOL- and PUMP-quoted addresses, whichever exists.
+    const unresolved = amm.filter(w => !w.vaults).slice(0, 50);
+    if (unresolved.length) {
+      const keys = unresolved.flatMap(w => [pumpSwapPool(w.mint, WSOL_MINT), pumpSwapPool(w.mint, PUMP_QUOTE_MINT)]);
+      try {
+        const infos = await this.rpc.execute('golden:pools', c => c.getMultipleAccountsInfo(keys.map(k => new PublicKey(k)), 'confirmed'));
+        unresolved.forEach((w, i) => {
+          w.resolveTries++;
+          for (const j of [0, 1]) {
+            const info = infos[2 * i + j];
+            const pool = info && info.owner.toBase58() === PUMP_AMM_PROGRAM ? decodePumpSwapPool(Buffer.from(info.data)) : null;
+            if (pool && pool.baseMint === w.mint) { w.pool = keys[2 * i + j]!; w.vaults = { base: pool.baseVault, quote: pool.quoteVault, quoteMint: pool.quoteMint }; break; }
+          }
+          if (!w.vaults && w.resolveTries >= GOLDEN.maxResolveTries) { w.state.phase = 'FAILED'; w.state.detail = 'no PumpSwap pool found'; }
+        });
+      } catch { /* RPC outage: retried next poll */ }
+    }
+    const ready = amm.filter(w => w.vaults && QUOTE_DECIMALS[w.vaults.quoteMint] !== undefined && quoteUsd(w.vaults.quoteMint));
+    for (let i = 0; i < ready.length; i += 50) {
+      const batch = ready.slice(i, i + 50);
+      let infos: Array<{ data: Buffer } | null>;
+      try {
+        infos = await this.rpc.execute('golden:reserves', c => c.getMultipleAccountsInfo(batch.flatMap(w => [new PublicKey(w.vaults!.base), new PublicKey(w.vaults!.quote)]), 'confirmed')) as Array<{ data: Buffer } | null>;
+      } catch { continue; }
+      batch.forEach((w, j) => {
+        const base = tokenAmount(infos[2 * j]?.data ? Buffer.from(infos[2 * j]!.data) : null), quote = tokenAmount(infos[2 * j + 1]?.data ? Buffer.from(infos[2 * j + 1]!.data) : null);
+        const q = w.vaults!.quoteMint, usd = quoteUsd(q);
+        if (!base || !quote || !usd) return;
+        this.sample(w, now, (quote / 10 ** QUOTE_DECIMALS[q]!) / (base / 10 ** BASE_DECIMALS) * PUMP_SUPPLY * usd);
+      });
+    }
+    this.prune(now);
+    const out = this.pending; this.pending = [];
+    return out;
+  }
+
+  get(mint: string): GoldenWatch | null { return this.watches.get(mint) ?? null; }
+  /** Patterns in progress and fills, most advanced first. */
+  list(): GoldenWatch[] {
+    const rank: Record<PocketPhase, number> = { ENTRY: 0, BROKEN_OUT: 1, DIP: 2, IMPULSE: 3, EXPIRED: 4, FAILED: 5 };
+    return [...this.watches.values()].filter(w => w.lastSampleAt !== null).sort((a, b) => rank[a.state.phase] - rank[b.state.phase] || b.startAt - a.startAt);
+  }
+  counts(): Record<PocketPhase, number> & { watched: number } {
+    const out = { IMPULSE: 0, DIP: 0, BROKEN_OUT: 0, ENTRY: 0, FAILED: 0, EXPIRED: 0, watched: this.watches.size };
+    for (const w of this.watches.values()) out[w.state.phase]++;
+    return out;
+  }
 }

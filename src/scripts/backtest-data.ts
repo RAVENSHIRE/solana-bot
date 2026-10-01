@@ -15,6 +15,8 @@ export interface BacktestDataOptions {
   geckoMs: number;
   /** Analyse only what is already downloaded (no candle requests). */
   cachedOnly: boolean; refreshPools: boolean;
+  /** Minute candles from Birdeye (token price in USD, 1 request per second) instead of GeckoTerminal (pool, shared with the desk). */
+  birdeyeKey?: string | null;
 }
 export interface PoolInfo { mint: string; symbol: string | null; pool: string; dex: string; createdAt: number; priceUsd: number; liquidityUsd: number; marketCapUsd: number; volume24hUsd: number }
 type DexPair = { pairAddress: string; dexId: string; baseToken: { address: string; symbol?: string }; priceUsd?: string; liquidity?: { usd?: number };
@@ -34,8 +36,29 @@ async function retry<T>(label: string, fn: () => Promise<T>): Promise<T> {
 }
 
 export function backtestData(o: BacktestDataOptions) {
-  let lastGecko = 0;
+  let lastGecko = 0, lastBirdeye = 0, birdeyeCalls = 0;
+  /** Birdeye token candles (USD, the most liquid market: the curve until graduation, then the pool). */
+  const birdeye = async (p: PoolInfo, spanMin: number, latest: boolean): Promise<VCandle[]> => {
+    const now = Math.floor(Date.now() / 600_000) * 600_000;
+    const to = Math.floor((latest ? now : Math.min(p.createdAt + spanMin * MINUTE, now)) / 1000), from = Math.max(Math.floor(p.createdAt / 1000) - 60, to - 999 * 60);
+    const file = path.join(o.cacheDir, 'birdeye', `${p.mint}-${from}-${to}.json`);
+    let list = await readJson<Array<{ unixTime: number; o: number; h: number; l: number; c: number; v: number }>>(file);
+    if (!list && o.cachedOnly) return [];
+    for (let attempt = 0; !list; attempt++) {
+      await sleep(Math.max(0, lastBirdeye + 1_100 - Date.now())); lastBirdeye = Date.now(); birdeyeCalls++;
+      const res = await fetch(`https://public-api.birdeye.so/defi/ohlcv?address=${p.mint}&type=1m&currency=usd&time_from=${from}&time_to=${to}`,
+        { headers: { 'X-API-KEY': o.birdeyeKey!, 'x-chain': 'solana', accept: 'application/json' } }).catch(() => null);
+      const body = res?.ok ? await res.json().catch(() => null) as { success?: boolean; data?: { items?: typeof list } } | null : null;
+      if (body?.success) list = body.data?.items ?? [];
+      else if (attempt >= 8) throw new Error(`birdeye: HTTP ${res?.status ?? 'network error'} for ${p.mint}`);
+      else await sleep(res?.status === 429 ? 2_000 * (attempt + 1) : 3_000);
+    }
+    await writeJson(file, list);
+    return list.map(k => ({ t: k.unixTime * 1000, o: k.o, h: k.h, l: k.l, c: k.c, v: k.v * (k.o + k.c) / 2 })).filter(k => k.t >= p.createdAt - MINUTE).sort((a, b) => a.t - b.t);
+  };
   return {
+    /** Requests sent to Birdeye in this run (cached candles are free). */
+    birdeyeCalls: () => birdeyeCalls,
     /** Every graduation in the window, from the migration authority's signatures and each transaction's balances. */
     async graduations(rpc: Connection): Promise<Array<{ mint: string; at: number }>> {
       const file = path.join(o.cacheDir, 'graduations.json');
@@ -91,6 +114,7 @@ export function backtestData(o: BacktestDataOptions) {
 
     /** Minute candles from pool creation until every entry window and hold could have ended (or the latest ones). */
     async candles(p: PoolInfo, spanMin: number, latest = false): Promise<VCandle[]> {
+      if (o.birdeyeKey) return birdeye(p, spanMin, latest);
       // Rounded to 10 minutes, so reruns hit the same cache entries.
       const now = Math.floor(Date.now() / 600_000) * 600_000;
       const before = Math.floor((latest ? now : Math.min(p.createdAt + spanMin * MINUTE, now)) / 1000), limit = Math.min(1000, spanMin + 5);
