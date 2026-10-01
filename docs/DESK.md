@@ -173,14 +173,28 @@ The signal is the quality of the launch itself. Only a few of the ~50 pump.fun l
 
   Links to platforms and news sites don't count as a project website.
 
-- Clones are marked **CLONE** and never shortlisted: a later launch that copies an earlier one's X account, website or name (on the first live run KEN appeared 3× and ROPAD 2×).
-- From a score of 6 the launch is shortlisted: it appears under *Launch radar*, an alert with a FOMO link goes to your phone, and the token is analysed like any candidate.
+- It checks the **contract address** (CA) on the project's own pages. The metadata alone proves nothing: on 1 Oct the impersonator STASH (`Fx5E1…HQyJ`) copied @stashdfun and stashd.fun into its metadata, 14 h after the real token `3Bdwh…pump`, and scored 8. Now:
+  - the X profile page (`x.com/<handle>`, as served without login, no API key) and the website, including its own script bundles, are read for Solana addresses;
+  - **this mint written there** confirms the launch: +3 when the X account posted it, +2 when the website shows it;
+  - **another token's CA there and never this one** marks an **IMPERSONATOR**: score 0, never shortlisted or bought, and an alert if it was shortlisted before;
+  - a post by the account wins over a stale website;
+  - launches not confirmed yet are re-read every 30 s for 12 minutes (the X page) and every 2 minutes (the website), since projects post the CA after creation (Meme Industries 79 s, Potato within the first minutes).
+
+  | Confirmation | Points |
+  | --- | --- |
+  | X account posted this CA | +3 |
+  | Website shows this CA | +2 |
+  | X or website shows another CA | score 0 (IMPERSONATOR) |
+
+- Clones are marked **CLONE** and never shortlisted: a later launch that copies an earlier one's X account, website or name (on the first live run KEN appeared 3× and ROPAD 2×). If the project's own X account posts the clone's CA, the clone is the real token and the earlier "original" an impersonator.
+- From a score of 6 the launch is shortlisted: it appears under *Launch radar* with a **CA** column (✓ on X, ✓ on site, ✗ FAKE, not yet), an alert with a FOMO link goes to your phone, and the token is analysed like any candidate.
 
 **LAUNCH** (built-in strategy, ON in TEST, OFF in LIVE) buys a shortlisted launch:
 
 - **Entry** (all of these):
-  - 3–12 minutes after creation, the window in which Jupiter routes the bonding curve (it refuses tokens that are seconds old);
-  - market cap $8K–$40K;
+  - from 1 minute after creation when the project's X account or website shows this CA, from 3 minutes otherwise, never after 12 minutes. Jupiter quotes new curve tokens 3–12 s after creation (measured on 1 Oct), so the evidence sets the window, not routing;
+  - never an impersonator (X or website shows another CA);
+  - market cap $5K–$40K;
   - 5m volume ≥ $1K and ≥ 10 buys;
   - top-10 wallets ≤ 35 %, largest wallet ≤ 12 %, developer ≤ 10 % when known;
   - mint and freeze authority revoked;

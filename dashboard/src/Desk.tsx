@@ -633,21 +633,25 @@ function Watch({ t, d }: { t: TradingSession; d: DeskStatus }) {
 
 /**
  * Launch radar: fresh pump.fun launches with their own X account and a live website (the @glabuz Meme Industries
- * pattern), shortlisted seconds after creation. The LAUNCH strategy buys the best of them 3–12 minutes in; each find
- * is also an alert with a FOMO link, to buy by hand.
+ * pattern), shortlisted seconds after creation. The X page and website are read for the contract address: this CA
+ * there confirms the launch, another CA there exposes an impersonator. The LAUNCH strategy buys the best of them 1–12
+ * minutes in; each find is also an alert with a FOMO link, to buy by hand.
  */
 function LaunchRadar({ d }: { d: DeskStatus }) {
   const list = d.launches ?? [], mins = (at: number) => `${Math.max(0, Math.round((Date.now() - at) / 60_000))} min`;
+  const ca = (c: NonNullable<DeskStatus['launches']>[number]['ca']) => !c ? '--' : c.status === 'X' ? '✓ on X' : c.status === 'WEBSITE' ? '✓ on site'
+    : c.status === 'IMPERSONATOR' ? '✗ FAKE' : 'not yet';
   return <section className="panel desk-card" aria-label="Launch radar">
     <div className="card-head"><h3>Launch radar · new pump.fun launches with their own X account and a website</h3>
-      <small>About 50 launches a minute are read from the chain; few have both. LAUNCH buys 3–12 min after creation at $8K–$40K.</small></div>
-    <div className="wallet-table"><table><thead><tr><th>Token</th><th>Age</th><th>Score</th><th>Why</th><th>X</th><th>Website</th><th>Market cap</th><th>Status</th></tr></thead>
-      <tbody>{list.map(l => <tr key={l.mint} className={l.signal ? 'status-qualified' : ''}>
+      <small>About 50 launches a minute are read from the chain; few have both. Their X page and website are read for the CA: another CA there marks an impersonator.
+        LAUNCH buys at $5K–$40K, from 1 min once the project shows this CA (3 min otherwise), until 12 min.</small></div>
+    <div className="wallet-table"><table><thead><tr><th>Token</th><th>Age</th><th>Score</th><th>CA</th><th>Why</th><th>X</th><th>Website</th><th>Market cap</th><th>Status</th></tr></thead>
+      <tbody>{list.map(l => <tr key={l.mint} className={l.signal ? 'launch-ready' : l.ca?.status === 'IMPERSONATOR' ? 'launch-fake' : ''}>
         <td title={l.mint}><strong>{l.symbol}</strong> <Fomo mint={l.mint} /><br /><small>{l.name.slice(0, 40)}</small></td>
-        <td>{mins(l.at)}</td><td>{l.score}</td><td><small>{l.reasons.join(' · ')}</small></td>
+        <td>{mins(l.at)}</td><td>{l.score}</td><td title={l.ca?.detail}><small>{ca(l.ca)}</small></td><td><small>{l.reasons.join(' · ')}</small></td>
         <td>{l.x ? <a href={l.x} target="_blank" rel="noreferrer">X</a> : '--'}</td>
         <td>{l.website ? <a href={l.website} target="_blank" rel="noreferrer">{(() => { try { return new URL(l.website).hostname; } catch { return 'site'; } })()}</a> : '--'}</td>
         <td>{cap(l.marketCapUsd)}</td><td><small>{l.signal ? 'ENTRY-READY · ' : ''}{l.status}</small></td></tr>)}
-        {!list.length && <tr><td colSpan={8}>No launch with its own X account and a live website yet. The radar runs while TEST or LIVE scans.</td></tr>}</tbody></table></div>
+        {!list.length && <tr><td colSpan={9}>No launch with its own X account and a live website yet. The radar runs while TEST or LIVE scans.</td></tr>}</tbody></table></div>
   </section>;
 }

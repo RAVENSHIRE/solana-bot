@@ -46,7 +46,7 @@ const pairRaw = (patch: Record<string, unknown> = {}) => ({ chainId: 'solana', d
   info: { websites: [{ label: 'Website', url: 'https://alpha.example' }], socials: [{ type: 'twitter', url: 'https://x.com/alphaproj' }] }, ...patch });
 const pair = (patch: Record<string, unknown> = {}) => normalizeDexPairs([pairRaw(patch)], Date.now())[0]!;
 const found = (): Discovered => ({ mint: MINT, sources: ['top-boosts'], boostAmount: 100, description: 'Alpha', links: [], geckoPool: null });
-const site: WebsiteCheck = { url: 'https://alpha.example', status: 'AVAILABLE', httpStatus: 200, title: 'Alpha', description: null, xHandles: ['alphaproj'], detail: 'HTTP 200' };
+const site: WebsiteCheck = { url: 'https://alpha.example', status: 'AVAILABLE', httpStatus: 200, title: 'Alpha', description: null, xHandles: ['alphaproj'], detail: 'HTTP 200', addresses: [], claimed: [] };
 
 test('capital: planned $5.45 and $2.00 base entry are the defaults; reserve and drag stay the project values', () => {
   const c = deskCapital({});
@@ -879,13 +879,14 @@ test('a copycat (same ticker as an older token 3× bigger) is never entered: the
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-test('LAUNCH: a fresh pump.fun launch with its own X account and website is bought on the curve 3–12 min after creation, with alerts', async () => {
+test('LAUNCH: a fresh pump.fun launch with its own X account and website is bought on the curve 3–12 min after creation (CA not shown yet), with alerts', async () => {
   const curve = { dexId: 'pumpfun', liquidity: null, marketCap: 20_000, fdv: 20_000, pairCreatedAt: NOW - 5 * 60_000, priceChange: { m5: 12, h1: 40 } };
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-launch-')), { shared } = world(curve);
   try {
     const launch = { mint: MINT, name: 'Alpha', symbol: 'ABC', uri: 'https://meta/1', creator: null, at: Date.now() - 5 * 60_000, signature: 'S',
       meta: { description: 'Alpha does things on chain, every day.', twitter: 'https://x.com/alphaproj', website: 'https://alpha.example', telegram: null },
-      x: parseXLink('https://x.com/alphaproj'), site, score: 8, reasons: ['own X account @alphaproj', 'website alpha.example ("Alpha")', 'website links the same X account'], shortlistedAt: null };
+      x: parseXLink('https://x.com/alphaproj'), site, score: 8, reasons: ['own X account @alphaproj', 'website alpha.example ("Alpha")', 'website links the same X account'], shortlistedAt: null,
+      xPage: null, xCheckedAt: null, siteCheckedAt: null, ca: { status: 'UNCONFIRMED' as const, detail: 'CA not posted by @alphaproj yet' }, clone: null };
     const alerts: Array<{ title: string; body: string }> = [];
     const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }),
       launches: { poll: async () => [launch], recent: () => [launch] }, notify: async (title, body) => { alerts.push({ title, body }); } });
@@ -901,6 +902,52 @@ test('LAUNCH: a fresh pump.fun launch with its own X account and website is boug
     assert.equal(view.launches![0]!.status, 'held by LAUNCH'); assert.equal(view.launches![0]!.marketCapUsd, 20_000);
     const live = await DeskEngine.create({ ...shared, mode: 'LIVE', dir, sender: null, wallet: () => null });
     assert.equal(live.strategies.LAUNCH.enabled, false, 'LIVE starts LAUNCH off');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('LAUNCH: the project posting the CA on X allows an entry from 1 min; unconfirmed waits for 3 min; an exposed impersonator is never bought', async () => {
+  const curve = { dexId: 'pumpfun', liquidity: null, marketCap: 9_000, fdv: 9_000, pairCreatedAt: NOW - 90_000, priceChange: { m5: 12, h1: 40 } };
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-launch-ca-')), { shared } = world(curve);
+  try {
+    const launch = { mint: MINT, name: 'Pot Potato', symbol: 'ABC', uri: 'https://meta/1', creator: null, at: Date.now() - 90_000, signature: 'S',
+      meta: { description: null, twitter: 'https://x.com/alphaproj', website: 'https://alpha.example', telegram: null },
+      x: parseXLink('https://x.com/alphaproj'), site, score: 8, reasons: ['own X account @alphaproj', 'website alpha.example ("Alpha")', 'website links the same X account'],
+      shortlistedAt: null, xPage: null, xCheckedAt: null, siteCheckedAt: null, clone: null,
+      ca: { status: 'UNCONFIRMED' as 'UNCONFIRMED' | 'X' | 'IMPERSONATOR', detail: 'CA not posted by @alphaproj yet' } };
+    const alerts: string[] = [];
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }),
+      launches: { poll: async () => [], recent: () => [launch] }, notify: async title => { alerts.push(title); } });
+    engine.setStrategy('CRASH', false); engine.start(); await engine.pulse();
+    let view = engine.status({ connected: false, address: null }), c = view.candidates.find(x => x.mint === MINT)!;
+    assert.equal(view.positions.length, 0); assert.match(c.launch!.signal.summary, /^Minutes since launch: 1\.\d min \(3–12 min \(1 min once the CA is confirmed\)\)/);
+    // The radar's next X read finds the dev's post with this CA.
+    Object.assign(launch, { score: 11, ca: { status: 'X', detail: '@alphaproj posted this CA' } });
+    await engine.pulse();
+    view = engine.status({ connected: false, address: null }); c = view.candidates.find(x => x.mint === MINT)!;
+    assert.equal(view.positions.length, 1, c.launch!.signal.summary); assert.equal(view.positions[0]!.strategy, 'LAUNCH');
+    assert.ok(engine.events.list().some(e => /^LAUNCH radar: ABC @alphaproj posted this CA \(\d min old\) · score 11/.test(e.message)));
+    assert.ok(engine.events.list().some(e => /^LAUNCH entry selected: score 11 · 1\.\d min old · \$9,000 cap .* · @alphaproj posted this CA$/.test(e.message)));
+    assert.equal(view.launches![0]!.ca!.status, 'X');
+
+    const dir2 = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-launch-fake-'));
+    const fake = { ...launch, at: Date.now() - 2 * 60_000, score: 8, ca: { status: 'UNCONFIRMED' as const, detail: 'CA not posted by @alphaproj yet' } };
+    const other = await DeskEngine.create({ ...shared, mode: 'PAPER', dir: dir2, sender: null, wallet: () => ({ owner, signer: null }),
+      launches: { poll: async () => [], recent: () => [fake] }, notify: async title => { alerts.push(title); } });
+    other.setStrategy('CRASH', false);
+    Object.assign(fake, { score: 0, ca: { status: 'IMPERSONATOR', detail: 'IMPERSONATOR: @alphaproj shows CA 3Bdw…pump, not this token' } });
+    other.start(); await other.pulse();
+    assert.equal(other.status({ connected: false, address: null }).launches!.length, 0, 'an impersonator never reaches the shortlist');
+    // Shortlisted while unconfirmed (2 min old: waiting), exposed on a later read: reported once, never bought, not even after 3 min.
+    Object.assign(fake, { score: 8, ca: { status: 'UNCONFIRMED', detail: '' } }); await other.pulse();
+    assert.equal(other.status({ connected: false, address: null }).positions.length, 0);
+    Object.assign(fake, { score: 0, at: Date.now() - 5 * 60_000, ca: { status: 'IMPERSONATOR', detail: 'IMPERSONATOR: @alphaproj shows CA 3Bdw…pump, not this token' } });
+    await other.pulse(); await other.pulse();
+    const v2 = other.status({ connected: false, address: null }), c2 = v2.candidates.find(x => x.mint === MINT)!;
+    assert.equal(v2.positions.length, 0); assert.equal(c2.launch!.signal.signal, false);
+    assert.equal(c2.launch!.signal.checks.find(g => g.key === 'launchCa')!.status, 'FAIL');
+    assert.equal(other.events.list().filter(e => /^LAUNCH radar: ABC IMPERSONATOR: @alphaproj shows CA 3Bdw…pump, not this token — never bought$/.test(e.message)).length, 1);
+    assert.equal(alerts.filter(a => a === 'LAUNCH radar: ABC is an IMPERSONATOR').length, 1);
+    await fs.rm(dir2, { recursive: true, force: true });
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 

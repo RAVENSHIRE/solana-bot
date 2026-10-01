@@ -66,7 +66,9 @@ export interface Candidate {
   /** CRASH entry checks for this scan; null until computed. */
   crash: CrashSignal | null;
   /** Launch radar: why this fresh pump.fun launch was shortlisted, and the LAUNCH entry checks. */
-  launch?: { score: number; reasons: string[]; x: string | null; website: string | null; launchedAt: number; signal: CrashSignal };
+  launch?: { score: number; reasons: string[]; x: string | null; website: string | null; launchedAt: number; signal: CrashSignal;
+    /** X: the project's X account posted this CA; WEBSITE: its site shows it; IMPERSONATOR: either shows another CA. */
+    ca?: { status: 'X' | 'WEBSITE' | 'IMPERSONATOR' | 'UNCONFIRMED'; detail: string } };
   /** Custom strategies' entry checks, by strategy id (enabled strategies only). */
   rules?: Record<string, CrashSignal>;
   /** Largest holders and holder count; null until first read. */
@@ -163,7 +165,7 @@ export interface DeskStatus {
   operational?: import('./config').DeskOperational;
   /** Launch radar: recent shortlisted pump.fun launches (own X account + website). */
   launches?: Array<{ mint: string; symbol: string; name: string; at: number; score: number; reasons: string[]; x: string | null; website: string | null;
-    marketCapUsd: number | null; signal: boolean; status: string }>;
+    ca?: { status: 'X' | 'WEBSITE' | 'IMPERSONATOR' | 'UNCONFIRMED'; detail: string }; marketCapUsd: number | null; signal: boolean; status: string }>;
   /** Templates for a new custom strategy (RUNNER: the owner's own style). */
   presets?: Record<string, import('./custom').RuleSpecInput>;
   /** CONFIGURED: TEST is using WALLET_PUBLIC_KEY from .env because Phantom is not connected (address only, never a signer). */

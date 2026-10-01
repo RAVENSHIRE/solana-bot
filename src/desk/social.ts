@@ -1,5 +1,6 @@
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { PublicKey } from '@solana/web3.js';
 import { z } from 'zod';
 import type { Authenticity } from './types';
 
@@ -26,6 +27,42 @@ export function parseXLink(raw: string | null | undefined): XLink {
 export interface WebsiteCheck {
   url: string | null; status: 'AVAILABLE' | 'UNAVAILABLE' | 'BLOCKED' | 'NONE';
   httpStatus: number | null; title: string | null; description: string | null; xHandles: string[]; detail: string;
+  /** Every Solana address written on the page (and, if asked, its own scripts); `claimed`: the ones it presents as its token. */
+  addresses: string[]; claimed: string[];
+}
+
+// ---------------------------------------------------------------- Contract addresses on a page
+
+const B58 = '[1-9A-HJ-NP-Za-km-z]';
+const ADDRESS = new RegExp(`(?<![1-9A-HJ-NP-Za-km-z])${B58}{32,44}(?![1-9A-HJ-NP-Za-km-z])`, 'g');
+/** Links that name a token mint (not a pool): pump.fun, Solscan, Birdeye, GMGN, Jupiter, FOMO, Raydium swap. */
+const TOKEN_LINK = new RegExp(`(?:pump\\.fun/(?:coin/)?|solscan\\.io/token/|birdeye\\.so/token/|gmgn\\.ai/sol/token/(?:[A-Za-z0-9]+_)?|jup\\.ag/(?:tokens/|swap/[A-Za-z0-9]+-)|fomo\\.family/tokens/solana/|outputMint=|outputCurrency=)(${B58}{32,44})`, 'gi');
+/** "CA: …", "contract address …", ca:"…" (a site's own config), "mint: …". */
+const LABELLED = new RegExp(`(?:\\bca\\b|contract(?:[\\s_-]*address)?|token[\\s_-]*address|\\bmint\\b)["'\\s:=\\-–>]{0,6}(${B58}{32,44})`, 'gi');
+/** Launchpad vanity suffixes: pump.fun and letsbonk mints. */
+const VANITY = /(?:pump|bonk)$/;
+const NOT_A_TOKEN = new Set(['So11111111111111111111111111111111111111112', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB']);
+const isAddress = (s: string) => { try { return new PublicKey(s).toBase58() === s; } catch { return false; } };
+
+/** The Solana addresses in a page or post, and the ones it presents as a token's contract address. */
+export function pageAddresses(text: string): { addresses: string[]; claimed: string[] } {
+  const plain = text.replace(/<[^>]*>/g, ' ').replace(/&nbsp;|\\n/g, ' ');
+  const addresses = new Set<string>(), claimed = new Set<string>();
+  for (const t of [text, plain]) {
+    for (const m of t.matchAll(ADDRESS)) if (addresses.size < 2_000 && isAddress(m[0])) addresses.add(m[0]);
+    for (const re of [TOKEN_LINK, LABELLED]) for (const m of t.matchAll(re)) if (isAddress(m[1]!)) claimed.add(m[1]!);
+  }
+  for (const a of addresses) if (VANITY.test(a)) claimed.add(a);
+  for (const a of NOT_A_TOKEN) claimed.delete(a);
+  return { addresses: [...addresses], claimed: [...claimed].slice(0, 20) };
+}
+
+export type CaVerdict = 'CONFIRMED' | 'CONTRADICTED' | 'NONE';
+/** CONFIRMED: the page writes this mint. CONTRADICTED: it presents another token as its contract address and never this one. */
+export function caVerdict(mint: string, page: { addresses: string[]; claimed: string[] } | null): { verdict: CaVerdict; other: string | null } {
+  if (!page) return { verdict: 'NONE', other: null };
+  if (page.addresses.includes(mint) || page.claimed.includes(mint)) return { verdict: 'CONFIRMED', other: null };
+  return page.claimed.length ? { verdict: 'CONTRADICTED', other: page.claimed[0]! } : { verdict: 'NONE', other: null };
 }
 
 const PRIVATE_V4 = [/^0\./, /^10\./, /^127\./, /^169\.254\./, /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, /^22[4-9]\./, /^2[3-5]\d\./];
@@ -40,8 +77,8 @@ type Resolver = (host: string) => Promise<string[]>;
 const resolveAll: Resolver = async host => (await lookup(host, { all: true })).map(a => a.address);
 
 /** Project websites are untrusted input: https only, public addresses only, bounded size and time. */
-export async function checkWebsite(raw: string | null, fetcher: typeof fetch = fetch, resolve: Resolver = resolveAll): Promise<WebsiteCheck> {
-  const none: WebsiteCheck = { url: raw, status: 'NONE', httpStatus: null, title: null, description: null, xHandles: [], detail: 'No website listed' };
+export async function checkWebsite(raw: string | null, fetcher: typeof fetch = fetch, resolve: Resolver = resolveAll, o: { scripts?: number } = {}): Promise<WebsiteCheck> {
+  const none: WebsiteCheck = { url: raw, status: 'NONE', httpStatus: null, title: null, description: null, xHandles: [], detail: 'No website listed', addresses: [], claimed: [] };
   if (!raw) return none;
   let url: URL;
   try { url = new URL(raw); } catch { return { ...none, status: 'BLOCKED', detail: 'Invalid URL' }; }
@@ -62,12 +99,36 @@ export async function checkWebsite(raw: string | null, fetcher: typeof fetch = f
       const description = /<meta[^>]+name=["']description["'][^>]+content=["']([^"']{1,300})["']/i.exec(html)?.[1]?.trim() ?? null;
       const xHandles = [...new Set([...html.matchAll(/https?:\/\/(?:www\.)?(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})(?=[/"'?#\s])/gi)]
         .map(m => m[1]!.toLowerCase()).filter(h => !RESERVED.has(h)))].slice(0, 5);
-      return { url: url.toString(), status: 'AVAILABLE', httpStatus: res.status, title, description, xHandles, detail: `HTTP ${res.status}` };
+      let found = pageAddresses(html);
+      // Client-rendered sites keep their contract address in their own script bundles (stashd.fun: ca:"3Bdwh…pump").
+      if (o.scripts && !found.claimed.length) found = mergeAddresses(found, await siteScripts(url, html, o.scripts, fetcher, resolve));
+      return { url: url.toString(), status: 'AVAILABLE', httpStatus: res.status, title, description, xHandles, detail: `HTTP ${res.status}`, ...found };
     } catch (error) {
       return { ...none, url: url.toString(), status: 'UNAVAILABLE', detail: (error as Error).name === 'AbortError' ? 'Timed out' : 'Connection failed' };
     } finally { clearTimeout(timer); }
   }
   return { ...none, url: url.toString(), status: 'UNAVAILABLE', detail: 'Too many redirects' };
+}
+
+const mergeAddresses = (a: { addresses: string[]; claimed: string[] }, b: { addresses: string[]; claimed: string[] }) =>
+  ({ addresses: [...new Set([...a.addresses, ...b.addresses])], claimed: [...new Set([...a.claimed, ...b.claimed])].slice(0, 20) });
+
+/** The site's own (same-origin) scripts, newest-loaded last, bounded in count, size and time. */
+async function siteScripts(page: URL, html: string, max: number, fetcher: typeof fetch, resolve: Resolver): Promise<{ addresses: string[]; claimed: string[] }> {
+  let found = { addresses: [] as string[], claimed: [] as string[] };
+  const srcs = [...new Set([...html.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)].map(m => { try { return new URL(m[1]!, page); } catch { return null; } })
+    .filter((u): u is URL => !!u && u.origin === page.origin).map(u => u.toString()))].slice(-max);
+  for (const src of srcs) {
+    const url = new URL(src);
+    if (await unsafeTarget(url, resolve)) continue;
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 4_000);
+    try {
+      const res = await fetcher(url, { redirect: 'manual', signal: controller.signal, credentials: 'omit', headers: { 'User-Agent': 'solana-desk-evidence/1.0' } });
+      if (res.ok) found = mergeAddresses(found, pageAddresses(await boundedText(res, 600_000)));
+    } catch { /* one slow script never fails the website check */ } finally { clearTimeout(timer); }
+    if (found.claimed.length) break;
+  }
+  return found;
 }
 
 async function unsafeTarget(url: URL, resolve: Resolver): Promise<string | null> {
@@ -135,6 +196,33 @@ export class XClient {
       return await res.json();
     } finally { clearTimeout(timer); }
   }
+}
+
+// ---------------------------------------------------------------- X profile page (no API key)
+
+export interface XPageCheck {
+  handle: string; status: 'READ' | 'NO_POSTS' | 'UNAVAILABLE'; detail: string;
+  /** Addresses in the account's recent posts as x.com serves them without login. */
+  addresses: string[]; claimed: string[];
+}
+/**
+ * The account's public profile page: x.com renders its recent posts (pinned first) into the page for logged-out
+ * browsers, which is where a project posts "ca: …". Bounded in size and time; any failure is UNAVAILABLE, never an error.
+ */
+export async function readXPage(handle: string, fetcher: typeof fetch = fetch): Promise<XPageCheck> {
+  const none = { addresses: [], claimed: [] };
+  if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) return { handle, status: 'UNAVAILABLE', detail: 'Invalid handle', ...none };
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 8_000);
+  try {
+    const res = await fetcher(`https://x.com/${handle}`, { redirect: 'follow', signal: controller.signal, credentials: 'omit',
+      headers: { Accept: 'text/html', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36' } });
+    if (!res.ok) return { handle, status: 'UNAVAILABLE', detail: `HTTP ${res.status}`, ...none };
+    const html = await boundedText(res, 2_000_000);
+    if (!/full_text|tweetText/.test(html)) return { handle, status: 'NO_POSTS', detail: 'No posts readable on the profile page', ...none };
+    return { handle, status: 'READ', detail: 'Profile page read', ...pageAddresses(html) };
+  } catch (error) {
+    return { handle, status: 'UNAVAILABLE', detail: (error as Error).name === 'AbortError' ? 'Timed out' : 'Connection failed', ...none };
+  } finally { clearTimeout(timer); }
 }
 
 // ---------------------------------------------------------------- Authenticity

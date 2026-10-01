@@ -81,6 +81,8 @@ export class DeskEngine {
   private entrySkips = new Map<string, { at: number; code: string }>();
   /** Shortlisted launches (radar score ≥ LAUNCH_ENTRY.minScore) by mint, and which alerts were already sent. */
   private launchList = new Map<string, Launch>();
+  /** The CA status last reported for each shortlisted launch (X / WEBSITE confirmed, IMPERSONATOR). */
+  private launchCa = new Map<string, Launch['ca']['status']>();
   private launchAlerts = new Set<string>();
   private launchPoll: Promise<void> | null = null;
   /** Every priced token seen, by lower-case ticker and name: the original a copycat imitates is usually among them. */
@@ -667,7 +669,7 @@ export class DeskEngine {
       social: deep?.social ?? null, watch, now, maxWashRatio: this.d.cfg.rs.maxWashRatio, launch: this.launches.get(mint)?.value ?? null });
     c.crash = crashCheck(c);
     if (s.launch) c.launch = { score: s.launch.score, reasons: s.launch.reasons, x: s.launch.x.url, website: s.launch.site?.url ?? s.launch.meta?.website ?? null,
-      launchedAt: s.launch.at, signal: launchEntryCheck(c, s.launch, now) };
+      launchedAt: s.launch.at, ca: s.launch.ca, signal: launchEntryCheck(c, s.launch, now) };
     const rules = this.customIds().filter(id => this.profile(id).enabled).map(id => [id, ruleCheck(this.profile(id).rule!, c)] as const);
     if (rules.length) c.rules = Object.fromEntries(rules);
     return c;
@@ -854,13 +856,24 @@ export class DeskEngine {
     this.launchPoll ??= feed.poll(now).then(() => undefined).catch(() => undefined).finally(() => { this.launchPoll = null; });
     await Promise.race([this.launchPoll, new Promise(r => setTimeout(r, 10_000).unref?.())]);
     for (const l of feed.recent(Date.now())) {
-      if (l.score < LAUNCH_ENTRY.minScore || this.launchList.has(l.mint)) continue;
-      l.shortlistedAt = Date.now(); this.launchList.set(l.mint, l);
-      const age = Math.max(0, Math.round((Date.now() - l.at) / 60_000));
-      this.event('WATCHLIST', `LAUNCH radar: ${l.symbol} "${l.name}" ${age} min old · score ${l.score} · ${l.reasons.join(' · ')}`, { mint: l.mint, symbol: l.symbol });
+      const age = Math.max(0, Math.round((Date.now() - l.at) / 60_000)), ctx = { mint: l.mint, symbol: l.symbol };
+      if (this.launchList.has(l.mint)) {
+        // Re-reads of the X page and website after the shortlist: a confirmed CA or an exposed impersonator is news.
+        const seen = this.launchCa.get(l.mint);
+        if (seen === l.ca.status || l.ca.status === 'UNCONFIRMED') continue;
+        this.launchCa.set(l.mint, l.ca.status);
+        if (l.ca.status === 'IMPERSONATOR') {
+          this.event('FILTERED', `LAUNCH radar: ${l.symbol} ${l.ca.detail} — never bought`, ctx);
+          this.alertOnce(`fake:${l.mint}`, `LAUNCH radar: ${l.symbol} is an IMPERSONATOR`, `${l.ca.detail}\n${fomoUrl(l.mint)}`);
+        } else this.event('WATCHLIST', `LAUNCH radar: ${l.symbol} ${l.ca.detail} (${age} min old) · score ${l.score}`, ctx);
+        continue;
+      }
+      if (l.score < LAUNCH_ENTRY.minScore) continue;
+      l.shortlistedAt = Date.now(); this.launchList.set(l.mint, l); this.launchCa.set(l.mint, l.ca.status);
+      this.event('WATCHLIST', `LAUNCH radar: ${l.symbol} "${l.name}" ${age} min old · score ${l.score} · ${l.reasons.join(' · ')}`, ctx);
       this.alertOnce(`radar:${l.mint}`, `LAUNCH radar: ${l.symbol} (${age} min old)`, `${l.name} · ${l.reasons.join(' · ')}\n${fomoUrl(l.mint)}`);
     }
-    for (const [mint, l] of this.launchList) if (Date.now() - l.at > 2 * 60 * 60_000) this.launchList.delete(mint);
+    for (const [mint, l] of this.launchList) if (Date.now() - l.at > 2 * 60 * 60_000) { this.launchList.delete(mint); this.launchCa.delete(mint); }
   }
   private alertOnce(key: string, title: string, body: string): void {
     if (this.launchAlerts.has(key) || !this.d.notify) return;
@@ -1328,7 +1341,7 @@ export class DeskEngine {
       presets: PRESETS,
       launches: [...this.launchList.values()].sort((a, b) => b.at - a.at).slice(0, 25).map(l => {
         const c = this.candidates.get(l.mint);
-        return { mint: l.mint, symbol: l.symbol, name: l.name, at: l.at, score: l.score, reasons: l.reasons, x: l.x.url, website: l.site?.url ?? l.meta?.website ?? null,
+        return { mint: l.mint, symbol: l.symbol, name: l.name, at: l.at, score: l.score, reasons: l.reasons, x: l.x.url, website: l.site?.url ?? l.meta?.website ?? null, ca: l.ca,
           marketCapUsd: c?.metrics.marketCapUsd ?? null, signal: c?.launch?.signal.signal ?? false,
           status: this.heldBy(l.mint) ? `held by ${this.heldBy(l.mint)}` : c?.entryNotes?.LAUNCH ?? c?.launch?.signal.summary ?? 'waiting for market data' };
       }),

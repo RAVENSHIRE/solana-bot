@@ -57,15 +57,20 @@ export function crashCheck(c: Candidate): CrashSignal {
 }
 
 /**
- * LAUNCH entry: a shortlisted launch (own X account + live website) 3–12 min after creation — when Jupiter routes the
- * curve — still early ($8K–$40K), with real buying, no whale and no dev bag; the safety gates must pass.
+ * LAUNCH entry: a shortlisted launch (own X account + live website), never one whose X account or website shows another
+ * CA, still early ($5K–$40K), with real buying, no whale and no dev bag; the safety gates must pass. From 1 min when the
+ * project's X account or website shows this CA, from 3 min otherwise; never after 12 min.
  */
-export function launchEntryCheck(c: Candidate, l: { score: number; at: number }, now: number): CrashSignal {
+export function launchEntryCheck(c: Candidate, l: { score: number; at: number; ca?: { status: string; detail: string } }, now: number): CrashSignal {
   const r = LAUNCH_ENTRY, m = c.metrics, age = (now - l.at) / 60_000;
+  const confirmed = l.ca?.status === 'X' || l.ca?.status === 'WEBSITE', minAge = confirmed ? r.minAgeConfirmedMin : r.minAgeMin;
   const safety = (key: string): GateResult => { const g = c.gates.find(x => x.key === key); return g ? { ...g, blocking: true } : { key, label: key, status: 'UNKNOWN', actual: 'not evaluated', required: 'PASS', blocking: true }; };
   const checks: GateResult[] = [
     check('launchScore', 'Launch quality (X account + website)', l.score, v => v >= r.minScore, String(l.score), `≥ ${r.minScore}`),
-    check('launchAge', 'Minutes since launch', age, v => v >= r.minAgeMin && v <= r.maxAgeMin, `${age.toFixed(1)} min`, `${r.minAgeMin}–${r.maxAgeMin} min`),
+    check('launchCa', 'Contract address on the project\'s X / website', l.ca?.status === 'IMPERSONATOR' ? 0 : 1, v => v === 1,
+      l.ca ? (l.ca.status === 'IMPERSONATOR' ? l.ca.detail : l.ca.status === 'UNCONFIRMED' ? 'not shown yet' : l.ca.detail) : 'not checked', 'never another CA'),
+    check('launchAge', 'Minutes since launch', age, v => v >= minAge && v <= r.maxAgeMin, `${age.toFixed(1)} min`,
+      `${minAge}–${r.maxAgeMin} min${confirmed ? ' (CA confirmed)' : ` (${r.minAgeConfirmedMin} min once the CA is confirmed)`}`),
     check('launchMcap', 'Market cap', m.marketCapUsd, v => v >= r.minMarketCapUsd && v <= r.maxMarketCapUsd, usd(m.marketCapUsd), `${usd(r.minMarketCapUsd)}–${usd(r.maxMarketCapUsd)}`),
     check('launchVolume', '5m volume', m.volume5mUsd, v => v >= r.minVolume5mUsd, usd(m.volume5mUsd), `≥ ${usd(r.minVolume5mUsd)}`),
     check('launchBuys', 'Buys (5m)', m.buys5m, v => v >= r.minBuys5m, m.buys5m === null ? 'UNKNOWN' : String(m.buys5m), `≥ ${r.minBuys5m}`),
@@ -75,7 +80,7 @@ export function launchEntryCheck(c: Candidate, l: { score: number; at: number },
     safety('mintAuthority'), safety('freezeAuthority'), safety('contract'),
   ];
   const signal = checks.every(g => !g.blocking || g.status === 'PASS'), miss = checks.find(g => g.blocking && g.status !== 'PASS');
-  const summary = signal ? `score ${l.score} · ${age.toFixed(1)} min old · ${usd(m.marketCapUsd)} cap · ${usd(m.volume5mUsd)} 5m volume · top-10 ${pct(m.top10WalletPct)}`
+  const summary = signal ? `score ${l.score} · ${age.toFixed(1)} min old · ${usd(m.marketCapUsd)} cap · ${usd(m.volume5mUsd)} 5m volume · top-10 ${pct(m.top10WalletPct)}${confirmed ? ` · ${l.ca!.detail}` : ''}`
     : `${miss!.label}: ${miss!.actual} (${miss!.required})`;
   return { signal, checks, summary };
 }

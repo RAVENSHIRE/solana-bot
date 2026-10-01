@@ -255,17 +255,21 @@ export function strategyProfiles(env: NodeJS.ProcessEnv, capital: DeskCapital,
         : { takeProfitPct: e.CRASH_TAKE_PROFIT_PCT, stopLossPct: e.CRASH_STOP_LOSS_PCT, maxHoldMin: e.CRASH_MAX_HOLD_MIN, trailing: null,
           giveback: e.CRASH_LOCK_PEAK_PCT > 0 ? { lockPeakPct: e.CRASH_LOCK_PEAK_PCT, points: e.CRASH_GIVEBACK_PTS } : null } },
     LAUNCH: { id: 'LAUNCH', label: 'LAUNCH', enabled: true,
-      summary: 'Fresh pump.fun launches with their own X account and a real website, bought 3–12 min after creation on the curve (the @glabuz Meme Industries entry); TEST first',
+      summary: 'Fresh pump.fun launches with their own X account and a real website, bought on the curve 1–12 min after creation once the project shows the CA (3 min otherwise); impersonators blocked (the @glabuz Meme Industries entry); TEST first',
       capitalUsd: capital.plannedStartingCapitalUsd, entryUsd: capital.baseEntryUsd, slippageBps: 600, exitSlippageBps: 1_500, maxDragBps: 1_200n,
       maxOpenPositions: 2, positionCheckMs: 3_000, exitMode: 'rules', reentryCooldownMs: 4 * 60 * 60_000,
       exits: { takeProfitPct: Number.POSITIVE_INFINITY, stopLossPct: 40, maxHoldMin: 240, trailing: { activationPct: 100, stopPct: 35 }, giveback: null, graceMs: 60_000 } },
   };
 }
 
-/** LAUNCH entry rules: the launch radar's quality score plus a clean, still-early curve. */
+/**
+ * LAUNCH entry rules: the launch radar's quality score plus a clean, still-early curve. A launch whose own X account
+ * (or website) shows its CA may be bought from 1 min; others wait 3 min, time for the project to post it or for an
+ * impersonator to be exposed. Jupiter quotes new curve tokens within seconds, so routing never sets the window.
+ */
 export const LAUNCH_ENTRY = Object.freeze({
-  minScore: 6, minAgeMin: 3, maxAgeMin: 12,
-  minMarketCapUsd: 8_000, maxMarketCapUsd: 40_000,
+  minScore: 6, minAgeMin: 3, minAgeConfirmedMin: 1, maxAgeMin: 12,
+  minMarketCapUsd: 5_000, maxMarketCapUsd: 40_000,
   minVolume5mUsd: 1_000, minBuys5m: 10,
   maxTop10WalletPct: 35, maxLargestWalletPct: 12, maxDeveloperPct: 10,
 });
