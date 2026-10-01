@@ -20,7 +20,7 @@ import { errorMessage } from '../utils/errors';
 import { atomicWriteFile } from '../utils/fs';
 import { DESK, STRATEGY_IDS, strategyProfiles, type BuiltinStrategyId, type DeskCapital, type DeskOperational, type LiveSignerKind, type StrategyProfile } from './config';
 import { EventLog } from './events';
-import { DeskLedger, type LedgerState } from './ledger';
+import { DeskLedger, uiAmount, type LedgerState } from './ledger';
 import { discover, pairMetrics, selectPair, tierFor, type Discovered } from './discovery';
 import { creatorHolding, gatherOnchain, holderCount, holders as readHolders, type Holders, type OnchainEvidence } from './onchain';
 import { launchCheck, type LaunchCheck } from './launch';
@@ -995,6 +995,56 @@ export class DeskEngine {
     } catch (error) {
       this.event('WAITING', `Account rent not reclaimed now (retried at the next session start): ${errorMessage(error)}`);
     }
+  }
+
+  /**
+   * Watch: sells a holding that is not a desk position (bought on FOMO, by hand, …) through the same guarded path as a
+   * desk exit — quote, route, pre-flight simulation, local-key signature persisted before broadcast, confirmation. LIVE
+   * with the local key only. Tokens a desk strategy holds in this wallet are never part of the sale.
+   */
+  sellHolding(s: { mint: string; symbol: string | null; amountRaw: bigint; decimals: number; reason: string; onSigned: (signature: string) => Promise<void> }):
+    Promise<{ signature: string; detail: string }> {
+    const run = this.orders.then(() => this.sellHoldingNow(s));
+    this.orders = run.then(() => this.reclaimRent([s.mint])).catch(() => undefined);
+    return run;
+  }
+  private async sellHoldingNow(s: { mint: string; symbol: string | null; amountRaw: bigint; decimals: number; reason: string; onSigned: (signature: string) => Promise<void> }):
+    Promise<{ signature: string; detail: string }> {
+    const d = this.d, wallet = d.wallet(), ctx = { mint: s.mint, symbol: s.symbol, detail: { strategy: 'WATCH' } };
+    if (d.mode !== 'LIVE' || !this.localKey || !wallet?.signer || !d.sender) throw new DeskReject('LOCAL_KEY_REQUIRED');
+    const desk = this.books().reduce((a, b) => a + BigInt(b.ledger.position(s.mint)?.qtyRaw ?? '0'), 0n), amountRaw = s.amountRaw - desk;
+    if (amountRaw <= 0n) throw new DeskReject('HELD_BY_DESK', 'the desk manages this position; its own exit rules apply');
+    if (!this.solUsd) await this.syncWallet(true);
+    const solUsd = this.solUsd;
+    if (!solUsd) throw new DeskReject('SOL_PRICE_UNAVAILABLE');
+    const info = await d.rpc.execute('desk:mint-owner', c => c.getAccountInfo(new PublicKey(s.mint), 'confirmed'));
+    const tokenProgram = info?.owner.equals(TOKEN_2022_PROGRAM_ID) ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID, exit = this.strategies.CRASH;
+    this.event('EXIT', `WATCH · exit signal: ${s.reason}; selling ${uiAmount(amountRaw, s.decimals)} from the wallet`, ctx);
+    const guard = new DeskGuard({ mode: 'LIVE', rpc: d.rpc, jupiter: d.jupiter, owner: wallet.owner, mint: s.mint, symbol: s.symbol, decimals: s.decimals, tokenProgram, solUsd,
+      slippageBps: exit.slippageBps, exitSlippageBps: exit.exitSlippageBps, maxDragBps: exit.maxDragBps, reserveLamports: DESK.reserveLamports,
+      configuredPriorityCap: BigInt(d.cfg.jupiter.maxPriorityFeeLamports), baseEntryUsd: exit.entryUsd, paperCashLamports: null, heldRaw: amountRaw,
+      stopped: () => false, enforceDrag: false,
+      onSigned: async signature => { await s.onSigned(signature); this.event('SUBMITTED', `Signed by the local key; signature persisted before broadcast: ${signature}`, ctx); },
+      event: (stage, message, detail) => this.event(stage, message, { ...ctx, detail: { ...detail, strategy: 'WATCH' } }) });
+    const signer: TransactionSigner = { publicKey: wallet.owner, signTransaction: async (tx, context) => {
+      guard.signatureState('AWAITING_PHANTOM'); this.event('AWAITING_SIGNATURE', 'Signing with the local key (pre-flight passed)', ctx);
+      try { const signed = await wallet.signer!.signTransaction(tx, context); guard.signatureState('SIGNED'); return signed; }
+      catch (error) { guard.signatureState('REJECTED'); throw error; }
+    } };
+    const executor = new LiveExecutor({ cfg: { ...d.cfg, mode: 'LIVE', simulation: false }, rpc: d.rpc, jupiter: d.jupiter, logger: d.logger, owner: wallet.owner, guard },
+      signer, d.sender);
+    try {
+      const fill = await requestScope.run({ category: 'execution' }, () => executor.swap({ side: 'SELL', mint: s.mint, amountRaw, slippageBps: exit.exitSlippageBps }));
+      if (guard.lastPreflight) { guard.lastPreflight.outcome = 'CONFIRMED'; guard.lastPreflight.txSignature = fill.signature; this.preflights.push(guard.lastPreflight); }
+      const detail = `Sold ${uiAmount(amountRaw, s.decimals)} for ${sol(fill.solDeltaLamports).toFixed(6)} SOL (${usd(sol(fill.solDeltaLamports) * solUsd)})`;
+      this.event('CONFIRMED', `WATCH · ${detail}: ${fill.signature}`, ctx);
+      if (!fill.signature) throw new DeskReject('LIVE_FILL_WITHOUT_SIGNATURE');
+      return { signature: fill.signature, detail };
+    } catch (error) {
+      if (guard.lastPreflight) this.preflights.push(guard.lastPreflight);
+      this.event('FAILED', `WATCH · sale failed: ${errorMessage(error)}`, ctx);
+      throw error;
+    } finally { this.preflights = this.preflights.slice(-20); }
   }
 
   private async executeNow(side: 'BUY' | 'SELL', t: ExecTarget,

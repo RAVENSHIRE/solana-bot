@@ -102,6 +102,36 @@ Mint and freeze authority revoked and no dangerous token extensions always apply
 
 RUNNER has not been backtested: let it prove itself in TEST before switching it on in LIVE.
 
+### Watch: exit rules for tokens you hold yourself
+
+The *Watch* section (sidebar: Watch) guards tokens you bought outside the desk, on FOMO, in Phantom or anywhere else. Add the token's CA and the wallet that holds it, then set any of these levels:
+
+- **Exit at market cap ≤** (floor), e.g. `30M`.
+- **Trailing stop**, in % below the highest market cap seen since you added the token, e.g. `25`.
+- **Take profit at market cap ≥** (target), e.g. `80M`.
+
+How it runs:
+
+- Market caps (DexScreener) are checked every 15 s and the wallet balance every minute, whether TEST or LIVE runs or not, as long as the dashboard runs.
+- A level must be crossed in **two checks in a row**, so one bad data point never fires.
+- A rule fires once. **Re-arm** it to watch again; the trailing stop's peak then restarts at the current market cap.
+- Rules and alerts are kept in `data-desk/watch.json`.
+
+**Alert** (any wallet) notifies you in three places:
+
+- the dashboard;
+- browser notifications (press *turn on*);
+- your phone, when one of these is set in `.env`:
+  - `DESK_NTFY_TOPIC=<long random name>`, then subscribe to that topic in the free ntfy app;
+  - `DESK_TELEGRAM_BOT_TOKEN` and `DESK_TELEGRAM_CHAT_ID` for Telegram.
+
+**Sell automatically** is available only for the local-key wallet (`DESK_LIVE_SIGNER=local-key`).
+
+- It sells the wallet's whole balance through the same guarded path as a desk exit: Jupiter quote, route, pre-flight checks, signature persisted before broadcast, confirmation, then the empty account's rent is reclaimed.
+- Tokens a desk strategy holds in the same wallet are left alone.
+- A sale interrupted by a restart is never retried: check its signature on Solscan.
+- FOMO's in-app wallet is a different wallet that the desk cannot sign for, so FOMO holdings get alerts.
+
 ### Going LIVE (Phantom)
 
 1. Pull, restart the dashboard, open it in the browser with the Phantom extension and **Connect Phantom**.

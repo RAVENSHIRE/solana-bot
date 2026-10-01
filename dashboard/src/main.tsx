@@ -88,6 +88,7 @@ const SECTIONS = [
   { id: 'desk-strategies', label: 'Strategies', icon: 'target' },
   { id: 'desk-candidates', label: 'Candidates', icon: 'list' },
   { id: 'desk-positions', label: 'Positions', icon: 'wallet' },
+  { id: 'desk-watch', label: 'Watch', icon: 'clock' },
   { id: 'desk-trades', label: 'Trades', icon: 'layers' },
   { id: 'desk-telemetry', label: 'Telemetry', icon: 'activity' },
 ] as const;

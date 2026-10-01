@@ -8,12 +8,13 @@ import { DeskReject } from '../../src/desk/guard';
 import { parseRuleSpec } from '../../src/desk/custom';
 import { createDesk, deskEnvironment, type DeskContext, type DeskHandle } from '../../src/desk/runtime';
 import type { DeskMode, DeskStatus } from '../../src/desk/types';
+import type { WatchView } from '../../src/desk/watch';
 
 export { deskEnvironment as tradingEnvironment, type DeskHandle };
 export type DeskFactory = (context: DeskContext) => Promise<DeskHandle>;
 export const deskFactory = (repo: string): DeskFactory => context => createDesk({ envDir: repo, dataDir: path.join(repo, 'data-desk') }, context);
 
-const DESK_ACTIONS = new Set(['select-mode', 'strategy-save', 'strategy-delete', 'start-test', 'stop-test', 'start-live', 'pause', 'resume', 'stop-live', 'probe', 'drill-on', 'drill-off',
+const DESK_ACTIONS = new Set(['select-mode', 'strategy-save', 'strategy-delete', 'watch-add', 'watch-remove', 'watch-rearm', 'start-test', 'stop-test', 'start-live', 'pause', 'resume', 'stop-live', 'probe', 'drill-on', 'drill-off',
   'strategy', 'reset-test', 'exit']);
 
 /**
@@ -49,6 +50,8 @@ export class TradingService {
       // With Phantom, a lost browser session ends LIVE (never resumed automatically). The local key does not need one.
       if (live.scanner && !this.localKey() && !this.authorized()) { live.stop('Phantom session ended or browser closed'); this.broker.cancel(); }
       for (const engine of Object.values(this.desk.engines)) engine.tick();
+      // Watch rules run whether the desk scans or not: a floor can break while TEST and LIVE are stopped.
+      this.desk.watch?.tick();
     }, 1000);
     this.timer.unref();
   }
@@ -92,7 +95,7 @@ export class TradingService {
   }
 
   private view(sessionId?: string): { session: { address: string; expiresAt: number } | null; pending: { id: string; transactionBase64: string; expiresAt: number } | null;
-    mode: DeskMode; desk: DeskStatus | null; deskError: string | null } {
+    mode: DeskMode; desk: DeskStatus | null; deskError: string | null; watch: WatchView | null } {
     let session = null, pending = null;
     if (sessionId) {
       const s = this.broker.status(sessionId); session = { address: s.address, expiresAt: s.expiresAt };
@@ -100,7 +103,7 @@ export class TradingService {
     }
     const c = this.broker.connection();
     const desk = this.desk?.engines[this.mode].status({ connected: c.connected, address: c.address }) ?? null;
-    return { session, pending, mode: this.mode, desk, deskError: this.deskError };
+    return { session, pending, mode: this.mode, desk, deskError: this.deskError, watch: this.desk?.watch?.view() ?? null };
   }
 
   private async deskAction(action: string, body: Record<string, unknown>, handle: DeskHandle): Promise<void> {
@@ -162,6 +165,20 @@ export class TradingService {
       case 'reset-test':
         if (this.mode !== 'PAPER') throw new DeskReject('RESET_TEST_ONLY');
         await paper.resetTest(); return;
+      case 'watch-add': case 'watch-remove': case 'watch-rearm': {
+        // Watch rules only ever sell (never buy), so they stay available in a LOCKED deployment.
+        const watch = handle.watch;
+        if (!watch) throw new DeskReject('WATCH_UNAVAILABLE');
+        try {
+          if (action === 'watch-add') watch.add(body.rule);
+          else if (typeof body.id !== 'string') throw new Error('WATCH_NOT_FOUND');
+          else if (action === 'watch-remove') watch.remove(body.id); else watch.rearm(body.id);
+        } catch (error) {
+          const [code, ...rest] = (error as Error).message.split(': ');
+          throw new DeskReject(/^[A-Z_]+$/.test(code ?? '') ? code! : 'INVALID_WATCH', rest.join(': '));
+        }
+        return;
+      }
       case 'exit':
         // EXIT NOW only reduces risk: it sells an open position through the normal guarded SELL path.
         if (typeof body.mint !== 'string') throw new DeskReject('INVALID_MINT');
@@ -239,7 +256,7 @@ export class TradingService {
       } else { this.json(res, 404, { message: 'NOT_FOUND' }); return true; }
       this.json(res, 200, { ok: true });
     } catch (error) {
-      const code = rejectCode(error) ?? 'TRADING_REQUEST_FAILED', detail = code === 'INVALID_STRATEGY_SPEC' ? rejectDetail(error, code) : undefined;
+      const code = rejectCode(error) ?? 'TRADING_REQUEST_FAILED', detail = ['INVALID_STRATEGY_SPEC', 'INVALID_WATCH'].includes(code) ? rejectDetail(error, code) : undefined;
       this.json(res, code.includes('CAPABILITY') || code.includes('ORIGIN') ? 403 : 400, { message: code, ...(detail ? { detail } : {}) });
     }
     return true;

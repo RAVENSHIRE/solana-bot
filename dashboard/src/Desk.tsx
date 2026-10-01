@@ -1,6 +1,7 @@
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import type { Candidate, DeskEvent, DeskStatus, Evidence, Preflight, Stage, StrategyView } from '../../src/desk/types';
 import type { RuleSpecInput } from '../../src/desk/custom';
+import type { WatchRule, WatchView } from '../../src/desk/watch';
 import type { TradingSession } from './use-trading';
 import { money, numeric, short, time } from './format';
 
@@ -21,12 +22,15 @@ const EXPLAIN: Record<string, string> = {
   STRATEGY_HAS_POSITIONS: 'This strategy still holds a position (TEST or LIVE). Sell or wait for its exit before deleting it.',
   BUILTIN_STRATEGY: 'FAIR and CRASH are built in: they can be switched off, not edited or deleted.',
   CONFIG_LOCKED: 'The desk runs with DESK_DEPLOYMENT_MODE=LOCKED: strategies are fixed at startup.',
+  WATCH_SELL_NEEDS_LOCAL_KEY: 'Automatic selling works only for the local-key wallet (DESK_LIVE_SIGNER=local-key). Other wallets (FOMO, Phantom) get alerts: choose ALERT.',
+  WATCH_UNAVAILABLE: 'The watch starts with the desk; check the desk error above.', WATCH_LIMIT: 'At most 50 watched tokens.',
   POSITION_NOT_FOUND: 'That position is no longer open in the desk ledger (already sold, or held outside the desk: sell it in your wallet).',
   PHANTOM_PROVIDER: 'Phantom could not connect from this page: open the dashboard in the browser profile where the Phantom extension is installed and unlocked. With DESK_LIVE_SIGNER=local-key in .env, LIVE needs no Phantom connection at all.',
   AUTO_CONFIRM_UNAVAILABLE_FOR_DOMAIN: 'Phantom does not offer Auto-Confirm for this domain (only for domains it has approved). LIVE orders need your approval in Phantom within 15 s.',
 };
 const describe = (code: string | null) => !code ? null : /supported wallet provider|wallet provider/i.test(code) ? EXPLAIN.PHANTOM_PROVIDER
-  : code.startsWith('INVALID_STRATEGY_SPEC: ') ? `Strategy not saved — ${code.slice(23)}` : EXPLAIN[code] ?? code.replaceAll('_', ' ');
+  : code.startsWith('INVALID_STRATEGY_SPEC: ') ? `Strategy not saved — ${code.slice(23)}` : code.startsWith('INVALID_WATCH: ') ? `Not watched — ${code.slice(15)}`
+  : EXPLAIN[code] ?? code.replaceAll('_', ' ');
 const fine = (v: number | null | undefined, d = 4) => v === null || v === undefined || !Number.isFinite(v) ? '--' : `${v < 0 ? '-' : ''}$${Math.abs(v).toFixed(d)}`;
 const sol = (lamports: string | null | undefined) => lamports == null ? '--' : `${(Number(lamports) / 1e9).toFixed(6)} SOL`;
 const ago = (at: number | null | undefined) => at ? new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '--';
@@ -65,6 +69,7 @@ export function DeskPanel({ t }: { t: TradingSession }) {
           : 'Phantom will ask you to approve the sale within 15 s (REAL FUNDS).';
         if (window.confirm(`EXIT NOW: sell the whole ${p.symbol ?? p.mint} position at the current Jupiter quote (exit slippage applies)? ${how}`)) void t.desk('exit', { mint: p.mint });
       }} /></div>
+      <div id="desk-watch" className="desk-anchor"><Watch t={t} d={d} /></div>
       <div id="desk-trades" className="desk-anchor"><Ledger d={d} /></div>
       <PathAudit d={d} />
     </>}
@@ -456,5 +461,84 @@ function PathAudit({ d }: { d: DeskStatus }) {
     <dl className="kv two">{d.path.map(p => <div key={p.layer}><dt>{p.layer}</dt><dd>{p.provider}</dd></div>)}</dl>
     <h4>Data sources (last scan)</h4>
     <dl className="kv two">{Object.entries(d.sources).map(([k, v]) => <div key={k}><dt>{k}</dt><dd className={v.startsWith('UNAVAILABLE') ? 'unknown' : ''}>{v}</dd></div>)}</dl>
+  </section>;
+}
+
+const cap = (n: number | null | undefined) => n == null ? '--' : n >= 1e6 ? `$${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `$${(n / 1e3).toFixed(1)}K` : `$${n.toFixed(0)}`;
+/** Accepts 30000000, 30m, 30M, 450k, $1.2M. */
+const parseCap = (v: string): number | null => {
+  const m = /^\$?\s*([\d.,]+)\s*([kKmMbB]?)$/.exec(v.trim());
+  if (!m) return null;
+  const unit: Record<string, number> = { k: 1e3, m: 1e6, b: 1e9 };
+  const n = Number(m[1]!.replaceAll(',', '')) * (unit[m[2]!.toLowerCase()] ?? 1);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+function watchStatus(r: WatchRule): { text: string; tone: string } {
+  const t = r.triggered;
+  if (t) return { text: `${t.outcome.replace('_', ' ')} · ${ago(t.at)} — ${t.reason}${t.detail ? ` · ${t.detail}` : ''}`, tone: t.outcome === 'SOLD' ? 'gate-pass' : t.outcome === 'SELL_FAILED' ? 'gate-fail' : 'gate-unknown' };
+  if (r.lastError) return { text: r.lastError, tone: 'gate-unknown' };
+  if (r.pending) return { text: `CONFIRMING (${r.pending.count}/2): ${r.pending.reason}`, tone: 'gate-unknown' };
+  return { text: r.checkedAt ? `watching · checked ${ago(r.checkedAt)}` : 'waiting for the first check', tone: 'gate-pass' };
+}
+
+/**
+ * Exit rules for tokens you hold yourself (FOMO, Phantom, …): alert, or with the local-key wallet sell, at a market-cap
+ * floor, a trailing stop from the peak, or a target. Runs while the dashboard runs, with the desk started or not.
+ */
+function Watch({ t, d }: { t: TradingSession; d: DeskStatus }) {
+  const w: WatchView | null | undefined = t.view?.watch, busy = !!t.busy || !t.online;
+  const [form, setForm] = useState({ mint: '', wallet: '', floor: '', target: '', trail: '', action: 'ALERT', note: '' });
+  const [perm, setPerm] = useState<string>(() => typeof Notification === 'undefined' ? 'unsupported' : Notification.permission);
+  const seen = useRef<number | null>(null);
+  const wallet = form.wallet.trim() || w?.sellWallet || d.wallet.address || '';
+  // Browser notifications for alerts that arrive while this tab is open.
+  useEffect(() => {
+    const newest = w?.alerts[0]?.at ?? 0;
+    if (seen.current === null) { seen.current = newest; return; }
+    if (perm === 'granted') for (const a of [...(w?.alerts ?? [])].reverse()) if (a.at > seen.current) new Notification(a.title, { body: a.body, tag: `${a.ruleId}-${a.at}` });
+    seen.current = Math.max(seen.current, newest);
+  }, [w?.alerts, perm]);
+  if (!w) return null;
+  const canSell = !!w.sellWallet && wallet === w.sellWallet;
+  const submit = async () => {
+    const rule = { mint: form.mint.trim(), wallet, action: canSell ? form.action : 'ALERT', note: form.note,
+      marketCapFloorUsd: form.floor.trim() ? parseCap(form.floor) ?? -1 : null, marketCapTargetUsd: form.target.trim() ? parseCap(form.target) ?? -1 : null,
+      trailingStopPct: form.trail.trim() ? Number(form.trail) : null };
+    if (await t.desk('watch-add', { rule })) setForm({ ...form, mint: '', floor: '', target: '', trail: '', note: '' });
+  };
+  const field = (key: keyof typeof form, label: string, placeholder: string) => <label key={key}><span>{label}</span>
+    <input value={form[key]} placeholder={placeholder} onChange={e => setForm({ ...form, [key]: e.target.value })} /></label>;
+  return <section className="panel desk-card" aria-label="Watch">
+    <div className="card-head"><h3>Watch · exit rules for tokens you hold yourself</h3>
+      <small>Market cap checked every 15 s, with or without the desk running. A rule fires after two checks in a row.</small></div>
+    <form className="watch-form" onSubmit={e => { e.preventDefault(); void submit(); }}>
+      {field('mint', 'Token (CA)', 'e.g. 9AQMJ…pump')}
+      {field('wallet', 'Wallet holding it', w.sellWallet ?? d.wallet.address ?? 'your FOMO or Phantom address')}
+      {field('floor', 'Exit at market cap ≤', 'e.g. 30M')}
+      {field('trail', 'Trailing stop (% below peak)', 'e.g. 25')}
+      {field('target', 'Take profit at market cap ≥', 'e.g. 80M')}
+      <label><span>Action</span><select value={canSell ? form.action : 'ALERT'} disabled={!canSell} onChange={e => setForm({ ...form, action: e.target.value })}>
+        <option value="ALERT">Alert me</option><option value="SELL">Sell everything automatically (local key)</option></select></label>
+      {field('note', 'Note (shown in the alert)', 'e.g. my plan: out below 30M')}
+      <div className="spec-actions"><button className="primary-action" type="submit" disabled={busy || !form.mint.trim()}>Watch token</button></div>
+    </form>
+    <p className="desk-note">{w.sellWallet ? `Automatic selling is available for the local-key wallet ${short(w.sellWallet)} only; for FOMO or other wallets you get alerts. ` : 'Automatic selling needs DESK_LIVE_SIGNER=local-key; until then every rule alerts. '}
+      Phone alerts: {w.channels.length ? w.channels.join(' + ') : 'off — add DESK_NTFY_TOPIC (ntfy app) or DESK_TELEGRAM_BOT_TOKEN + DESK_TELEGRAM_CHAT_ID to .env'}. Browser alerts: {perm === 'granted' ? 'on' : perm === 'unsupported' ? 'not supported here'
+        : <button className="source-button" type="button" onClick={() => void Notification.requestPermission().then(setPerm)}>turn on</button>}</p>
+    <div className="wallet-table"><table><thead><tr><th>Token</th><th>Wallet</th><th>Market cap</th><th>Peak since added</th><th>Rules</th><th>Balance</th><th>Status</th><th></th></tr></thead>
+      <tbody>{w.rules.map(r => { const st = watchStatus(r); return <tr key={r.id}>
+        <td title={r.mint}><strong>{r.symbol ?? '?'}</strong><br /><small>{short(r.mint)}</small></td>
+        <td title={r.wallet}>{short(r.wallet)}{r.wallet === w.sellWallet ? <><br /><small>local key</small></> : null}</td>
+        <td>{cap(r.lastMarketCapUsd)}</td><td>{cap(r.peakMarketCapUsd)}</td>
+        <td>{[r.marketCapFloorUsd != null && `floor ${cap(r.marketCapFloorUsd)}`, r.trailingStopPct != null && `trail ${r.trailingStopPct}%`, r.marketCapTargetUsd != null && `target ${cap(r.marketCapTargetUsd)}`].filter(Boolean).join(' · ')}<br />
+          <small>{r.action === 'SELL' ? 'SELL automatically' : 'alert'}{r.note ? ` · ${r.note}` : ''}</small></td>
+        <td>{r.balanceRaw === null ? '--' : r.decimals === null ? r.balanceRaw : numeric(Number(r.balanceRaw) / 10 ** r.decimals, 2)}</td>
+        <td className={st.tone}>{st.text}{r.triggered?.signature && <> · <a href={`https://solscan.io/tx/${encodeURIComponent(r.triggered.signature)}`} target="_blank" rel="noreferrer">tx</a></>}</td>
+        <td>{r.triggered && <button className="source-button" disabled={busy} onClick={() => void t.desk('watch-rearm', { id: r.id })}>Re-arm</button>}
+          <button className="source-button" disabled={busy} onClick={() => { if (window.confirm(`Stop watching ${r.symbol ?? r.mint}?`)) void t.desk('watch-remove', { id: r.id }); }}>Remove</button></td></tr>; })}
+        {!w.rules.length && <tr><td colSpan={8}>Nothing watched yet. Add a token you hold, e.g. with a market-cap floor at your exit level.</td></tr>}</tbody></table></div>
+    {w.alerts.length > 0 && <details open><summary>Alerts ({w.alerts.length})</summary><ul className="watch-alerts">{w.alerts.slice(0, 10).map(a =>
+      <li key={`${a.ruleId}-${a.at}`}><strong>{ago(a.at)} · {a.title}</strong> — {a.body}</li>)}</ul></details>}
   </section>;
 }

@@ -968,6 +968,25 @@ test('LIVE with the local key signs without any approval, persists the signature
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
+test('WATCH sale: only LIVE with the local key, through the guarded path; a sale the wallet cannot cover is never signed', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-watch-sell-')), { w, shared } = world(YOUNG_PUMP, 'insider');
+  try {
+    const sale = { mint: MINT, symbol: 'ABC', amountRaw: 1_000_000_000n, decimals: 6, reason: 'MCAP_FLOOR $29.00M ≤ $30.00M', onSigned: async () => {} };
+    const paper = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    await assert.rejects(paper.sellHolding(sale), /LOCAL_KEY_REQUIRED/);
+    const kp = Keypair.fromSeed(new Uint8Array(32).fill(7));
+    const signer: TransactionSigner = { publicKey: kp.publicKey, signTransaction: async tx => { w.signRequests++; tx.sign([kp]); return tx; } };
+    const live = await DeskEngine.create({ ...shared, mode: 'LIVE', dir, sender: { sendAndConfirm: async () => { w.sends++; throw new Error('unreachable'); } } as never,
+      signerKind: 'LOCAL_KEY', authorized: () => true, wallet: () => ({ owner: kp.publicKey, signer }) });
+    // The fixture wallet holds none of the token: the guard refuses before anything is built, signed or sent.
+    await assert.rejects(live.sellHolding(sale));
+    assert.equal(w.signRequests, 0); assert.equal(w.sends, 0);
+    const events = live.events.list().map(e => e.message);
+    assert.ok(events.some(m => /^WATCH · exit signal: MCAP_FLOOR \$29\.00M ≤ \$30\.00M; selling 1000 from the wallet$/.test(m)), events.slice(0, 5).join(' | '));
+    assert.ok(events.includes('WATCH · sale failed: UNTRACKED_POSITION'), 'the guard checks the wallet really holds what it sells');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
 test('the wallet balance is read while the scanner is off, so the dashboard shows it before a session starts', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-idle-')), { w, shared } = world();
   try {

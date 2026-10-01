@@ -13,6 +13,7 @@ import { Logger } from '../utils/logger';
 import { acquireProcessLock } from '../utils/fs';
 import { JupiterClient } from '../execution/jupiter-client';
 import { TransactionSender } from '../execution/tx-sender';
+import { HoldingsWatch, notifier } from './watch';
 import { DeskEngine, type DeskWallet } from './engine';
 import { DeskReject } from './guard';
 import { XClient } from './social';
@@ -35,7 +36,7 @@ const ENV_KEYS = ['RPC_ENDPOINTS', 'RPC_MAX_RPS', 'RPC_TIMEOUT_MS', 'JUPITER_API
   'CRASH_EXIT_MODE', 'CRASH_TRAIL_ACTIVATION_PCT', 'CRASH_TRAIL_STOP_PCT', 'CRASH_RIDE_MAX_HOLD_MIN', 'CRASH_REENTRY_MIN',
   'DESK_LIVE_SIGNER', 'DESK_LIVE_MAX_ENTRIES', 'DESK_DEPLOYMENT_MODE', 'DESK_PAPER_FAIR_ENABLED', 'DESK_PAPER_CRASH_ENABLED',
   'DESK_LIVE_FAIR_ENABLED', 'DESK_LIVE_CRASH_ENABLED', 'DESK_FAIR_LOSS_REENTRY_MIN', 'DESK_CRASH_LOSS_REENTRY_MIN',
-  'DESK_FAIR_FRESH_SIGNAL', 'DESK_CRASH_FRESH_SIGNAL'];
+  'DESK_FAIR_FRESH_SIGNAL', 'DESK_CRASH_FRESH_SIGNAL', 'DESK_NTFY_TOPIC', 'DESK_NTFY_SERVER', 'DESK_TELEGRAM_BOT_TOKEN', 'DESK_TELEGRAM_CHAT_ID'];
 export async function deskEnvironment(repo: string): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = {};
   try {
@@ -54,6 +55,8 @@ export interface DeskHandle {
   operational?: DeskOperational;
   /** PHANTOM: every LIVE order is approved in the browser. LOCAL_KEY: signed by WALLET_PRIVATE_KEY, no browser needed. */
   liveSigner?: LiveSignerKind;
+  /** Exit rules and alerts for tokens held outside the desk's strategies. */
+  watch?: HoldingsWatch;
 }
 export interface DeskContext { wallet: (mode: DeskMode) => DeskWallet | null; authorized: () => boolean }
 
@@ -90,7 +93,18 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
         ...(localSigner ? { authorized: () => true, wallet: () => ({ owner: localSigner.publicKey, signer: localSigner }) }
           : { wallet: () => context.wallet('LIVE') }) }),
     };
-    return { engines, capital, operational, liveSigner: live.signer, close: async () => {
+    const alerts = notifier(env);
+    const watch = await HoldingsWatch.open({ file: path.join(o.dataDir, 'watch.json'), dex: shared.dex, notify: alerts.notify, channels: alerts.channels,
+      balance: async (owner, mint) => {
+        const accounts = await rpc.execute('watch:balance', c => c.getParsedTokenAccountsByOwner(new PublicKey(owner), { mint: new PublicKey(mint) }, 'confirmed'));
+        let raw = 0n, decimals: number | null = null;
+        for (const a of accounts.value) { const t = (a.account.data.parsed.info as { tokenAmount: { amount: string; decimals: number } }).tokenAmount; raw += BigInt(t.amount); decimals = t.decimals; }
+        return { raw, decimals };
+      },
+      // Selling needs the local key: a Phantom session cannot be relied on to be open when a floor breaks.
+      sell: localSigner ? s => engines.LIVE.sellHolding(s) : null, sellWallet: localSigner?.publicKey.toBase58() ?? null });
+    return { engines, capital, operational, liveSigner: live.signer, watch, close: async () => {
+      await watch.settled();
       for (const e of Object.values(engines)) { e.stop('shutdown'); await e.settled(); await e.persist(); }
       await data.flush(); await lock.close(); await fs.unlink(lockPath);
     } };

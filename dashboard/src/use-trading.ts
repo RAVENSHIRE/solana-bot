@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { VersionedTransaction } from '@solana/web3.js';
 import { phantomProvider, type PhantomListener } from './phantom';
 import type { DeskMode, DeskStatus } from '../../src/desk/types';
+import type { WatchView } from '../../src/desk/watch';
 import type { BrowserSDK } from '@phantom/browser-sdk';
 import type { PollConfig, PollResult } from './poll-worker';
 
@@ -9,8 +10,10 @@ export interface TradingView {
   session: { address: string; expiresAt: number } | null;
   pending: { id: string; transactionBase64: string; expiresAt: number } | null;
   mode: DeskMode; desk: DeskStatus | null; deskError: string | null;
+  /** Exit rules for tokens held outside the desk's strategies (null until the desk has started). */
+  watch?: WatchView | null;
 }
-export type DeskAction = 'select-mode' | 'start-test' | 'stop-test' | 'start-live' | 'pause' | 'resume' | 'stop-live' | 'probe' | 'drill-on' | 'drill-off' | 'strategy-save' | 'strategy-delete' |
+export type DeskAction = 'select-mode' | 'start-test' | 'stop-test' | 'start-live' | 'pause' | 'resume' | 'stop-live' | 'probe' | 'drill-on' | 'drill-off' | 'strategy-save' | 'strategy-delete' | 'watch-add' | 'watch-remove' | 'watch-rearm' |
   'strategy' | 'reset-test' | 'exit';
 interface Session { id: string; address: string }
 const message = (error: unknown) => error instanceof Error ? error.message : 'Local service unavailable';
