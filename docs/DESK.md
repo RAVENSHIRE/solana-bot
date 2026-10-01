@@ -89,6 +89,15 @@ DESK_LIVE_MAX_ENTRIES=10      # new positions per LIVE session; exits are never 
 
 Every open position has an **EXIT NOW** button in *Open positions*. It sells the whole position through the normal SELL path: the same guard, the strategy's exit slippage, and the same signer (the local key signs at once; with Phantom you approve within 15 s). While the desk runs, the position loop sells on its next tick and retries until the position is gone. With the desk stopped, one attempt runs immediately, and you can press the button again. A token bought outside the desk is not in its ledger; sell it in your wallet.
 
+### A held token without a sell route
+
+When a pool is drained or delisted, Jupiter answers its quotes with HTTP 400 (for example `COULD_NOT_FIND_ANY_ROUTE`). That refusal concerns one token. It is not treated as a Jupiter outage, so it never pauses quotes, entries or exits for other tokens. (Before this fix, three refusals paused every Jupiter call for 30 s, and one rugged TEST position blocked all entries for a day.)
+
+The position shows **NO ROUTE since …** under *Open positions*. It is re-quoted every 2 minutes, and its exit rules resume as soon as a route returns. After 30 minutes without a route:
+
+- **TEST** books it as a SELL at zero (`WRITE-OFF`), the realistic outcome.
+- **LIVE** keeps it in the ledger because the tokens stay in the wallet, but it no longer occupies a strategy slot.
+
 ### Scale-up ladder ($10 → $100 → $1K → $10K per entry)
 
 Advisory only — the desk never changes a size by itself. A strategy shows READY for the next rung after ≥ 20 closed trades with positive net PnL, profit factor ≥ 1.3 and a max drawdown within half its sleeve. Paper fills ignore latency and MEV, so confirm with LIVE fills before sizing up real money. The next size also needs pool liquidity of about 50× the entry (≈ 2 % impact); most sub-$1M meme pools cannot absorb $1K+ orders.

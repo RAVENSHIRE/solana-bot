@@ -101,6 +101,8 @@ export interface DeskPosition {
   strategy?: StrategyId;
   /** Status view only: EXIT NOW was requested and the sell is being attempted. */
   exitRequested?: boolean;
+  /** Since when Jupiter has refused to route this token (no sell route); null or absent while it routes. */
+  noRouteSince?: number | null;
 }
 
 export interface LedgerEntry {

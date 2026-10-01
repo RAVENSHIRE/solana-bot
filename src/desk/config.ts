@@ -58,6 +58,13 @@ export const DESK = Object.freeze({
     /** Emergency exit when the pump.fun creator's holding falls by this many percentage points of supply. */
     creatorSellExitPts: 0.5,
     creatorCheckMs: 30_000,
+    /**
+     * A held token Jupiter refuses to route (HTTP 4xx, e.g. pool drained or delisted) is re-quoted this often instead of
+     * every check. After `writeOffMin` without a route it no longer occupies a slot; TEST books it at zero.
+     */
+    noRoute: { retryMs: 120_000, writeOffMin: 30 },
+    /** Other valuation failures (provider outage) are logged at most this often per position. */
+    valuationLogMs: 60_000,
   },
   momentum: { minObservations: 2, minAcceleration: 1, minPriceChange5mPct: 0 },
   /** Candidates kept in memory and on the status API. */

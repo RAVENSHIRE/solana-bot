@@ -181,7 +181,7 @@ function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' =
   const w = { priceFactor: 1, extraRent: 0, liquidity: 50_000, native: 45_000_000, sends: 0, signRequests: 0,
     graduations: [] as Array<{ signature: string; mint: string; ok: boolean; migrate: boolean; broken?: boolean }>,
     priorityCaps: [] as Array<{ side: 'BUY' | 'SELL'; maxLamports: number; notional: bigint }>,
-    dasUnsupported: false,
+    dasUnsupported: false, noRoute: false, sellQuotes: 0,
     last: null as null | { side: 'BUY' | 'SELL'; mint: string; inAmount: bigint; outAmount: bigint } };
   const holderMint = new Map<string, string>();
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -215,6 +215,9 @@ function world(patch: Record<string, unknown> = {}, launch: 'fair' | 'insider' =
     if (url.pathname.endsWith('/quote')) {
       const inputMint = url.searchParams.get('inputMint')!, outputMint = url.searchParams.get('outputMint')!, amount = BigInt(url.searchParams.get('amount')!);
       const slip = Number(url.searchParams.get('slippageBps')), buy = inputMint === SOL_MINT;
+      if (!buy) w.sellQuotes++;
+      // Jupiter's answer for a token whose pool was drained or delisted.
+      if (!buy && w.noRoute) return json({ error: 'Could not find any route', errorCode: 'COULD_NOT_FIND_ANY_ROUTE' }, 400);
       const out = buy ? amount * 200n : amount * BigInt(Math.round(w.priceFactor * 1000)) / 200_000n;
       const q = { inputMint, outputMint, inAmount: String(amount), outAmount: String(out), otherAmountThreshold: String(out * BigInt(10_000 - slip) / 10_000n),
         swapMode: 'ExactIn', slippageBps: slip, priceImpactPct: '0.001', contextSlot: 1, timeTaken: 0.01,
@@ -752,6 +755,36 @@ test('EXIT NOW sells an open position at once, while the desk runs and after STO
       assert.ok(engine.events.list().some(e => /CRASH · exit signal: EXIT NOW \(manual\)/.test(e.message)));
       assert.throws(() => engine.requestExit(mint), /POSITION_NOT_FOUND/, 'nothing left to sell');
     }
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('a held token without a Jupiter route never pauses Jupiter for other tokens; it is re-quoted every 2 min and TEST writes it off after 30 min', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-no-route-')), { w, shared } = world(YOUNG_PUMP, 'insider');
+  try {
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    engine.start(); await engine.pulse();
+    const cost = engine.status({ connected: false, address: null }).positions[0]!.costUsd;
+    w.noRoute = true; engine.nextScanAt = Number.POSITIVE_INFINITY;
+    const check = async () => { (engine as unknown as { lastPositionCheckAt: Record<string, number> }).lastPositionCheckAt.CRASH = 0; engine.tick(); await engine.settled(); };
+    await check();
+    let view = engine.status({ connected: false, address: null });
+    assert.equal(view.positions.length, 1); assert.ok(view.positions[0]!.noRouteSince, 'the position shows since when it has no route');
+    assert.ok(engine.events.list().some(e => /no Jupiter route to sell \(Jupiter: HTTP 400 COULD_NOT_FIND_ANY_ROUTE\).*retrying every 2 min/.test(e.message)));
+    // The old client paused every Jupiter call for 30 s after three refusals, so no other token could be bought or sold.
+    for (let n = 0; n < 4; n++)
+      await assert.rejects(shared.jupiter.quote({ inputMint: MINT, outputMint: SOL_MINT, amountRaw: 1_000n, slippageBps: 100 }), /HTTP 400 COULD_NOT_FIND_ANY_ROUTE/);
+    assert.ok(await shared.jupiter.quote({ inputMint: SOL_MINT, outputMint: MINT, amountRaw: 1_000n, slippageBps: 100 }), 'a buy quote still works');
+    const quoted = w.sellQuotes;
+    await check(); await check();
+    assert.equal(w.sellQuotes, quoted, 'not re-quoted on every 5-second check');
+    const realNow = Date.now;
+    const clock = t.mock.method(Date, 'now', () => realNow() + 31 * 60_000);
+    try { await check(); } finally { clock.mock.restore(); }
+    view = engine.status({ connected: false, address: null });
+    assert.equal(view.positions.length, 0, 'TEST writes the unsellable position off');
+    const row = view.ledger.find(e => e.side === 'SELL')!;
+    assert.match(row.note!, /^WRITE-OFF — no Jupiter route since \d\d:\d\d/); assert.ok(row.netPnlUsd! <= -cost * 0.99, 'booked at zero');
+    assert.ok(engine.events.list().some(e => /exit signal: NO_ROUTE for 3\d min/.test(e.message)));
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 

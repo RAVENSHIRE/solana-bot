@@ -310,7 +310,7 @@ function Positions({ d, busy, exit }: { d: DeskStatus; busy: boolean; exit: (p: 
         const value = p.lastValueLamports && solUsd ? Number(p.lastValueLamports) / 1e9 * solUsd : null;
         return <tr key={p.id}><td>{p.strategy ?? 'FAIR'}</td><td title={p.mint}>{p.symbol ?? short(p.mint)}</td><td>{p.qtyRaw}</td><td>{p.entryPriceUsd?.toPrecision(6) ?? '--'}</td>
           <td>{p.lastPriceUsd?.toPrecision(6) ?? '--'}</td><td>{fine(p.costUsd)}</td><td>{fine(value)}</td><td>{fine(value === null ? null : value - p.costUsd)}</td>
-          <td>{p.route}</td><td>{ago(p.openedAt)}</td>
+          <td>{p.noRouteSince ? <span className="unknown" title="Jupiter finds no route to sell this token (pool drained or delisted). Re-quoted every 2 min; it exits if a route returns.">NO ROUTE since {ago(p.noRouteSince)}</span> : p.route}</td><td>{ago(p.openedAt)}</td>
           <td><button className="stop-action" disabled={busy || !!p.exitRequested} onClick={() => exit(p)}>{p.exitRequested ? 'SELLING…' : 'EXIT NOW'}</button></td></tr>;
       })}{!d.positions.length && <tr><td colSpan={11}>No open positions.</td></tr>}</tbody></table></div>
   </section>;

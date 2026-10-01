@@ -186,6 +186,13 @@ test('source cooldown rejects requests until expiry; another provider remains us
   const results = await Promise.allSettled([new GeckoTerminalClient(log, runtime).getTrendingPools(), new DexScreenerClient(log, runtime).getPairsForTokens([MINT])]);
   assert.equal(results[0]!.status, 'rejected'); assert.equal(results[1]!.status, 'fulfilled');
 });
+test('a refused request (HTTP 4xx such as no route) is not an outage: no retry, no cooldown, provider error code kept', async () => {
+  let calls = 0; const client = http(async () => { calls++; return reply({ error: 'Could not find any route', errorCode: 'COULD_NOT_FIND_ANY_ROUTE' }, 400); }, { retries: 2 });
+  for (let n = 0; n < 5; n++) await assert.rejects(client.get('/quote'), (e: unknown) => e instanceof DataError && e.kind === 'rejected' && /HTTP 400 COULD_NOT_FIND_ANY_ROUTE$/.test(e.message));
+  assert.equal(calls, 5, 'every request reaches the provider: one unroutable token never pauses the others');
+  const bad = http(async () => reply({ errorCode: 'x'.repeat(200) }, 422));
+  await assert.rejects(bad.get('/quote'), /HTTP 422$/);
+});
 test('priority gate reserves execution capacity and preserves originating request scope', async () => {
   const gate = new RequestGate(2); const first = deferred(); const order: string[] = [];
   const a = requestScope.run({ category: 'discovery', strategy: 'A' }, () => gate.run(async () => { order.push('a'); await first.promise; }));

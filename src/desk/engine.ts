@@ -81,6 +81,9 @@ export class DeskEngine {
   private notes = new Map<string, string>();
   private creatorChecks = new Map<string, number>();
   private holdLog = new Map<string, { pct: number; at: number }>();
+  /** Per mint: when an unroutable position was last quoted, and when a valuation failure was last logged. */
+  private noRouteChecks = new Map<string, number>();
+  private valuationLog = new Map<string, number>();
   private lastPositionCheckAt: Record<StrategyId, number> = { FAIR: 0, CRASH: 0 };
   /** Mints the owner asked to sell now (EXIT NOW); kept until the position is gone, so a failed sell is retried. */
   private manualExits = new Set<string>();
@@ -314,7 +317,7 @@ export class DeskEngine {
       }
       this.cycles.delete(id);
     }
-    this.preflights = []; this.entrySkips.clear(); this.drillSkips.clear(); this.holdLog.clear(); this.notes.clear(); this.entryNotes.clear(); this.message = null;
+    this.preflights = []; this.entrySkips.clear(); this.drillSkips.clear(); this.holdLog.clear(); this.noRouteChecks.clear(); this.valuationLog.clear(); this.notes.clear(); this.entryNotes.clear(); this.message = null;
     this.event('SYSTEM', `TEST reset: ${archived.length ? `archived ${archived.join(', ')}` : 'nothing to archive'}; every sleeve restarts at its planned capital`);
     await this.persist();
     return archived;
@@ -694,15 +697,24 @@ export class DeskEngine {
     for (const p of positions) {
       if (stopped()) return;
       const ctx = { mint: p.mint, symbol: p.symbol, detail: { strategy: id } };
-      const manual = this.manualExits.has(p.mint);
+      const manual = this.manualExits.has(p.mint), noRoute = DESK.exits.noRoute;
+      if (p.noRouteSince && !manual && Date.now() - (this.noRouteChecks.get(p.mint) ?? 0) < noRoute.retryMs) continue;
       const warning = manual ? 'EXIT NOW (manual)' : await this.earlyWarning(p, liquidity);
       let value: bigint;
       try {
         const q = await requestScope.run({ category: 'position' }, () => this.d.jupiter.quote({ inputMint: p.mint, outputMint: SOL_MINT, amountRaw: BigInt(p.qtyRaw), slippageBps: profile.slippageBps }));
         value = BigInt(q.outAmount);
       } catch (error) {
-        this.event('WAITING', `${id} · position valuation unavailable: ${errorMessage(error)}; holding, no write-down`, ctx);
+        if (refused(error)) { await this.unroutable(id, ledger, p, error); continue; }
+        if (Date.now() - (this.valuationLog.get(p.mint) ?? 0) >= DESK.exits.valuationLogMs) {
+          this.valuationLog.set(p.mint, Date.now());
+          this.event('WAITING', `${id} · position valuation unavailable: ${errorMessage(error)}; holding, no write-down`, ctx);
+        }
         continue;
+      }
+      if (p.noRouteSince) {
+        this.event('SYSTEM', `${id} · Jupiter routes this token again (no route since ${hhmm(p.noRouteSince)}); exit rules resume`, ctx);
+        p.noRouteSince = null; this.noRouteChecks.delete(p.mint);
       }
       p.lastValueLamports = String(value);
       if (value > BigInt(p.peakValueLamports)) p.peakValueLamports = String(value);
@@ -725,6 +737,33 @@ export class DeskEngine {
       this.event('EXIT', `${id} · exit signal: ${reason}`, ctx);
       await this.execute('SELL', { strategy: id, mint: p.mint, symbol: p.symbol, decimals: p.decimals, pairAddress: p.pairAddress, heldRaw: BigInt(p.qtyRaw) }, ledger, stopped);
     }
+  }
+
+  /**
+   * Jupiter refused to route the held token (pool drained, delisted, no liquidity left). Re-quoted every few minutes
+   * so an exit still happens if a route returns. After the write-off delay the position stops occupying a slot; in
+   * TEST it is closed at zero, because a token that cannot be sold is worth nothing to the sleeve.
+   */
+  private async unroutable(id: StrategyId, ledger: DeskLedger, p: DeskPosition, error: unknown): Promise<void> {
+    const now = Date.now(), x = DESK.exits.noRoute, ctx = { mint: p.mint, symbol: p.symbol, detail: { strategy: id } };
+    p.noRouteSince ??= now; this.noRouteChecks.set(p.mint, now);
+    const minutes = (now - p.noRouteSince) / 60_000;
+    if (this.d.mode === 'PAPER' && minutes >= x.writeOffMin && this.solUsd) {
+      this.event('EXIT', `${id} · exit signal: NO_ROUTE for ${Math.round(minutes)} min (${errorMessage(error)}); TEST writes the position off at zero`, ctx);
+      const row = ledger.writeOff(p.mint, this.solUsd, now, `WRITE-OFF — no Jupiter route since ${hhmm(p.noRouteSince)} (${errorMessage(error)}); booked at zero`);
+      this.bookedEvents('SELL', id, row, ctx);
+      this.noRouteChecks.delete(p.mint); this.manualExits.delete(p.mint);
+      await ledger.save();
+      return;
+    }
+    const after = this.d.mode === 'PAPER' ? `written off at zero after ${x.writeOffMin} min` : `stops occupying a slot after ${x.writeOffMin} min; the tokens stay in the wallet`;
+    this.event('WAITING', `${id} · no Jupiter route to sell (${errorMessage(error)}) since ${hhmm(p.noRouteSince)}: pool drained or delisted; retrying every ${x.retryMs / 60_000} min, ${after}`, ctx);
+  }
+
+  /** Positions that count against a strategy's slots: a position without a sell route for longer than the write-off delay does not. */
+  private occupied(ledger: DeskLedger): number {
+    const limit = DESK.exits.noRoute.writeOffMin * 60_000, now = Date.now();
+    return ledger.state.positions.filter(p => !p.noRouteSince || now - p.noRouteSince < limit).length;
   }
 
   // ------------------------------------------------------------------ entries
@@ -774,8 +813,9 @@ export class DeskEngine {
       if (id === 'FAIR') this.message = 'No qualified entry candidate';
       return;
     }
-    let slots = p.maxOpenPositions - s.positions.length, attempts = 0, halt: string | null = null;
-    if (slots <= 0) this.note(id, 'WAITING', `${id} · ${pool.length} candidate(s), but ${s.positions.length}/${p.maxOpenPositions} positions are open`);
+    const open = this.occupied(ledger);
+    let slots = p.maxOpenPositions - open, attempts = 0, halt: string | null = null;
+    if (slots <= 0) this.note(id, 'WAITING', `${id} · ${pool.length} candidate(s), but ${open}/${p.maxOpenPositions} positions are open`);
     for (const c of pool) {
       if (!halt) {
         if (slots <= 0) halt = `all ${p.maxOpenPositions} ${id} slots in use`;
@@ -836,7 +876,7 @@ export class DeskEngine {
    * concentration and momentum gates. The execution guard still applies. Every drill fill is marked in the ledger.
    */
   private async drillEnter(ledger: DeskLedger, stopped: () => boolean, recentExit: (mint: string) => boolean): Promise<void> {
-    if (ledger.state.positions.length >= this.strategies.FAIR.maxOpenPositions) return;
+    if (this.occupied(ledger) >= this.strategies.FAIR.maxOpenPositions) return;
     const short = this.sleeveShort(ledger, this.strategies.FAIR);
     if (short) { this.note('FAIR', 'WAITING', `DRILL paused: ${short}`); return; }
     const safe = (c: Candidate) => ['mintAuthority', 'freezeAuthority', 'contract', 'liquidity', 'fairLaunch'].every(k => c.gates.find(g => g.key === k)?.status === 'PASS');
@@ -1131,6 +1171,8 @@ export class DeskEngine {
 
 const usd = (n: number | null) => n === null ? 'UNKNOWN' : `${n < 0 ? '-' : ''}$${Math.abs(n).toFixed(4)}`;
 const hhmm = (at: number) => new Date(at).toTimeString().slice(0, 5);
+/** The provider refused this request (HTTP 4xx such as no route), as opposed to an outage. Matched by name across module copies. */
+const refused = (error: unknown) => error instanceof Error && error.name === 'DataError' && (error as Error & { kind?: unknown }).kind === 'rejected';
 const rank = (c: Candidate) => ({ QUALIFIED: 4, WAITING: 3, WATCHLIST: 2, FILTERED: 1 })[c.status];
 function composite(c: Candidate): number {
   const v = (k: string) => c.scores.find(s => s.key === k)?.score ?? 0;

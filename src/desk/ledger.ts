@@ -10,7 +10,7 @@ const position = z.object({ id: z.string(), mint: z.string(), symbol: z.string()
   openedAt: z.number().int(), qtyRaw: raw, costLamports: raw, costUsd: finite, entryPriceUsd: finite.nullable(), peakValueLamports: raw,
   lastValueLamports: raw.nullable(), lastPriceUsd: finite.nullable(), router: z.string(), route: z.string(), entrySignature: z.string().nullable(),
   rentLamports: raw, pairAddress: z.string(), entryLiquidityUsd: finite.nullable().optional(), creator: z.string().nullable().optional(),
-  creatorPctAtEntry: finite.nullable().optional() }).strict();
+  creatorPctAtEntry: finite.nullable().optional(), noRouteSince: z.number().int().nonnegative().nullable().optional() }).strict();
 const entry = z.object({ id: z.string(), at: z.number().int(), mode: z.enum(['PAPER', 'LIVE']), txSignature: z.string().nullable(), mint: z.string(),
   symbol: z.string().nullable(), router: z.string(), route: z.string(), side: z.enum(['BUY', 'SELL']), quantity: z.string(), qtyRaw: raw,
   entryPriceUsd: finite.nullable(), exitPriceUsd: finite.nullable(), grossPnlUsd: finite.nullable(), networkFeeLamports: raw,
@@ -109,6 +109,18 @@ export class DeskLedger {
     if (s.entries.length > 10_000) s.entries.splice(0, s.entries.length - 10_000);
     s.pending = null;
     return entryRow;
+  }
+
+  /**
+   * TEST only: closes a position that cannot be sold (no route) at zero proceeds. Its token account still holds the
+   * tokens, so the account rent stays charged.
+   */
+  writeOff(mint: string, solUsd: number, at: number, note: string): LedgerEntry {
+    const p = this.position(mint);
+    if (this.state.mode !== 'PAPER') throw new Error('WRITE_OFF_TEST_ONLY');
+    if (!p) throw new Error('UNTRACKED_POSITION');
+    return this.book({ side: 'SELL', mint, symbol: p.symbol, decimals: p.decimals, pairAddress: p.pairAddress, inAmountRaw: BigInt(p.qtyRaw), outAmountRaw: 0n,
+      solDeltaLamports: 0n, feeLamports: 0n, rentLamports: 0n, router: 'none', route: 'no route', routerFeeUsd: null, txSignature: null, solUsd, at, note });
   }
 
   failed(f: { side: 'BUY' | 'SELL'; mint: string; symbol: string | null; router: string; route: string; feeLamports: bigint; solUsd: number;
