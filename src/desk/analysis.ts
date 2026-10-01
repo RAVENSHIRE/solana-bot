@@ -226,6 +226,12 @@ export function analyze(i: AnalysisInput): Candidate {
       : (m.poolAgeMin ?? Infinity) <= 30 ? 'EARLY' : 'WATCH';
     status = classification === 'REJECT' ? 'FILTERED' : 'WATCHLIST';
     if (!reasons.length) reasons.push(unknown.length ? `Waiting for evidence: ${unknown.map(g => g.label).join(', ')}` : 'Ultra-early discovery: monitored, not auto-executed');
+  } else if (i.tier === 'CUSTOM') {
+    // Outside FAIR's bands (or held): never a FAIR entry; custom strategies check their own rules.
+    status = safetyFail ? 'FILTERED' : 'WATCHLIST'; classification = safetyFail ? 'REJECT' : 'WATCH';
+    reasons.length = 0;
+    reasons.push(safetyFail ? failed.filter(g => ['mintAuthority', 'freezeAuthority', 'contract'].includes(g.key)).map(g => `${g.label}: ${g.actual} (${g.required})`).join('; ')
+      : 'Outside the FAIR market-cap bands: checked by custom strategies only');
   } else if (failed.length) {
     status = 'FILTERED'; classification = 'REJECT';
   } else if (unknown.length) {

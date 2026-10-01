@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { MICRO } from '../micro/policy';
 import type { StrategyId } from './types';
+import type { RuleSpec } from './custom';
 
 /**
  * Single source of the desk's capital plan and discovery thresholds.
@@ -143,6 +144,8 @@ export interface ExitRules {
   trailing: { activationPct: number; stopPct: number } | null;
   /** CRASH: exit when the return falls `points` below its peak, once the peak reached lockPeakPct. */
   giveback: { lockPeakPct: number; points: number } | null;
+  /** Custom strategies: exit when the token's market cap falls to the floor or reaches the target. */
+  marketCap?: { floorUsd: number | null; targetUsd: number | null } | null;
 }
 export interface StrategyProfile {
   id: StrategyId; label: string; summary: string; enabled: boolean;
@@ -153,8 +156,12 @@ export interface StrategyProfile {
   exitMode: 'quick' | 'ride' | 'rules';
   /** A token is not re-entered by this strategy sooner than this after an exit. */
   reentryCooldownMs: number;
+  /** Custom rule strategy: the spec its entries are checked against. */
+  rule?: RuleSpec;
 }
-export const STRATEGY_IDS: readonly StrategyId[] = ['FAIR', 'CRASH'];
+/** The built-in strategies; custom rule strategies are added at runtime (see custom.ts). */
+export type BuiltinStrategyId = 'FAIR' | 'CRASH';
+export const STRATEGY_IDS: readonly BuiltinStrategyId[] = ['FAIR', 'CRASH'];
 
 export interface DeskOperational {
   version: 1;
@@ -209,7 +216,7 @@ const pctSetting = (fallback: number, max = 1_000) => z.coerce.number().finite()
  * Slippage tolerance counts toward the drag cap, so it must stay below it.
  */
 export function strategyProfiles(env: NodeJS.ProcessEnv, capital: DeskCapital,
-  rs: { takeProfitPct: number; stopLossPct: number; trailingActivationPct: number; trailingStopPct: number; maxHoldMin: number }): Record<StrategyId, StrategyProfile> {
+  rs: { takeProfitPct: number; stopLossPct: number; trailingActivationPct: number; trailingStopPct: number; maxHoldMin: number }): Record<BuiltinStrategyId, StrategyProfile> {
   const c = CRASH_DEFAULTS;
   const e = z.object({
     CRASH_ENABLED: z.enum(['true', 'false']).default(c.enabled ? 'true' : 'false'),

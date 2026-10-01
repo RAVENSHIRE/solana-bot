@@ -10,7 +10,7 @@ export interface TradingView {
   pending: { id: string; transactionBase64: string; expiresAt: number } | null;
   mode: DeskMode; desk: DeskStatus | null; deskError: string | null;
 }
-export type DeskAction = 'select-mode' | 'start-test' | 'stop-test' | 'start-live' | 'pause' | 'resume' | 'stop-live' | 'probe' | 'drill-on' | 'drill-off' |
+export type DeskAction = 'select-mode' | 'start-test' | 'stop-test' | 'start-live' | 'pause' | 'resume' | 'stop-live' | 'probe' | 'drill-on' | 'drill-off' | 'strategy-save' | 'strategy-delete' |
   'strategy' | 'reset-test' | 'exit';
 interface Session { id: string; address: string }
 const message = (error: unknown) => error instanceof Error ? error.message : 'Local service unavailable';
@@ -32,7 +32,7 @@ export function useTradingSession() {
     const token = await getCapability();
     const r = await fetch(`/api/trading/${action}`, { method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-Local-Capability': token }, body: JSON.stringify(body) });
-    const result = await r.json(); if (!r.ok) { if (r.status === 403) cap.current = null; throw new Error(result.message ?? 'Request rejected'); }
+    const result = await r.json(); if (!r.ok) { if (r.status === 403) cap.current = null; throw new Error(result.detail ? `${result.message}: ${result.detail}` : result.message ?? 'Request rejected'); }
     return result;
   }, [getCapability]);
   const invalidate = useCallback((why: string | null) => {

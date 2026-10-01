@@ -18,7 +18,7 @@ import { BASE_FEE_LAMPORTS, SOL_MINT, TOKEN_ACCOUNT_RENT_LAMPORTS } from '../cor
 import type { Logger } from '../utils/logger';
 import { errorMessage } from '../utils/errors';
 import { atomicWriteFile } from '../utils/fs';
-import { DESK, STRATEGY_IDS, strategyProfiles, type DeskCapital, type DeskOperational, type LiveSignerKind, type StrategyProfile } from './config';
+import { DESK, STRATEGY_IDS, strategyProfiles, type BuiltinStrategyId, type DeskCapital, type DeskOperational, type LiveSignerKind, type StrategyProfile } from './config';
 import { EventLog } from './events';
 import { DeskLedger, type LedgerState } from './ledger';
 import { discover, pairMetrics, selectPair, tierFor, type Discovered } from './discovery';
@@ -30,7 +30,8 @@ import { assessAuthenticity, checkWebsite, parseXLink, type WebsiteCheck, type X
 import { analyze, type SocialEvidence, type WatchState } from './analysis';
 import { DeskGuard, DeskReject, PaperExecution, paperSigner } from './guard';
 import { crashCheck, crashMarketHint, exitReason, exitRuleText, scaleAdvice, strategyStats } from './strategies';
-import type { Candidate, DeskEvent, DeskMode, DeskPosition, DeskStatus, Preflight, Stage, StrategyId, StrategyView } from './types';
+import type { Candidate, DeskEvent, DeskMode, DeskPosition, DeskStatus, Preflight, Stage, StrategyId, StrategyView, Tier } from './types';
+import { PRESETS, loadRuleSpecs, removeRuleSpec, ruleCheck, ruleMarketHint, ruleProfile, saveRuleSpec, type RuleSpec } from './custom';
 
 export interface DeskWallet { owner: PublicKey; signer: TransactionSigner | null }
 export interface DeskDeps {
@@ -43,7 +44,7 @@ export interface DeskDeps {
   sender: TransactionSender | null;
   website?: (url: string | null) => Promise<WebsiteCheck>;
   /** Strategy settings; defaults to strategyProfiles() of the desk capital and RS_* rules. */
-  strategies?: Record<StrategyId, StrategyProfile>;
+  strategies?: Record<BuiltinStrategyId, StrategyProfile>;
   operational?: DeskOperational;
   /** LIVE: who signs (default PHANTOM) and how many new entries one LIVE session may open. */
   signerKind?: LiveSignerKind;
@@ -51,7 +52,7 @@ export interface DeskDeps {
 }
 
 interface Deep { at: number; onchain: OnchainEvidence; social: SocialEvidence }
-interface Staged { found: Discovered; pair: DexPair; tier: 'TRENDING' | 'ULTRA_EARLY'; metrics: ReturnType<typeof pairMetrics>; crashHint: boolean }
+interface Staged { found: Discovered; pair: DexPair; tier: Tier; metrics: ReturnType<typeof pairMetrics>; crashHint: boolean; ruleHints: StrategyId[] }
 interface ExecTarget {
   strategy: StrategyId; mint: string; symbol: string | null; decimals: number; pairAddress: string; heldRaw: bigint; token2022?: boolean; drill?: boolean;
   entry?: { liquidityUsd: number | null; creator: string | null; creatorPct: number | null };
@@ -67,7 +68,8 @@ export class DeskEngine {
   /** Optional cap on new entries for this session (e.g. a first real-funds test); null = unlimited. Exits are never capped. */
   entryAllowance: number | null = null;
   /** Both strategies run in parallel, each with its own ledger (and TEST sleeve). */
-  readonly strategies: Record<StrategyId, StrategyProfile>;
+  /** FAIR and CRASH always; custom rule strategies are added from strategies.json and the dashboard. */
+  readonly strategies: Record<BuiltinStrategyId, StrategyProfile> & Partial<Record<StrategyId, StrategyProfile>>;
   private drillSkips = new Map<string, number>();
   /** `${strategy}:${mint}` → when and why the guard last blocked an entry; skipped for DESK.entrySkipMs. */
   private entrySkips = new Map<string, { at: number; code: string }>();
@@ -84,7 +86,7 @@ export class DeskEngine {
   /** Per mint: when an unroutable position was last quoted, and when a valuation failure was last logged. */
   private noRouteChecks = new Map<string, number>();
   private valuationLog = new Map<string, number>();
-  private lastPositionCheckAt: Record<StrategyId, number> = { FAIR: 0, CRASH: 0 };
+  private lastPositionCheckAt: Record<StrategyId, number> = {};
   /** Mints the owner asked to sell now (EXIT NOW); kept until the position is gone, so a failed sell is retried. */
   private manualExits = new Set<string>();
   /** Holder snapshots from the light holder pass (and deep analyses), newest wins in assess(). */
@@ -134,12 +136,23 @@ export class DeskEngine {
   static async create(d: DeskDeps): Promise<DeskEngine> {
     const engine = new DeskEngine(d);
     await engine.events.load();
+    const custom = await loadRuleSpecs(d.dir);
+    for (const spec of custom.specs) engine.strategies[spec.id] = ruleProfile(spec, d.mode === 'PAPER');
+    for (const error of custom.errors) engine.event('FAILED', `Custom strategy not loaded: ${error}`);
     if (d.operational?.deploymentMode !== 'LOCKED') await engine.loadSettings();
-    if (d.mode === 'PAPER') for (const id of STRATEGY_IDS) { await engine.ledgerFor(id, null); await engine.loadCycles(id); }
+    if (d.mode === 'PAPER') for (const id of engine.ids()) { await engine.ledgerFor(id, null); await engine.loadCycles(id); }
     return engine;
   }
 
   get mode(): DeskMode { return this.d.mode; }
+  /** Built-in strategies first, then custom ones in the order they were added. */
+  ids(): StrategyId[] { return Object.keys(this.strategies); }
+  private profile(id: StrategyId): StrategyProfile {
+    const p = this.strategies[id];
+    if (!p) throw new DeskReject('INVALID_STRATEGY');
+    return p;
+  }
+  private customIds(): StrategyId[] { return this.ids().filter(id => this.strategies[id]?.rule); }
   get busy(): boolean { return this.work !== null; }
 
   /** FAIR keeps the original ledger names; CRASH writes ledger-PAPER-CRASH.json / ledger-LIVE-CRASH-<wallet>.json. */
@@ -162,7 +175,7 @@ export class DeskEngine {
     return this.walletView ? this.ledgers.get(this.ledgerKey(id, this.walletView.owner)) ?? null : null;
   }
   private books(): Array<{ id: StrategyId; p: StrategyProfile; ledger: DeskLedger }> {
-    return STRATEGY_IDS.flatMap(id => { const ledger = this.ledgerOf(id); return ledger ? [{ id, p: this.strategies[id], ledger }] : []; });
+    return this.ids().flatMap(id => { const ledger = this.ledgerOf(id); return ledger ? [{ id, p: this.profile(id), ledger }] : []; });
   }
   /** A token is held by at most one strategy at a time. */
   private heldBy(mint: string): StrategyId | null { return this.books().find(b => b.ledger.position(mint))?.id ?? null; }
@@ -190,7 +203,7 @@ export class DeskEngine {
     this.scanner = true; this.execution = true; this.generation++; this.nextScanAt = Date.now(); this.notes.clear();
     // Each LIVE session may open a limited number of new positions; exits are never capped.
     if (this.d.mode === 'LIVE') { this.entryAllowance = this.d.liveMaxEntries ?? null; this.rentSwept = false; }
-    const on = STRATEGY_IDS.filter(id => this.strategies[id].enabled).join(' + ') || 'none';
+    const on = this.ids().filter(id => this.profile(id).enabled).join(' + ') || 'none';
     this.event('SYSTEM', this.d.mode === 'PAPER' ? `TEST started: scanner ON, paper execution ENABLED (strategies: ${on}) — no signature will ever be requested`
       : `LIVE session started: scanner ON, execution ENABLED (strategies: ${on}) — ` + (this.localKey
         ? `orders are signed automatically by the local key; at most ${this.entryAllowance ?? 'unlimited'} new entries this session`
@@ -204,7 +217,7 @@ export class DeskEngine {
     const wallet = this.d.wallet();
     if (!wallet) throw new DeskReject('WALLET_REQUIRED');
     const owner = wallet.owner.toBase58();
-    for (const id of STRATEGY_IDS) await this.ledgerFor(id, owner);
+    for (const id of this.ids()) await this.ledgerFor(id, owner);
     const native = await this.d.rpc.execute('desk:wallet-sync', c => c.getBalance(wallet.owner, 'confirmed'));
     this.walletView = { owner, native: BigInt(native), at: Date.now() };
     if (this.books().some(b => b.ledger.state.halted || b.ledger.state.pending)) throw new DeskReject('TRANSACTION_RECONCILIATION_REQUIRED');
@@ -236,10 +249,39 @@ export class DeskEngine {
   }
   /** Disabling a strategy stops its new entries; its open positions keep their exits. The choice survives restarts. */
   setStrategy(id: StrategyId, enabled: boolean): void {
-    const p = this.strategies[id];
+    const p = this.profile(id);
     if (p.enabled === enabled) return;
     p.enabled = enabled;
     this.event('SYSTEM', `${p.label} strategy ${enabled ? 'ENABLED' : 'DISABLED — no new entries; open positions keep their exits'}`, { detail: { strategy: id } });
+    this.settingsWrite = this.settingsWrite.then(() => this.saveSettings());
+  }
+  /**
+   * Adds or replaces a custom rule strategy (saved in strategies.json for both modes). A new strategy starts ON in TEST
+   * and OFF in LIVE; an edit keeps its switch, and new exit rules apply to its open positions at once.
+   */
+  async defineStrategy(spec: RuleSpec): Promise<void> {
+    if ((STRATEGY_IDS as readonly string[]).includes(spec.id)) throw new DeskReject('BUILTIN_STRATEGY');
+    const old = this.strategies[spec.id];
+    if (old && !old.rule) throw new DeskReject('BUILTIN_STRATEGY');
+    this.strategies[spec.id] = ruleProfile(spec, old?.enabled ?? this.d.mode === 'PAPER');
+    await saveRuleSpec(this.d.dir, spec);
+    if (this.d.mode === 'PAPER') { await this.ledgerFor(spec.id, null); if (!old) await this.loadCycles(spec.id); }
+    else if (this.walletView) await this.ledgerFor(spec.id, this.walletView.owner);
+    this.event('SYSTEM', old ? `${spec.label} strategy updated; open positions use the new exit rules`
+      : `${spec.label} strategy added: ${this.profile(spec.id).enabled ? 'ON' : 'OFF'} in ${this.d.mode === 'PAPER' ? 'TEST' : 'LIVE'}`, { detail: { strategy: spec.id } });
+    this.settingsWrite = this.settingsWrite.then(() => this.saveSettings());
+  }
+  /** Open positions of a strategy in this mode's ledger. */
+  strategyPositions(id: StrategyId): number { return this.ledgerOf(id)?.state.positions.length ?? 0; }
+  /** Removes a custom strategy without open positions; its ledger stays on disk. */
+  async removeStrategy(id: StrategyId): Promise<void> {
+    const p = this.strategies[id];
+    if (!p) return;
+    if (!p.rule) throw new DeskReject('BUILTIN_STRATEGY');
+    if (this.strategyPositions(id)) throw new DeskReject('STRATEGY_HAS_POSITIONS');
+    delete this.strategies[id];
+    await removeRuleSpec(this.d.dir, id);
+    this.event('SYSTEM', `${p.label} strategy removed; its ledger stays on disk`, { detail: { strategy: id } });
     this.settingsWrite = this.settingsWrite.then(() => this.saveSettings());
   }
   /**
@@ -277,11 +319,11 @@ export class DeskEngine {
   private async loadSettings(): Promise<void> {
     let saved: { strategies?: Partial<Record<StrategyId, unknown>>; drill?: unknown };
     try { saved = JSON.parse(await fs.readFile(this.settingsFile(), 'utf8')); } catch { return; }
-    for (const id of STRATEGY_IDS) if (typeof saved.strategies?.[id] === 'boolean') this.strategies[id].enabled = saved.strategies[id] as boolean;
+    for (const id of this.ids()) if (typeof saved.strategies?.[id] === 'boolean') this.profile(id).enabled = saved.strategies[id] as boolean;
     if (this.d.mode === 'PAPER' && typeof saved.drill === 'boolean') this.drill = saved.drill;
   }
   private async saveSettings(): Promise<void> {
-    const body = { strategies: Object.fromEntries(STRATEGY_IDS.map(id => [id, this.strategies[id].enabled])), drill: this.drill, updatedAt: new Date().toISOString() };
+    const body = { strategies: Object.fromEntries(this.ids().map(id => [id, this.profile(id).enabled])), drill: this.drill, updatedAt: new Date().toISOString() };
     await atomicWriteFile(this.settingsFile(), JSON.stringify(body, null, 2) + '\n').catch(error => this.event('FAILED', `Saving settings failed: ${errorMessage(error)}`));
   }
 
@@ -296,7 +338,7 @@ export class DeskEngine {
     await this.settled();
     if (this.scanner) throw new DeskReject('STOP_TEST_FIRST');
     const stamp = new Date().toISOString().replace(/[:.]/g, '-'), archived: string[] = [];
-    for (const id of STRATEGY_IDS) {
+    for (const id of this.ids()) {
       const key = this.ledgerKey(id, null), file = path.join(this.d.dir, `ledger-${key}.json`), old = this.ledgers.get(key);
       this.ledgers.delete(key);
       if (old && (old.state.entries.length || old.state.positions.length)) {
@@ -306,10 +348,10 @@ export class DeskEngine {
         archived.push(path.basename(target));
       } else await fs.rm(file, { force: true });
       const fresh = await this.ledgerFor(id, null);
-      if (this.solUsd) fresh.fundPaper(this.strategies[id].capitalUsd, this.solUsd);
+      if (this.solUsd) fresh.fundPaper(this.profile(id).capitalUsd, this.solUsd);
       await fresh.save();
     }
-    for (const id of STRATEGY_IDS) {
+    for (const id of this.ids()) {
       for (const name of await this.cycleFiles(id)) {
         const target = name.replace('.cycle-', `.archived-${stamp}.cycle-`);
         await fs.rename(path.join(this.d.dir, name), path.join(this.d.dir, target));
@@ -367,7 +409,7 @@ export class DeskEngine {
     if (!this.work && (this.nextScanAt ?? 0) <= Date.now()) void this.pulse();
     if (this.positionWork) return;
     const now = Date.now();
-    const due = STRATEGY_IDS.filter(id => (this.ledgerOf(id)?.state.positions.length ?? 0) > 0 && now - this.lastPositionCheckAt[id] >= this.strategies[id].positionCheckMs);
+    const due = this.ids().filter(id => (this.ledgerOf(id)?.state.positions.length ?? 0) > 0 && now - (this.lastPositionCheckAt[id] ?? 0) >= this.profile(id).positionCheckMs);
     if (!due.length) return;
     this.background = this.checkPositions(due, this.stopper())
       .catch(error => this.event('FAILED', `Position check failed: ${errorMessage(error)}`))
@@ -414,7 +456,7 @@ export class DeskEngine {
     const books = this.books();
     if (d.mode === 'LIVE' && !books.length) { this.message = 'Connect Phantom to scan in LIVE mode'; this.event('WAITING', this.message); return; }
     if (this.solUsd) for (const b of books) b.ledger.fundPaper(b.p.capitalUsd, this.solUsd);
-    await this.checkPositions(STRATEGY_IDS, stopped);
+    await this.checkPositions(this.ids(), stopped);
     if (stopped()) return;
     for (const [k, at] of this.drillSkips) if (Date.now() - at > 15 * 60_000) this.drillSkips.delete(k);
     for (const [k, v] of this.entrySkips) if (Date.now() - v.at > DESK.entrySkipMs) this.entrySkips.delete(k);
@@ -438,10 +480,17 @@ export class DeskEngine {
     this.lastCompletedScanAt = started;
     if (stopped()) return;
     this.event('SCANNING', `Scan finished: ${found.tokens.size} tokens discovered, ${counts.qualified} qualified (FAIR), ${counts.crash} CRASH signal(s), ` +
+      `${this.customIds().length ? `${counts.custom} custom signal(s), ` : ''}` +
       `${counts.waiting} waiting, ${counts.watch} on watchlist, ${counts.filtered} filtered`, { detail: { ms: Date.now() - started } });
     const fair = this.ledgerOf('FAIR');
     // Only candidates assessed in this scan: a token that dropped out of discovery keeps its last snapshot, which is never traded on.
     if (fair) await this.maybeEnter('FAIR', fair, [...this.candidates.values()].filter(c => c.status === 'QUALIFIED' && c.updatedAt >= started), stopped);
+    for (const id of this.customIds()) {
+      const ledger = this.ledgerOf(id);
+      if (!this.strategies[id]?.enabled || !ledger || stopped()) continue;
+      const signals = [...this.candidates.values()].filter(c => c.updatedAt >= started && c.rules?.[id]?.signal);
+      if (signals.length) await this.maybeEnter(id, ledger, signals, stopped);
+    }
   }
 
   private watchlist(): string[] {
@@ -462,7 +511,7 @@ export class DeskEngine {
     try {
       const native = await d.rpc.execute('desk:wallet-sync', c => c.getBalance(wallet.owner, 'confirmed'));
       this.walletView = { owner: wallet.owner.toBase58(), native: BigInt(native), at: Date.now() };
-      if (d.mode === 'LIVE') for (const id of STRATEGY_IDS) await this.ledgerFor(id, this.walletView.owner);
+      if (d.mode === 'LIVE') for (const id of this.ids()) await this.ledgerFor(id, this.walletView.owner);
     } catch (error) { fail('wallet-sync', `Wallet sync failed: ${errorMessage(error)}`); }
   }
 
@@ -480,8 +529,10 @@ export class DeskEngine {
       const found = tokens.get(mint)!, pair = selectPair(pairs, mint, Date.now());
       if (!pair) { filtered++; this.transition(mint, null, 'FILTERED', 'No fresh SOL/USDC/USDT pool with a price'); continue; }
       const metrics = pairMetrics(pair, Date.now()), tier = tierFor(metrics);
-      if ('filtered' in tier) { filtered++; this.candidates.delete(mint); this.transition(mint, pair.baseToken.symbol ?? null, 'FILTERED', tier.filtered); continue; }
-      list.push({ found, pair, tier: tier.tier, metrics, crashHint: crashMarketHint(metrics) });
+      // Custom strategies see every priced token: a $5M runner is outside FAIR's bands but may be exactly what one wants.
+      const ruleHints = this.customIds().filter(id => this.profile(id).enabled && ruleMarketHint(this.profile(id).rule!, metrics));
+      if ('filtered' in tier && !ruleHints.length && !held.has(mint)) { filtered++; this.candidates.delete(mint); this.transition(mint, pair.baseToken.symbol ?? null, 'FILTERED', tier.filtered); continue; }
+      list.push({ found, pair, tier: 'filtered' in tier ? 'CUSTOM' : tier.tier, metrics, crashHint: crashMarketHint(metrics), ruleHints });
     }
     return { list, filtered };
   }
@@ -493,7 +544,7 @@ export class DeskEngine {
   /** Deep evidence (RPC, website, X, trade flow) for the most tradeable-looking tokens first; CRASH signals lead. */
   private deepDue(list: Staged[], now: number): Staged[] {
     const crash = this.strategies.CRASH.enabled;
-    const priority = (s: Staged) => (crash && s.crashHint ? 2e9 : 0) + (s.tier === 'TRENDING' ? 1e9 : 0) +
+    const priority = (s: Staged) => (crash && s.crashHint ? 2e9 : 0) + (s.ruleHints.length ? 1.5e9 : 0) + (s.tier === 'TRENDING' ? 1e9 : 0) +
       ((s.metrics.volume5mUsd ?? 0) > DESK.gates.minVolume5mUsd ? 1e8 : 0) + ((s.metrics.liquidityUsd ?? 0) > DESK.gates.minLiquidityUsd ? 1e7 : 0) + (s.metrics.volume5mUsd ?? 0);
     return list.filter(s => !this.deep.has(s.found.mint) || now - this.deep.get(s.found.mint)!.at > DESK.deepAnalysisTtlMs)
       .sort((a, b) => priority(b) - priority(a)).slice(0, DESK.maxDeepAnalysesPerScan);
@@ -551,7 +602,7 @@ export class DeskEngine {
    * for a few of them. Failures leave the previous snapshot; they never block the scan.
    */
   private async refreshHolders(list: Staged[], now: number): Promise<void> {
-    const h = DESK.holders, rank = (s: Staged) => (s.crashHint ? 2e9 : 0) + (s.tier === 'TRENDING' ? 1e9 : 0) + (s.metrics.volume5mUsd ?? 0);
+    const h = DESK.holders, rank = (s: Staged) => (s.ruleHints.length ? 3e9 : 0) + (s.crashHint ? 2e9 : 0) + (s.tier === 'TRENDING' ? 1e9 : 0) + (s.metrics.volume5mUsd ?? 0);
     const due = list.filter(s => {
       const last = this.latestHolders(s.found.mint);
       return !last || now - last.at > h.ttlMs || (!this.holderCountUnsupported && (last.countAt === null || now - last.countAt > h.countTtlMs));
@@ -587,16 +638,19 @@ export class DeskEngine {
     const c = analyze({ found: s.found, pair: s.pair, metrics: s.metrics, tier: s.tier, onchain, onchainAt: deep?.at ?? held?.at ?? null,
       social: deep?.social ?? null, watch, now, maxWashRatio: this.d.cfg.rs.maxWashRatio, launch: this.launches.get(mint)?.value ?? null });
     c.crash = crashCheck(c);
+    const rules = this.customIds().filter(id => this.profile(id).enabled).map(id => [id, ruleCheck(this.profile(id).rule!, c)] as const);
+    if (rules.length) c.rules = Object.fromEntries(rules);
     return c;
   }
-  private finalize(list: Staged[], filtered: number, now: number): { qualified: number; crash: number; waiting: number; watch: number; filtered: number } {
-    const counts = { qualified: 0, crash: 0, waiting: 0, watch: 0, filtered };
+  private finalize(list: Staged[], filtered: number, now: number): { qualified: number; crash: number; custom: number; waiting: number; watch: number; filtered: number } {
+    const counts = { qualified: 0, crash: 0, custom: 0, waiting: 0, watch: 0, filtered };
     for (const s of list) {
       const mint = s.found.mint, candidate = this.assess(s, now);
       this.watch.set(mint, { firstSeenAt: candidate.firstSeenAt, observations: candidate.observations, lastLiquidityUsd: s.metrics.liquidityUsd,
         lastPriceUsd: s.metrics.priceUsd, momentumStreak: candidate.momentumStreak });
       this.candidates.set(mint, candidate);
       if (candidate.crash?.signal) counts.crash++;
+      for (const r of Object.values(candidate.rules ?? {})) if (r.signal) counts.custom++;
       if (s.crashHint) {
         const m = candidate.metrics;
         this.tape.push({ at: now, mint, symbol: candidate.symbol, pool: candidate.pair.address, dex: candidate.pair.dex, priceUsd: m.priceUsd,
@@ -692,7 +746,7 @@ export class DeskEngine {
   }
 
   private async managePositions(id: StrategyId, ledger: DeskLedger, stopped: () => boolean, manualOnly = false): Promise<void> {
-    const profile = this.strategies[id], positions = ledger.state.positions.filter(p => !manualOnly || this.manualExits.has(p.mint));
+    const profile = this.profile(id), positions = ledger.state.positions.filter(p => !manualOnly || this.manualExits.has(p.mint));
     const liquidity = await this.poolLiquidity(positions.filter(p => p.entryLiquidityUsd).map(p => p.mint));
     for (const p of positions) {
       if (stopped()) return;
@@ -722,7 +776,7 @@ export class DeskEngine {
       const cost = exactNumber(BigInt(p.costLamports)), pnlPct = (exactNumber(value) - cost) / cost * 100;
       const peakPct = (exactNumber(BigInt(p.peakValueLamports)) - cost) / cost * 100;
       const fromPeakPct = (exactNumber(value) / exactNumber(BigInt(p.peakValueLamports)) - 1) * 100;
-      const reason = warning ?? exitReason(profile.exits, { pnlPct, peakPct, fromPeakPct, heldMs: Date.now() - p.openedAt });
+      const reason = warning ?? exitReason(profile.exits, { pnlPct, peakPct, fromPeakPct, heldMs: Date.now() - p.openedAt, marketCapUsd: this.marketCapNow(p) });
       if (!reason) {
         // Checked every few seconds; logged only when the result moves or once a minute, so telemetry stays readable.
         const prev = this.holdLog.get(p.mint);
@@ -760,6 +814,16 @@ export class DeskEngine {
     this.event('WAITING', `${id} · no Jupiter route to sell (${errorMessage(error)}) since ${hhmm(p.noRouteSince)}: pool drained or delisted; retrying every ${x.retryMs / 60_000} min, ${after}`, ctx);
   }
 
+  /**
+   * The held token's market cap now: the last scan's market cap moved by the price change since then, measured by the
+   * executable quote. Null when the token was not seen in a recent scan.
+   */
+  private marketCapNow(p: DeskPosition): number | null {
+    const m = this.candidates.get(p.mint)?.metrics;
+    if (!m?.marketCapUsd) return null;
+    return m.priceUsd && p.lastPriceUsd ? m.marketCapUsd * p.lastPriceUsd / m.priceUsd : m.marketCapUsd;
+  }
+
   /** Positions that count against a strategy's slots: a position without a sell route for longer than the write-off delay does not. */
   private occupied(ledger: DeskLedger): number {
     const limit = DESK.exits.noRoute.writeOffMin * 60_000, now = Date.now();
@@ -781,7 +845,7 @@ export class DeskEngine {
    * example max drag) is skipped for a few minutes and the next one is tried.
    */
   private async maybeEnter(id: StrategyId, ledger: DeskLedger, list: Candidate[], stopped: () => boolean): Promise<void> {
-    const p = this.strategies[id];
+    const p = this.profile(id);
     if (!p.enabled || !this.execution || stopped() || this.entryAllowance === 0) return;
     if (ledger.state.halted || ledger.state.pending) { this.message = ledger.state.halted ?? 'TRANSACTION_RECONCILIATION_REQUIRED'; return; }
     // TEST: a sleeve that ran dry with nothing open becomes a completed cycle and is re-funded, so testing never stalls.
@@ -807,7 +871,7 @@ export class DeskEngine {
       if (skip) { note(c.mint, `${skip.code} at ${hhmm(skip.at)}; retry after ${hhmm(skip.at + DESK.entrySkipMs)}`); continue; }
       pool.push(c);
     }
-    pool.sort((a, b) => id === 'CRASH' ? crashRank(b) - crashRank(a) : composite(b) - composite(a));
+    pool.sort((a, b) => id === 'CRASH' ? crashRank(b) - crashRank(a) : id === 'FAIR' ? composite(b) - composite(a) : (b.metrics.volume1hUsd ?? 0) - (a.metrics.volume1hUsd ?? 0));
     if (!pool.length) {
       if (id === 'FAIR' && this.drill && this.d.mode === 'PAPER') return this.drillEnter(ledger, stopped, recentExit);
       if (id === 'FAIR') this.message = 'No qualified entry candidate';
@@ -827,7 +891,8 @@ export class DeskEngine {
       if (c.onchain.decimals === null) { note(c.mint, 'token decimals unknown; deferred'); continue; }
       if (this.heldBy(c.mint)) continue;
       attempts++; this.notes.delete(id);
-      this.event('QUALIFIED', id === 'CRASH' ? `CRASH entry selected: ${c.crash?.summary ?? ''}` : `FAIR entry candidate selected (composite ${composite(c).toFixed(0)})`,
+      this.event('QUALIFIED', id === 'CRASH' ? `CRASH entry selected: ${c.crash?.summary ?? ''}` : id === 'FAIR' ? `FAIR entry candidate selected (composite ${composite(c).toFixed(0)})`
+        : `${id} entry selected: ${c.rules?.[id]?.summary ?? ''}`,
         { mint: c.mint, symbol: c.symbol, detail: { strategy: id } });
       const code = await this.execute('BUY', { strategy: id, mint: c.mint, symbol: c.symbol, decimals: c.onchain.decimals, pairAddress: c.pair.address, heldRaw: 0n,
         token2022: c.onchain.token2022 === true, entry: this.entryContext(c) }, ledger, stopped);
@@ -853,11 +918,11 @@ export class DeskEngine {
     this.cycles.set(id, [...(this.cycles.get(id) ?? []), ledger.state]);
     this.ledgers.delete(key);
     const fresh = await this.ledgerFor(id, null);
-    if (this.solUsd) fresh.fundPaper(this.strategies[id].capitalUsd, this.solUsd);
+    if (this.solUsd) fresh.fundPaper(this.profile(id).capitalUsd, this.solUsd);
     await fresh.save();
     this.notes.delete(id);
     this.event('SYSTEM', `${id} · TEST sleeve ran dry with no open position: cycle ${this.cycles.get(id)!.length} archived (${path.basename(target)}), ` +
-      `sleeve re-funded to $${this.strategies[id].capitalUsd}; stats and realized PnL continue across cycles`, { detail: { strategy: id } });
+      `sleeve re-funded to $${this.profile(id).capitalUsd}; stats and realized PnL continue across cycles`, { detail: { strategy: id } });
     return fresh;
   }
   private async cycleFiles(id: StrategyId): Promise<string[]> {
@@ -934,7 +999,7 @@ export class DeskEngine {
 
   private async executeNow(side: 'BUY' | 'SELL', t: ExecTarget,
     ledger: DeskLedger, stopped: () => boolean, probe: boolean): Promise<string | null> {
-    const d = this.d, profile = this.strategies[t.strategy], ctx = { mint: t.mint, symbol: t.symbol };
+    const d = this.d, profile = this.profile(t.strategy), ctx = { mint: t.mint, symbol: t.symbol };
     const wallet = d.wallet(), solUsd = this.solUsd;
     if (!probe && stopped()) return 'STOP_REQUESTED';
     if (side === 'SELL' && !ledger.position(t.mint)) return 'UNTRACKED_POSITION';
@@ -1108,7 +1173,8 @@ export class DeskEngine {
       mode: d.mode, label: this.localKey ? `${LABEL.LIVE} · SIGNED BY THE LOCAL KEY` : LABEL[d.mode], scanner: this.scanner, execution: this.execution, drill: this.drill, wallet,
       signer: d.mode === 'LIVE' ? (this.localKey ? 'LOCAL_KEY' : 'PHANTOM') : null, entriesLeft: d.mode === 'LIVE' ? this.entryAllowance : null,
       operational: d.operational,
-      strategies: STRATEGY_IDS.map(id => this.strategyView(id)),
+      strategies: this.ids().map(id => this.strategyView(id)),
+      presets: PRESETS,
       capital: {
         plannedStartingCapitalUsd: d.capital.plannedStartingCapitalUsd, baseEntryUsd: d.capital.baseEntryUsd, reserveSol: sol(DESK.reserveLamports),
         maxDragPct: Number(DESK.maxDragBps) / 100, slippageBps: d.capital.slippageBps,
@@ -1124,7 +1190,7 @@ export class DeskEngine {
       lastScanAt: this.lastScanAt, nextScanAt: this.nextScanAt, scanning: this.busy,
       events: this.events.list(250).reverse(),
       candidates: [...this.candidates.values()].map(c => {
-        const notes = Object.fromEntries(STRATEGY_IDS.flatMap(id => { const n = this.entryNotes.get(`${id}:${c.mint}`); return n ? [[id, n]] : []; }));
+        const notes = Object.fromEntries(this.ids().flatMap(id => { const n = this.entryNotes.get(`${id}:${c.mint}`); return n ? [[id, n]] : []; }));
         return { ...c, entryNotes: notes, stale: c.updatedAt < this.lastCompletedScanAt };
       }).sort((a, b) => Number(a.stale) - Number(b.stale) || rank(b) - rank(a) || Number(!!b.crash?.signal) - Number(!!a.crash?.signal) || composite(b) - composite(a)).slice(0, 40),
       preflights: [...this.preflights].reverse(), positions, ledger: rows,
@@ -1133,7 +1199,7 @@ export class DeskEngine {
   }
 
   private strategyView(id: StrategyId): StrategyView {
-    const p = this.strategies[id], s = this.ledgerOf(id)?.state ?? null, solUsd = this.solUsd, past = this.d.mode === 'PAPER' ? this.cycles.get(id) ?? [] : [];
+    const p = this.profile(id), s = this.ledgerOf(id)?.state ?? null, solUsd = this.solUsd, past = this.d.mode === 'PAPER' ? this.cycles.get(id) ?? [] : [];
     const positions = s?.positions ?? [];
     const valued = positions.every(x => x.lastValueLamports !== null);
     const stats = strategyStats([...past.flatMap(c => c.entries), ...(s?.entries ?? [])]);
@@ -1146,6 +1212,7 @@ export class DeskEngine {
       feesUsd: past.reduce((a, c) => a + c.feesUsd, s?.feesUsd ?? 0), halted: s?.halted ?? null, cycles: past.length,
       unrealizedPnlUsd: solUsd && valued ? positions.reduce((a, x) => a + sol(BigInt(x.lastValueLamports!)) * solUsd - x.costUsd, 0) : null,
       stats, scale: scaleAdvice(p, stats, this.d.mode),
+      ...(p.rule ? { spec: p.rule } : {}),
     };
   }
 

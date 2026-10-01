@@ -1,5 +1,6 @@
 import { Fragment, useMemo, useState } from 'react';
 import type { Candidate, DeskEvent, DeskStatus, Evidence, Preflight, Stage, StrategyView } from '../../src/desk/types';
+import type { RuleSpecInput } from '../../src/desk/custom';
 import type { TradingSession } from './use-trading';
 import { money, numeric, short, time } from './format';
 
@@ -17,11 +18,15 @@ const EXPLAIN: Record<string, string> = {
   RPC_NOT_CONFIGURED: 'Set RPC_ENDPOINTS in the local .env.', JUPITER_API_KEY_REQUIRED: 'Set JUPITER_API_KEY in the local .env (never in the browser).',
   INSTANCE_LOCK: 'Another dashboard process owns data-desk. Close it first.', SCANNER_OFF: 'Start the scanner first.',
   RESET_TEST_ONLY: 'Reset is only available in TEST.', INVALID_STRATEGY: 'Unknown strategy.',
+  STRATEGY_HAS_POSITIONS: 'This strategy still holds a position (TEST or LIVE). Sell or wait for its exit before deleting it.',
+  BUILTIN_STRATEGY: 'FAIR and CRASH are built in: they can be switched off, not edited or deleted.',
+  CONFIG_LOCKED: 'The desk runs with DESK_DEPLOYMENT_MODE=LOCKED: strategies are fixed at startup.',
   POSITION_NOT_FOUND: 'That position is no longer open in the desk ledger (already sold, or held outside the desk: sell it in your wallet).',
   PHANTOM_PROVIDER: 'Phantom could not connect from this page: open the dashboard in the browser profile where the Phantom extension is installed and unlocked. With DESK_LIVE_SIGNER=local-key in .env, LIVE needs no Phantom connection at all.',
   AUTO_CONFIRM_UNAVAILABLE_FOR_DOMAIN: 'Phantom does not offer Auto-Confirm for this domain (only for domains it has approved). LIVE orders need your approval in Phantom within 15 s.',
 };
-const describe = (code: string | null) => !code ? null : /supported wallet provider|wallet provider/i.test(code) ? EXPLAIN.PHANTOM_PROVIDER : EXPLAIN[code] ?? code.replaceAll('_', ' ');
+const describe = (code: string | null) => !code ? null : /supported wallet provider|wallet provider/i.test(code) ? EXPLAIN.PHANTOM_PROVIDER
+  : code.startsWith('INVALID_STRATEGY_SPEC: ') ? `Strategy not saved — ${code.slice(23)}` : EXPLAIN[code] ?? code.replaceAll('_', ' ');
 const fine = (v: number | null | undefined, d = 4) => v === null || v === undefined || !Number.isFinite(v) ? '--' : `${v < 0 ? '-' : ''}$${Math.abs(v).toFixed(d)}`;
 const sol = (lamports: string | null | undefined) => lamports == null ? '--' : `${(Number(lamports) / 1e9).toFixed(6)} SOL`;
 const ago = (at: number | null | undefined) => at ? new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '--';
@@ -150,15 +155,107 @@ function Capital({ d }: { d: DeskStatus }) {
 
 const signed = (v: number | null | undefined, d = 1) => v === null || v === undefined ? '--' : `${v > 0 ? '+' : ''}${v.toFixed(d)}%`;
 
+type Spec = RuleSpecInput;
+type Group = 'entry' | 'exits' | 'sizing';
+/** Editor fields of a custom strategy; an empty optional field means "no rule". */
+const FIELDS: Array<{ group: Group | null; key: string; label: string; optional: boolean }> = [
+  { group: 'entry', key: 'minMarketCapUsd', label: 'Min market cap ($)', optional: true }, { group: 'entry', key: 'maxMarketCapUsd', label: 'Max market cap ($)', optional: true },
+  { group: 'entry', key: 'minHolders', label: 'Min holders', optional: true }, { group: 'entry', key: 'minLiquidityUsd', label: 'Min liquidity ($)', optional: false },
+  { group: 'entry', key: 'minPoolAgeMin', label: 'Min pool age (min)', optional: true }, { group: 'entry', key: 'maxPoolAgeMin', label: 'Max pool age (min)', optional: true },
+  { group: 'entry', key: 'minPriceChange5mPct', label: '5m change from (%)', optional: true }, { group: 'entry', key: 'maxPriceChange5mPct', label: '5m change to (%)', optional: true },
+  { group: 'entry', key: 'minPriceChange1hPct', label: '1h change from (%)', optional: true }, { group: 'entry', key: 'maxPriceChange1hPct', label: '1h change to (%)', optional: true },
+  { group: 'entry', key: 'minVolume5mUsd', label: 'Min 5m volume ($)', optional: true }, { group: 'entry', key: 'minVolume1hUsd', label: 'Min 1h volume ($)', optional: true },
+  { group: 'entry', key: 'minBuySellRatio', label: 'Min buy/sell ratio (5m)', optional: true },
+  { group: 'entry', key: 'maxTop10WalletPct', label: 'Max top-10 wallets (%)', optional: true }, { group: 'entry', key: 'maxLargestWalletPct', label: 'Max largest wallet (%)', optional: true },
+  { group: 'exits', key: 'takeProfitPct', label: 'Take profit (%) — empty: ride', optional: true }, { group: 'exits', key: 'stopLossPct', label: 'Stop loss (%)', optional: false },
+  { group: 'exits', key: 'trailingActivationPct', label: 'Trailing stop from (+%)', optional: true }, { group: 'exits', key: 'trailingStopPct', label: 'Trailing stop (% below peak)', optional: true },
+  { group: 'exits', key: 'marketCapFloorUsd', label: 'Exit at market cap ≤ ($)', optional: true }, { group: 'exits', key: 'marketCapTargetUsd', label: 'Exit at market cap ≥ ($)', optional: true },
+  { group: 'exits', key: 'maxHoldMin', label: 'Max hold (min)', optional: false },
+  { group: 'sizing', key: 'capitalUsd', label: 'TEST capital ($)', optional: false }, { group: 'sizing', key: 'entryUsd', label: 'Entry size ($)', optional: false },
+  { group: 'sizing', key: 'maxOpenPositions', label: 'Max open positions', optional: false }, { group: 'sizing', key: 'maxDragPct', label: 'Max drag (%)', optional: false },
+  { group: 'sizing', key: 'slippageBps', label: 'Slippage (bps)', optional: false }, { group: 'sizing', key: 'exitSlippageBps', label: 'Exit slippage (bps)', optional: false },
+  { group: null, key: 'reentryCooldownMin', label: 'Re-entry cooldown (min)', optional: false },
+];
+const BLANK: Spec = { id: 'MY_STRATEGY', label: 'My strategy', summary: '', entry: { minLiquidityUsd: 20_000 },
+  exits: { stopLossPct: 30, maxHoldMin: 240 }, sizing: { capitalUsd: 5.45, entryUsd: 2, maxOpenPositions: 2, slippageBps: 300, exitSlippageBps: 500, maxDragPct: 8 }, reentryCooldownMin: 60 };
+const fieldValue = (spec: Spec, f: typeof FIELDS[number]): unknown => f.group ? (spec[f.group] as Record<string, unknown>)[f.key] : (spec as unknown as Record<string, unknown>)[f.key];
+
+function StrategyEditor({ spec, isNew, busy, save, cancel }: { spec: Spec; isNew: boolean; busy: boolean; save: (s: Spec) => void; cancel: () => void }) {
+  const [draft, setDraft] = useState<Spec>(() => structuredClone(spec));
+  const [text, setText] = useState<Record<string, string>>(() => Object.fromEntries(FIELDS.map(f => { const v = fieldValue(spec, f); return [f.key, v === null || v === undefined ? '' : String(v)]; })));
+  const build = (): Spec => {
+    const next = structuredClone(draft);
+    for (const f of FIELDS) {
+      const raw = text[f.key]?.trim() ?? '', value = raw === '' ? (f.optional ? null : Number.NaN) : Number(raw);
+      if (f.group) (next[f.group] as Record<string, unknown>)[f.key] = value; else (next as unknown as Record<string, unknown>)[f.key] = value;
+    }
+    return next;
+  };
+  const input = (f: typeof FIELDS[number]) => <label key={f.key}><span>{f.label}</span>
+    <input inputMode="decimal" value={text[f.key] ?? ''} placeholder={f.optional ? 'no rule' : 'required'} onChange={e => setText({ ...text, [f.key]: e.target.value })} /></label>;
+  const group = (g: Group | null, title: string) => <fieldset><legend>{title}</legend><div className="spec-grid">{FIELDS.filter(f => f.group === g).map(input)}</div></fieldset>;
+  return <form className="strategy-editor" onSubmit={e => { e.preventDefault(); save(build()); }}>
+    <div className="spec-grid">
+      <label><span>Id (A–Z, 0–9, _)</span><input value={draft.id} disabled={!isNew} onChange={e => setDraft({ ...draft, id: e.target.value.toUpperCase() })} /></label>
+      <label><span>Name</span><input value={draft.label} onChange={e => setDraft({ ...draft, label: e.target.value })} /></label>
+    </div>
+    <label className="spec-wide"><span>Idea (shown on the card)</span><textarea rows={2} value={draft.summary ?? ''} onChange={e => setDraft({ ...draft, summary: e.target.value })} /></label>
+    {group('entry', 'Entry — every rule must pass (safety gates always apply)')}
+    <label className="spec-check"><input type="checkbox" checked={!!draft.entry.requireXAccount} onChange={e => setDraft({ ...draft, entry: { ...draft.entry, requireXAccount: e.target.checked } })} /> Require a linked X account</label>
+    {group('exits', 'Exits')}
+    {group('sizing', 'Size and costs')}
+    {group(null, 'Re-entry')}
+    <div className="spec-actions"><button className="primary-action" type="submit" disabled={busy}>{isNew ? 'Add strategy' : 'Save changes'}</button>
+      <button className="source-button" type="button" onClick={cancel}>Cancel</button></div>
+    <p className="desk-note">{isNew ? 'A new strategy starts ON in TEST and OFF in LIVE.' : 'Changes apply to new entries at once; open positions switch to the new exit rules.'} Untested rules: let them prove themselves in TEST first.</p>
+  </form>;
+}
+
 function Strategies({ d, t }: { d: DeskStatus; t: TradingSession }) {
-  const busy = !!t.busy || !t.online, test = d.mode === 'PAPER';
-  return <div className="strategies" aria-label="Strategies">{d.strategies.map((s: StrategyView) => {
+  const busy = !!t.busy || !t.online, test = d.mode === 'PAPER', locked = d.operational?.deploymentMode === 'LOCKED';
+  const [selected, setSelected] = useState('ALL');
+  const [editor, setEditor] = useState<{ spec: Spec; isNew: boolean } | null>(null);
+  const known = new Set(d.strategies.map(s => s.id)), current = d.strategies.find(s => s.id === selected) ?? null;
+  const freeId = (base: string) => { let id = base, n = 2; while (known.has(id)) id = `${base.slice(0, 14)}${n++}`; return id; };
+  const choose = (value: string) => {
+    if (value.startsWith('new:')) {
+      const key = value.slice(4), template = key === 'BLANK' ? BLANK : d.presets?.[key];
+      if (template) setEditor({ spec: { ...structuredClone(template), id: freeId(template.id) }, isNew: true });
+      return;
+    }
+    setSelected(value); setEditor(null);
+  };
+  const save = async (spec: Spec) => { if (await t.desk('strategy-save', { spec })) { setEditor(null); setSelected(spec.id); } };
+  const remove = async (s: StrategyView) => {
+    if (!window.confirm(`Delete ${s.label}? Its ledger and trade history stay on disk.`)) return;
+    if (await t.desk('strategy-delete', { strategy: s.id })) setSelected('ALL');
+  };
+  const shown = selected === 'ALL' || !current ? d.strategies : [current];
+  return <div aria-label="Strategies">
+    <div className="strategy-bar panel">
+      <label><span>Strategy</span>
+        <select value={current ? selected : 'ALL'} onChange={e => choose(e.target.value)} disabled={!!editor}>
+          <option value="ALL">All strategies ({d.strategies.length})</option>
+          {d.strategies.map(s => <option key={s.id} value={s.id}>{s.label} — {s.enabled ? 'ON' : 'OFF'}{s.spec ? ' · custom' : ''}</option>)}
+          {!locked && <optgroup label="Add a strategy">
+            {Object.entries(d.presets ?? {}).map(([k, p]) => <option key={k} value={`new:${k}`}>+ {p.label} preset{k === 'RUNNER' ? ' — your style: >1,000 holders, ride with a trailing stop' : ''}</option>)}
+            <option value="new:BLANK">+ Blank strategy</option>
+          </optgroup>}
+        </select></label>
+      {current && <button className={current.enabled ? 'source-button' : 'primary-action'} disabled={busy || locked}
+        onClick={() => void t.desk('strategy', { strategy: current.id, enabled: !current.enabled })}>{current.enabled ? `${current.label} ON · turn off` : `${current.label} OFF · turn on`}</button>}
+      {current?.spec && !editor && !locked && <button className="source-button" onClick={() => setEditor({ spec: current.spec!, isNew: false })}>Edit rules</button>}
+      {current?.spec && !editor && !locked && <button className="stop-action" disabled={busy} onClick={() => void remove(current)}>Delete</button>}
+      <small>{test ? 'TEST' : 'LIVE'}: switches apply to this mode only. Custom strategies trade their own ledger{test ? ' and TEST sleeve' : ''}.</small>
+    </div>
+    {editor && <StrategyEditor key={`${editor.spec.id}-${editor.isNew}`} spec={editor.spec} isNew={editor.isNew} busy={busy} save={s => void save(s)} cancel={() => setEditor(null)} />}
+    <div className="strategies">{shown.map((s: StrategyView) => {
     const x = s.stats, row = (label: string, value: string) => <div><span>{label}</span><strong>{value}</strong></div>;
     return <section key={s.id} className={`strategy ${s.enabled ? 'on' : 'off'}`}>
-      <div className="card-head"><h3>{s.label}</h3>
-        <button className={s.enabled ? 'source-button' : 'primary-action'} disabled={busy || d.operational?.deploymentMode === 'LOCKED'}
+      <div className="card-head"><h3>{s.label}{s.spec ? <small> · custom</small> : null}</h3>
+        <button className={s.enabled ? 'source-button' : 'primary-action'} disabled={busy || locked}
           onClick={() => void t.desk('strategy', { strategy: s.id, enabled: !s.enabled })}>{s.enabled ? 'ON · turn off' : 'OFF · turn on'}</button></div>
-      <p className="desk-note">{s.summary}{!test && s.id === 'CRASH' && !d.operational ? ' · LIVE: starts OFF by default.' : ''}{d.operational ? ` · Re-entry ${s.reentryCooldownMin ?? '--'} min; after loss at least ${d.operational.lossCooldownMs[s.id] / 60000} min` : ''}</p>
+      <p className="desk-note">{s.summary}{!test && (s.id === 'CRASH' || s.spec) && !d.operational ? ' · LIVE: starts OFF by default.' : ''}{d.operational ? ` · Re-entry ${s.reentryCooldownMin ?? '--'} min; after loss at least ${(d.operational.lossCooldownMs[s.id] ?? (s.reentryCooldownMin ?? 0) * 60000) / 60000} min` : ''}</p>
       {s.halted && <p className="trading-error">HALTED: {describe(s.halted)}</p>}
       <div className="strategy-kpis">
         {row('Entry', `${money(s.entryUsd)} · drag ≤ ${numeric(s.maxDragPct, 1)}%`)}
@@ -176,9 +273,26 @@ function Strategies({ d, t }: { d: DeskStatus; t: TradingSession }) {
         <table className="gates"><tbody>{s.scale.checks.map(c => <tr key={c.label}><td>{c.label}</td><td className={c.ok ? 'gate-pass' : 'gate-unknown'}>{c.ok ? 'PASS' : 'NOT YET'}</td>
           <td>{c.actual}</td><td>{c.required}</td></tr>)}</tbody></table>
         <p className="desk-note">{s.scale.note} Advisory only: sizes change only when you edit .env.</p></details>
+      {s.spec && <details><summary>Entry rules</summary><ul>{entryRuleText(s.spec).map(r => <li key={r}>{r}</li>)}</ul></details>}
     </section>;
-  })}</div>;
+  })}</div>
+  </div>;
 }
+
+/** Plain-language entry rules of a custom strategy (the safety gates are implied). */
+function entryRuleText(s: Spec): string[] {
+  const e = s.entry, k = (n: number) => n >= 1e6 ? `$${+(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `$${+(n / 1e3).toFixed(1)}K` : `$${n}`;
+  const band = (lo: number | null | undefined, hi: number | null | undefined, f: (n: number) => string, what: string) =>
+    lo != null && hi != null ? [`${what} ${f(lo)} to ${f(hi)}`] : lo != null ? [`${what} ≥ ${f(lo)}`] : hi != null ? [`${what} ≤ ${f(hi)}`] : [];
+  const p = (n: number) => `${n > 0 ? '+' : ''}${n}%`;
+  return [...band(e.minMarketCapUsd, e.maxMarketCapUsd, k, 'Market cap'), ...(e.minHolders != null ? [`Holders ≥ ${e.minHolders.toLocaleString('en-US')}`] : []),
+    ...band(e.minPoolAgeMin, e.maxPoolAgeMin, n => `${n} min`, 'Pool age'), ...band(e.minPriceChange5mPct, e.maxPriceChange5mPct, p, '5m change'),
+    ...band(e.minPriceChange1hPct, e.maxPriceChange1hPct, p, '1h change'), ...band(e.minVolume5mUsd, null, k, '5m volume'), ...band(e.minVolume1hUsd, null, k, '1h volume'),
+    ...band(e.minBuySellRatio, null, n => String(n), 'Buy/sell ratio'), ...band(e.minLiquidityUsd ?? 10_000, null, k, 'Liquidity'),
+    ...band(null, e.maxTop10WalletPct, n => `${n}%`, 'Top-10 wallets'), ...band(null, e.maxLargestWalletPct, n => `${n}%`, 'Largest wallet'),
+    ...(e.requireXAccount ? ['X account linked'] : []), 'Always: mint and freeze authority revoked, no dangerous token extensions'];
+}
+
 
 function Stages({ events }: { events: DeskEvent[] }) {
   const latest = useMemo(() => PIPELINE.map(p => events.find(e => p.stages.includes(e.stage)) ?? null), [events]);
@@ -228,16 +342,19 @@ function Candidates({ list, probe, busy }: { list: Candidate[]; probe: ((mint: s
   return <section className="panel desk-card" aria-label="Candidates">
     <div className="card-head"><h3>Candidates · what is scanned and why it passed or failed</h3><small>{list.length} shown</small></div>
     <div className="wallet-table"><table className="cand"><thead><tr>
-      <th>Token / CA</th><th>Tier</th><th>FAIR status</th><th>CRASH</th><th>Market cap</th><th>Pool age</th><th>Liquidity</th><th>5m vol</th><th>Buy/sell</th><th>Accel.</th>
+      <th>Token / CA</th><th>Tier</th><th>FAIR status</th><th>CRASH</th><th title="Your custom strategies: entry-ready, or the first rule that is not met">Custom</th><th>Market cap</th><th>Pool age</th><th>Liquidity</th><th>5m vol</th><th>Buy/sell</th><th>Accel.</th>
       <th title="Owners with a balance · share of the 10 largest wallets (pools and curves excluded)">Holders</th><th>Dev</th><th>Website</th><th>X</th><th>X activity</th><th>Narrative</th><th>Mint / freeze</th><th>Risk flags</th></tr></thead>
       <tbody>{list.map(c => <Fragment key={c.mint}>
         <tr className={`status-${c.status.toLowerCase()}${c.stale ? ' stale' : ''}`} onClick={() => setOpen(open === c.mint ? null : c.mint)} aria-expanded={open === c.mint}>
           <td title={c.mint}><strong>{c.symbol ?? '?'}</strong><br /><small>{short(c.mint)}</small></td>
-          <td>{c.tier === 'ULTRA_EARLY' ? 'Ultra-early' : 'Trending'}</td>
+          <td>{c.tier === 'ULTRA_EARLY' ? 'Ultra-early' : c.tier === 'CUSTOM' ? 'Custom only' : 'Trending'}</td>
           <td>{c.stale ? <span className="badge-stale" title="Not re-assessed in the last scan; never traded on">STALE · {ago(c.updatedAt)}</span>
             : <span className={`badge-${c.status.toLowerCase()}`}>{c.status}</span>}<br /><small>{c.entryNotes?.FAIR ?? c.classification.replace('_', ' ')}</small></td>
           <td title={c.crash?.summary}>{c.stale ? <span className="badge-stale">STALE</span> : c.crash?.signal ? <span className="badge-qualified">SIGNAL</span> : <span className="badge-filtered">no</span>}<br />
             <small>{c.entryNotes?.CRASH ?? (c.crash ? (c.crash.signal ? 'entry-ready' : c.crash.summary.split(':')[0]) : '--')}</small></td>
+          <td>{Object.entries(c.rules ?? {}).map(([id, r]) => <div key={id} title={r.summary}>
+            {c.stale ? <span className="badge-stale">STALE</span> : r.signal ? <span className="badge-qualified">{id}</span> : <span className="badge-filtered">{id}</span>}
+            <br /><small>{c.entryNotes?.[id] ?? (r.signal ? 'entry-ready' : r.summary.split(':')[0])}</small></div>)}{!c.rules && '--'}</td>
           <td>{usdOrUnknown(c.metrics.marketCapUsd)}</td><td>{c.metrics.poolAgeMin === null ? 'UNKNOWN' : `${numeric(c.metrics.poolAgeMin, 0)}m`}</td>
           <td>{usdOrUnknown(c.metrics.liquidityUsd)}</td><td>{usdOrUnknown(c.metrics.volume5mUsd)}</td>
           <td>{c.metrics.buySellRatio5m === null ? 'UNKNOWN' : c.metrics.buySellRatio5m.toFixed(2)}</td>
@@ -248,9 +365,9 @@ function Candidates({ list, probe, busy }: { list: Candidate[]; probe: ((mint: s
           <td>{c.onchain.mintAuthority === null ? 'UNKNOWN' : `${c.onchain.mintAuthority ? 'ACTIVE' : 'revoked'} / ${c.onchain.freezeAuthority ? 'ACTIVE' : 'revoked'}`}</td>
           <td>{c.riskFlags.length ? c.riskFlags.slice(0, 2).join('; ') : '—'}</td>
         </tr>
-        {open === c.mint && <tr className="detail-row"><td colSpan={18}><CandidateDetail c={c} probe={probe} busy={busy} /></td></tr>}
+        {open === c.mint && <tr className="detail-row"><td colSpan={19}><CandidateDetail c={c} probe={probe} busy={busy} /></td></tr>}
       </Fragment>)}
-      {!list.length && <tr><td colSpan={18}>No candidates yet. The first scan starts with TEST or a LIVE session.</td></tr>}</tbody></table></div>
+      {!list.length && <tr><td colSpan={19}>No candidates yet. The first scan starts with TEST or a LIVE session.</td></tr>}</tbody></table></div>
   </section>;
 }
 
@@ -289,6 +406,8 @@ function CandidateDetail({ c, probe, busy }: { c: Candidate; probe: ((mint: stri
         <td className={`gate-${g.status.toLowerCase()}`}>{g.status}{!g.blocking && g.status !== 'PASS' ? ' (flag)' : ''}</td><td>{g.actual}</td><td>{g.required}</td></tr>)}</tbody></table>
         {c.crash && <><h4>CRASH entry checks · {c.crash.signal ? 'SIGNAL' : 'no signal'}</h4><table className="gates"><tbody>{c.crash.checks.map(g => <tr key={g.key}><td>{g.label}</td>
           <td className={`gate-${g.status.toLowerCase()}`}>{g.status}{!g.blocking && g.status !== 'PASS' ? ' (flag)' : ''}</td><td>{g.actual}</td><td>{g.required}</td></tr>)}</tbody></table></>}
+        {Object.entries(c.rules ?? {}).map(([id, r]) => <Fragment key={id}><h4>{id} entry checks · {r.signal ? 'SIGNAL' : 'no signal'}</h4><table className="gates"><tbody>
+          {r.checks.map(g => <tr key={g.key}><td>{g.label}</td><td className={`gate-${g.status.toLowerCase()}`}>{g.status}</td><td>{g.actual}</td><td>{g.required}</td></tr>)}</tbody></table></Fragment>)}
         <p className="desk-note">Analytical scores, not guarantees of future performance. Fundamentals never override a failed gate.</p></div>
       <div><h4>Component scores</h4>{c.scores.map(s => <details key={s.key}><summary><span>{s.key}</span><strong>{s.score}</strong></summary>
         <ul>{s.factors.map(f => <li key={f.label}>{f.label}: {f.points}/{f.max} <small>({f.basis})</small></li>)}</ul></details>)}</div>

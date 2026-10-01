@@ -5,6 +5,7 @@ import { PublicKey } from '@solana/web3.js';
 import { SigningBroker } from '../../src/phantom/signing-broker';
 import type { DeskWallet } from '../../src/desk/engine';
 import { DeskReject } from '../../src/desk/guard';
+import { parseRuleSpec } from '../../src/desk/custom';
 import { createDesk, deskEnvironment, type DeskContext, type DeskHandle } from '../../src/desk/runtime';
 import type { DeskMode, DeskStatus } from '../../src/desk/types';
 
@@ -12,7 +13,7 @@ export { deskEnvironment as tradingEnvironment, type DeskHandle };
 export type DeskFactory = (context: DeskContext) => Promise<DeskHandle>;
 export const deskFactory = (repo: string): DeskFactory => context => createDesk({ envDir: repo, dataDir: path.join(repo, 'data-desk') }, context);
 
-const DESK_ACTIONS = new Set(['select-mode', 'start-test', 'stop-test', 'start-live', 'pause', 'resume', 'stop-live', 'probe', 'drill-on', 'drill-off',
+const DESK_ACTIONS = new Set(['select-mode', 'strategy-save', 'strategy-delete', 'start-test', 'stop-test', 'start-live', 'pause', 'resume', 'stop-live', 'probe', 'drill-on', 'drill-off',
   'strategy', 'reset-test', 'exit']);
 
 /**
@@ -23,6 +24,11 @@ function rejectCode(error: unknown): string | null {
   if (!(error instanceof Error) || (error.name !== 'DeskReject' && error.name !== 'SigningError')) return null;
   const code: unknown = (error as Error & { code?: unknown }).code;
   return typeof code === 'string' ? code : null;
+}
+/** The human-readable part of a rejection (`CODE: detail`), e.g. which field of a strategy spec is invalid. */
+function rejectDetail(error: unknown, code: string): string | undefined {
+  const message = error instanceof Error ? error.message : '';
+  return message.startsWith(`${code}: `) ? message.slice(code.length + 2) : undefined;
 }
 
 export class TradingService {
@@ -99,7 +105,7 @@ export class TradingService {
 
   private async deskAction(action: string, body: Record<string, unknown>, handle: DeskHandle): Promise<void> {
     const { PAPER: paper, LIVE: live } = handle.engines;
-    if (handle.operational?.deploymentMode === 'LOCKED' && ['strategy', 'drill-on', 'drill-off', 'reset-test'].includes(action))
+    if (handle.operational?.deploymentMode === 'LOCKED' && ['strategy', 'strategy-save', 'strategy-delete', 'drill-on', 'drill-off', 'reset-test'].includes(action))
       throw new DeskReject('CONFIG_LOCKED');
     const requireSession = () => {
       if (typeof body.sessionId !== 'string') throw new DeskReject('SESSION_REQUIRED');
@@ -136,10 +142,23 @@ export class TradingService {
         // Never available in LIVE: a probe must not be able to produce a signature request.
         if (this.mode !== 'PAPER' || typeof body.mint !== 'string') throw new DeskReject('PROBE_TEST_ONLY');
         await paper.probe(body.mint); return;
-      case 'strategy':
-        // Applies to the selected mode only; LIVE starts every session with CRASH off.
-        if ((body.strategy !== 'FAIR' && body.strategy !== 'CRASH') || typeof body.enabled !== 'boolean') throw new DeskReject('INVALID_STRATEGY');
-        handle.engines[this.mode].setStrategy(body.strategy, body.enabled); return;
+      case 'strategy': {
+        // Applies to the selected mode only; LIVE starts every session with CRASH (and every new custom strategy) off.
+        const engine = handle.engines[this.mode];
+        if (typeof body.strategy !== 'string' || !Object.hasOwn(engine.strategies, body.strategy) || typeof body.enabled !== 'boolean') throw new DeskReject('INVALID_STRATEGY');
+        engine.setStrategy(body.strategy, body.enabled); return;
+      }
+      case 'strategy-save': {
+        // One spec for both modes; each mode keeps its own on/off switch and ledger.
+        let spec;
+        try { spec = parseRuleSpec(body.spec); } catch (error) { throw new DeskReject('INVALID_STRATEGY_SPEC', (error as Error).message.replace(/^INVALID_STRATEGY_SPEC: /, '')); }
+        await paper.defineStrategy(spec); await live.defineStrategy(spec); return;
+      }
+      case 'strategy-delete': {
+        if (typeof body.strategy !== 'string') throw new DeskReject('INVALID_STRATEGY');
+        if (paper.strategyPositions(body.strategy) || live.strategyPositions(body.strategy)) throw new DeskReject('STRATEGY_HAS_POSITIONS');
+        await paper.removeStrategy(body.strategy); await live.removeStrategy(body.strategy); return;
+      }
       case 'reset-test':
         if (this.mode !== 'PAPER') throw new DeskReject('RESET_TEST_ONLY');
         await paper.resetTest(); return;
@@ -220,8 +239,8 @@ export class TradingService {
       } else { this.json(res, 404, { message: 'NOT_FOUND' }); return true; }
       this.json(res, 200, { ok: true });
     } catch (error) {
-      const code = rejectCode(error) ?? 'TRADING_REQUEST_FAILED';
-      this.json(res, code.includes('CAPABILITY') || code.includes('ORIGIN') ? 403 : 400, { message: code });
+      const code = rejectCode(error) ?? 'TRADING_REQUEST_FAILED', detail = code === 'INVALID_STRATEGY_SPEC' ? rejectDetail(error, code) : undefined;
+      this.json(res, code.includes('CAPABILITY') || code.includes('ORIGIN') ? 403 : 400, { message: code, ...(detail ? { detail } : {}) });
     }
     return true;
   }

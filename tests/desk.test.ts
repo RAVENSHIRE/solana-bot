@@ -28,6 +28,7 @@ import { signals, simulatePool, summarize, type EntryRule, type PoolSeries } fro
 import { GraduationFeed } from '../src/desk/migrations';
 import { localKeySigner } from '../src/desk/local-signer';
 import { reclaimRent } from '../src/desk/rent';
+import { parseRuleSpec, RUNNER_PRESET, type RuleSpecInput } from '../src/desk/custom';
 import bs58 from 'bs58';
 import type { DeskEvent, LedgerEntry } from '../src/desk/types';
 
@@ -785,6 +786,63 @@ test('a held token without a Jupiter route never pauses Jupiter for other tokens
     const row = view.ledger.find(e => e.side === 'SELL')!;
     assert.match(row.note!, /^WRITE-OFF — no Jupiter route since \d\d:\d\d/); assert.ok(row.netPnlUsd! <= -cost * 0.99, 'booked at zero');
     assert.ok(engine.events.list().some(e => /exit signal: NO_ROUTE for 3\d min/.test(e.message)));
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('custom strategy specs are validated: built-in ids, inverted bands, slippage above the drag cap and half a trailing stop are refused', () => {
+  const ok = parseRuleSpec(RUNNER_PRESET);
+  assert.equal(ok.entry.minHolders, 1_000); assert.equal(ok.exits.takeProfitPct, null); assert.equal(ok.entry.requireXAccount, false);
+  const bad = (patch: (s: RuleSpecInput) => void, re: RegExp) => { const s = structuredClone(RUNNER_PRESET); patch(s); assert.throws(() => parseRuleSpec(s), re); };
+  bad(s => { s.id = 'CRASH'; }, /^Error: INVALID_STRATEGY_SPEC: id: FAIR and CRASH are built in/);
+  bad(s => { s.id = 'x y'; }, /INVALID_STRATEGY_SPEC: id/);
+  bad(s => { s.entry.minMarketCapUsd = 30_000_000; }, /market cap: minimum above maximum/);
+  bad(s => { s.sizing.slippageBps = 900; s.sizing.exitSlippageBps = 900; }, /must stay below/);
+  bad(s => { s.exits.trailingStopPct = null; }, /needs both activation and stop/);
+  bad(s => { s.entry.minLiquidityUsd = 0; }, /entry\.minLiquidityUsd/);
+  bad(s => { (s.entry as Record<string, unknown>).secret = 1; }, /INVALID_STRATEGY_SPEC/);
+});
+
+const BIG: RuleSpecInput = { id: 'BIG', label: 'BIG RUNNER', summary: 'test',
+  entry: { minMarketCapUsd: 1_000_000, maxMarketCapUsd: 20_000_000, minHolders: 2, minPoolAgeMin: 60, minPriceChange1hPct: 0, maxPriceChange1hPct: 25,
+    minPriceChange5mPct: 1, maxPriceChange5mPct: 15, minVolume1hUsd: 100_000, minBuySellRatio: 1.1, minLiquidityUsd: 20_000, maxTop10WalletPct: 40, maxLargestWalletPct: 10 },
+  exits: { takeProfitPct: null, stopLossPct: 25, trailingActivationPct: 30, trailingStopPct: 25, maxHoldMin: 10_080, marketCapTargetUsd: 9_000_000 },
+  sizing: { capitalUsd: 5, entryUsd: 2, maxOpenPositions: 2, slippageBps: 300, exitSlippageBps: 500, maxDragPct: 8 } };
+
+test('a custom strategy trades a $5M token FAIR filters out: holders and safety checked, own ledger, market-cap target exit, saved for restarts', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-custom-')), { w, shared } = world({ marketCap: 5_000_000, fdv: 5_000_000, priceChange: { m5: 3, h1: 10 }, volume: { m5: 30_000, h1: 300_000 } });
+  try {
+    let engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    engine.start(); await engine.pulse();
+    assert.equal(engine.status({ connected: false, address: null }).candidates.length, 0, 'without a custom strategy a $5M token is filtered');
+    await engine.defineStrategy(parseRuleSpec(BIG));
+    await engine.pulse();
+    let view = engine.status({ connected: false, address: null });
+    const c = view.candidates.find(x => x.mint === MINT)!;
+    assert.equal(c.tier, 'CUSTOM'); assert.equal(c.status, 'WATCHLIST', 'never a FAIR entry');
+    assert.equal(c.rules!.BIG!.signal, true, c.rules!.BIG!.summary);
+    assert.ok(c.rules!.BIG!.checks.some(g => g.key === 'ruleHolders' && g.status === 'PASS' && g.actual === '2'));
+    assert.equal(view.positions.length, 1); assert.equal(view.positions[0]!.strategy, 'BIG');
+    assert.ok(engine.events.list().some(e => e.stage === 'QUALIFIED' && /^BIG entry selected: \$5,000,000 cap · 2 holders/.test(e.message)));
+    const big = view.strategies.find(s => s.id === 'BIG')!;
+    assert.equal(big.enabled, true, 'a new strategy starts ON in TEST'); assert.equal(big.spec!.exits.marketCapTargetUsd, 9_000_000);
+    assert.ok(big.exitRules.includes('Exit when the market cap reaches $9,000,000') && big.exitRules.includes('Time stop after 7 days'), big.exitRules.join(' | '));
+    await fs.access(path.join(dir, 'ledger-PAPER-BIG.json'));
+    await assert.rejects(engine.removeStrategy('BIG'), /STRATEGY_HAS_POSITIONS/);
+    await assert.rejects(engine.removeStrategy('FAIR'), /BUILTIN_STRATEGY/);
+    w.priceFactor = 2;
+    (engine as unknown as { lastPositionCheckAt: Record<string, number> }).lastPositionCheckAt.BIG = 0; engine.tick(); await engine.settled();
+    view = engine.status({ connected: false, address: null });
+    assert.equal(view.positions.length, 0, 'sold at the market-cap target');
+    assert.ok(engine.events.list().some(e => /^BIG · exit signal: MCAP_TARGET \$10,000,000 ≥ \$9,000,000/.test(e.message)));
+    engine.setStrategy('BIG', false); engine.stop(); await engine.settled(); await engine.persist();
+    engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    const again = engine.status({ connected: false, address: null }).strategies.find(s => s.id === 'BIG')!;
+    assert.equal(again.enabled, false, 'the switch survives a restart'); assert.equal(again.stats.trades, 1);
+    const live = await DeskEngine.create({ ...shared, mode: 'LIVE', dir, sender: null, wallet: () => null });
+    assert.equal(live.strategies.BIG!.enabled, false, 'LIVE starts every custom strategy OFF');
+    await engine.removeStrategy('BIG');
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(dir, 'strategies.json'), 'utf8')).strategies, []);
+    await fs.access(path.join(dir, 'ledger-PAPER-BIG.json'));
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 

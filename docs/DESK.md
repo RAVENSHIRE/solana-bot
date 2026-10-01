@@ -61,6 +61,47 @@ Native reserve (0.003 SOL) and max drag (1.5 %) are the project's existing micro
   The entry rule carries the result: with the new exits the old entry still loses (−11 %/trade); chasing moves above +30 % or trading on less than $50K five-minute volume turns it negative. The profit lock cost about 10 points in every variant; stops at 15–25 % were shaken out. The new rules stay positive with 8 % stop slippage (+22.9 %), at $100 per trade (+22.1 %) and with the old costs (+14.3 %). **Limits:** one night of data; about 12,000 rule combinations were compared, so the best one is optimistic; buy/sell ratio, buy count and holder gates (which the desk also applies) are not in candles. Re-run `npm run desk:backtest` regularly and compare with TEST.
 - Other CRASH settings in `.env`: `CRASH_ENABLED`, `CRASH_TAKE_PROFIT_PCT`, `CRASH_LOCK_PEAK_PCT`, `CRASH_GIVEBACK_PTS`, `CRASH_STOP_LOSS_PCT`, `CRASH_MAX_HOLD_MIN`, `CRASH_TRAIL_ACTIVATION_PCT`, `CRASH_TRAIL_STOP_PCT`, `CRASH_RIDE_MAX_HOLD_MIN`.
 
+### Custom strategies (your own rules, added in the dashboard)
+
+Use the **Strategy** dropdown above the strategy cards to:
+
+- pick one strategy, or show all of them;
+- switch the picked strategy on or off (in the selected mode only);
+- **add** a new strategy from a preset or from blank;
+- **edit** or **delete** a custom strategy.
+
+#### What a custom strategy is
+
+A custom strategy is a set of rules. Every rule you fill in must pass; an empty field means no rule.
+
+- **Entry**: market-cap band, minimum holders, pool age, 5m and 1h price-change bands, 5m and 1h volume, buy/sell ratio, minimum liquidity, top-10 and largest-wallet limits, and optionally a linked X account.
+- **Exits**: take profit (empty means ride), stop loss, trailing stop, market-cap floor or target, and max hold.
+- **Size and costs**: TEST capital, entry, max positions, slippage, exit slippage and max drag.
+- **Re-entry**: a cooldown after each exit.
+
+Mint and freeze authority revoked and no dangerous token extensions always apply; they cannot be switched off.
+
+#### How it trades
+
+- Custom strategies see every priced token, including those above FAIR's $1M band. A token kept only for them shows the tier **Custom only** and is never a FAIR entry.
+- The **Custom** column in *Candidates* shows each strategy's verdict: entry-ready, or the first rule not met. The token's detail lists every check.
+- Holders are counted first for tokens a custom strategy is interested in.
+- Each strategy has its own ledger (`ledger-PAPER-<ID>.json`, `ledger-LIVE-<ID>-<wallet>.json`) and, in TEST, its own sleeve.
+- A new strategy starts **ON in TEST and OFF in LIVE**.
+- An edit applies to new entries at once, and to the exits of open positions.
+- A strategy with an open position cannot be deleted. After deletion its ledger stays on disk.
+- The rules are saved in `data-desk/strategies.json` and shared by both modes; the on/off switch is saved per mode.
+- With `DESK_DEPLOYMENT_MODE=LOCKED`, adding, editing and deleting are refused.
+
+#### Presets
+
+**RUNNER** (your style):
+
+- **Entry**: holders ≥ 1,000; market cap $300K–$20M; pool older than 1 h; 1h change −15 % to +25 % (sideways); 5m change +1 % to +15 % (turning up again); 1h volume ≥ $100K; buy/sell ≥ 1.1; liquidity ≥ $50K; top-10 ≤ 40 %; largest wallet ≤ 10 %.
+- **Exits**: no take profit; trailing stop 25 % below the peak once +30 % was reached; stop loss −25 %; max hold 7 days.
+
+RUNNER has not been backtested: let it prove itself in TEST before switching it on in LIVE.
+
 ### Going LIVE (Phantom)
 
 1. Pull, restart the dashboard, open it in the browser with the Phantom extension and **Connect Phantom**.

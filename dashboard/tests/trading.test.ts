@@ -7,6 +7,7 @@ import { Keypair } from '@solana/web3.js';
 import { TradingService, tradingEnvironment, deskFactory, type DeskFactory, type DeskHandle } from '../server/trading';
 import { DeskReject } from '../../src/desk/guard';
 import { deskOperational } from '../../src/desk/config';
+import { RUNNER_PRESET } from '../../src/desk/custom';
 import type { DeskEngine } from '../../src/desk/engine';
 import type { DeskMode } from '../../src/desk/types';
 
@@ -16,6 +17,10 @@ function engine(mode: DeskMode) {
     strategies: { FAIR: { enabled: true }, CRASH: { enabled: mode === 'PAPER' } } as Record<string, { enabled: boolean }>,
     setStrategy(id: string, enabled: boolean) { e.strategies[id]!.enabled = enabled; }, drill: false, setDrill(on: boolean) { e.drill = on; },
     exits: [] as string[], requestExit(mint: string) { e.exits.push(mint); },
+    specs: [] as string[], held: 0,
+    async defineStrategy(spec: { id: string }) { e.specs.push(spec.id); e.strategies[spec.id] = { enabled: mode === 'PAPER' }; },
+    strategyPositions: (_id: string) => e.held,
+    async removeStrategy(id: string) { delete e.strategies[id]; e.specs = e.specs.filter(x => x !== id); },
     resetTest: async () => { if (e.scanner) throw new DeskReject('STOP_TEST_FIRST'); e.resets++; return []; },
     prepared: 0, async prepareStart() { e.prepared++; },
     start() { e.scanner = true; e.execution = true; }, stop() { e.scanner = false; e.execution = false; },
@@ -125,6 +130,34 @@ test('LIVE with the local key starts without a Phantom session and is not stoppe
     assert.equal((await post('desk', { action: 'stop-live' }, headers)).status, 200);
     assert.equal(engines.LIVE.scanner, false);
   } finally { await close(); }
+});
+
+test('custom strategies: one validated spec for both modes, toggled per mode, refused while it holds a position or when locked', async () => {
+  const { trading, engines } = service('LOCAL_KEY');
+  const { base, post, close } = await serve(trading);
+  try {
+    const { capability } = await (await fetch(`${base}/api/trading/bootstrap`)).json();
+    const headers = { 'X-Local-Capability': capability };
+    const spec = { ...RUNNER_PRESET, id: 'MINE', label: 'Mine' };
+    assert.equal((await post('desk', { action: 'strategy-save', spec }, headers)).status, 200);
+    assert.deepEqual(engines.PAPER.specs, ['MINE']); assert.deepEqual(engines.LIVE.specs, ['MINE']);
+    assert.equal(engines.PAPER.strategies.MINE!.enabled, true); assert.equal(engines.LIVE.strategies.MINE!.enabled, false);
+    const bad = await (await post('desk', { action: 'strategy-save', spec: { ...spec, sizing: { ...spec.sizing, entryUsd: 50 } } }, headers)).json();
+    assert.equal(bad.message, 'INVALID_STRATEGY_SPEC'); assert.equal(bad.detail, 'sizing.entryUsd: entry exceeds the TEST capital');
+    assert.equal((await post('desk', { action: 'strategy', strategy: 'MINE', enabled: false }, headers)).status, 200);
+    assert.equal(engines.PAPER.strategies.MINE!.enabled, false);
+    assert.equal((await (await post('desk', { action: 'strategy', strategy: 'constructor', enabled: true }, headers)).json()).message, 'INVALID_STRATEGY');
+    engines.LIVE.held = 1;
+    assert.equal((await (await post('desk', { action: 'strategy-delete', strategy: 'MINE' }, headers)).json()).message, 'STRATEGY_HAS_POSITIONS');
+    engines.LIVE.held = 0;
+    assert.equal((await post('desk', { action: 'strategy-delete', strategy: 'MINE' }, headers)).status, 200);
+    assert.deepEqual(engines.PAPER.specs, []); assert.equal(engines.LIVE.strategies.MINE, undefined);
+  } finally { await close(); }
+  const locked = service('LOCAL_KEY', true), server = await serve(locked.trading);
+  try {
+    const { capability } = await (await fetch(`${server.base}/api/trading/bootstrap`)).json();
+    assert.equal((await (await server.post('desk', { action: 'strategy-save', spec: RUNNER_PRESET }, { 'X-Local-Capability': capability })).json()).message, 'CONFIG_LOCKED');
+  } finally { await server.close(); }
 });
 
 test('desk settings come from an allowlist that never loads the local private key', async () => {

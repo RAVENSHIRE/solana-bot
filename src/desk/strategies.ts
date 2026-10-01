@@ -57,8 +57,11 @@ export function crashCheck(c: Candidate): CrashSignal {
 }
 
 /** One rule set for both strategies; percentages are net of the entry fee (value vs cost). */
-export function exitReason(r: ExitRules, x: { pnlPct: number; peakPct: number; fromPeakPct: number; heldMs: number }): string | null {
+export function exitReason(r: ExitRules, x: { pnlPct: number; peakPct: number; fromPeakPct: number; heldMs: number; marketCapUsd?: number | null }): string | null {
   if (x.pnlPct <= -r.stopLossPct) return `STOP_LOSS ${x.pnlPct.toFixed(2)}% ≤ -${r.stopLossPct}%`;
+  const cap = x.marketCapUsd ?? null, mc = r.marketCap;
+  if (mc && cap !== null && mc.floorUsd !== null && cap <= mc.floorUsd) return `MCAP_FLOOR ${usd(cap)} ≤ ${usd(mc.floorUsd)}`;
+  if (mc && cap !== null && mc.targetUsd !== null && cap >= mc.targetUsd) return `MCAP_TARGET ${usd(cap)} ≥ ${usd(mc.targetUsd)}`;
   if (x.pnlPct >= r.takeProfitPct) return `TAKE_PROFIT ${x.pnlPct.toFixed(2)}% ≥ ${r.takeProfitPct}%`;
   if (r.giveback && x.peakPct >= r.giveback.lockPeakPct && x.pnlPct <= x.peakPct - r.giveback.points)
     return `PROFIT_LOCK ${x.pnlPct >= 0 ? '+' : ''}${x.pnlPct.toFixed(2)}% after a +${x.peakPct.toFixed(2)}% peak (gave back ≥ ${r.giveback.points} pts)`;
@@ -75,7 +78,10 @@ export function exitRuleText(p: StrategyProfile): string[] {
       : 'No take profit: the trailing stop rides the move',
     ...(r.giveback ? [`Profit lock: once +${r.giveback.lockPeakPct}% was reached, exit ${r.giveback.points} points below the peak`] : []),
     ...(r.trailing ? [`Trailing stop ${r.trailing.stopPct}% from the peak after +${r.trailing.activationPct}%`] : []),
-    `Stop loss at -${r.stopLossPct}%`, `Time stop after ${r.maxHoldMin} min`, `Re-entry after an exit: ${p.reentryCooldownMs / 60_000} min`,
+    `Stop loss at -${r.stopLossPct}%`,
+    ...(r.marketCap?.floorUsd != null ? [`Exit when the market cap falls to ${usd(r.marketCap.floorUsd)}`] : []),
+    ...(r.marketCap?.targetUsd != null ? [`Exit when the market cap reaches ${usd(r.marketCap.targetUsd)}`] : []),
+    r.maxHoldMin >= 1_440 ? `Time stop after ${+(r.maxHoldMin / 1_440).toFixed(1)} days` : `Time stop after ${r.maxHoldMin} min`, `Re-entry after an exit: ${p.reentryCooldownMs / 60_000} min`,
     'Early warnings: pool liquidity -30% since entry, or the pump.fun creator selling',
     `Checked every ${p.positionCheckMs / 1000} s with an executable Jupiter quote`,
   ];

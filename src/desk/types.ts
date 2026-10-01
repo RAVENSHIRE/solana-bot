@@ -1,7 +1,10 @@
 /** Shared by the desk engine, the local API and the dashboard. Type-only; no runtime dependencies. */
 export type DeskMode = 'PAPER' | 'LIVE';
 /** FAIR: fair-launch trend strategy with momentum confirmation. CRASH: 1–4 minute momentum trades with tight exits. */
-export type StrategyId = 'FAIR' | 'CRASH';
+/** FAIR and CRASH are built in; custom rule strategies use their own upper-case ids (e.g. RUNNER). */
+import type { RuleSpec } from './custom';
+
+export type StrategyId = string;
 
 export type Stage = 'SYSTEM' | 'SCANNING' | 'FILTERED' | 'WATCHLIST' | 'WAITING' | 'QUALIFIED' | 'QUOTE' | 'ROUTE' |
   'SIMULATION' | 'PREFLIGHT' | 'AWAITING_SIGNATURE' | 'SUBMITTED' | 'CONFIRMED' | 'FAILED' | 'POSITION' | 'EXIT' | 'PNL';
@@ -28,7 +31,8 @@ export type ScoreKey = 'FUNDAMENTAL' | 'SOCIAL' | 'MARKET' | 'ONCHAIN' | 'RISK' 
 export interface ScoreFactor { label: string; points: number; max: number; basis: string }
 export interface ComponentScore { key: ScoreKey; score: number; factors: ScoreFactor[] }
 
-export type Tier = 'TRENDING' | 'ULTRA_EARLY';
+/** CUSTOM: outside FAIR's market-cap bands, kept because a custom strategy's market rules match it. */
+export type Tier = 'TRENDING' | 'ULTRA_EARLY' | 'CUSTOM';
 export type Classification = 'EARLY' | 'PROMISING' | 'WATCH' | 'HIGH_RISK' | 'REJECT' | 'WAITING' | 'QUALIFIED';
 export type CandidateStatus = 'FILTERED' | 'WATCHLIST' | 'WAITING' | 'QUALIFIED';
 export type Authenticity = 'VERIFIED' | 'LIKELY' | 'UNCERTAIN' | 'SUSPICIOUS' | 'UNVERIFIED';
@@ -61,6 +65,8 @@ export interface Candidate {
   momentumStreak: number;
   /** CRASH entry checks for this scan; null until computed. */
   crash: CrashSignal | null;
+  /** Custom strategies' entry checks, by strategy id (enabled strategies only). */
+  rules?: Record<string, CrashSignal>;
   /** Largest holders and holder count; null until first read. */
   holders: HolderView | null;
   /** Status view only: why a strategy did not enter this token (skip, cooldown, slots, sleeve…). */
@@ -138,6 +144,8 @@ export interface StrategyView {
   /** TEST: completed sleeve cycles (auto re-funded after running dry); stats and realized PnL include them. */
   cycles: number;
   stats: StrategyStats; scale: ScaleAdvice;
+  /** Custom rule strategy: its spec, editable in the dashboard. Absent for FAIR and CRASH. */
+  spec?: RuleSpec;
 }
 
 export interface DeskCapitalView {
@@ -151,6 +159,8 @@ export interface DeskCapitalView {
 export interface DeskStatus {
   mode: DeskMode; label: string; scanner: boolean; execution: boolean;
   operational?: import('./config').DeskOperational;
+  /** Templates for a new custom strategy (RUNNER: the owner's own style). */
+  presets?: Record<string, import('./custom').RuleSpecInput>;
   /** CONFIGURED: TEST is using WALLET_PUBLIC_KEY from .env because Phantom is not connected (address only, never a signer). */
   wallet: { connected: boolean; address: string | null; source?: 'PHANTOM' | 'CONFIGURED' | 'LOCAL_KEY' };
   drill: boolean;

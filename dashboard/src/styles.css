@@ -1267,7 +1267,8 @@ b {
 .mode-switch button[aria-checked=true]{background:#15191f;color:#fff}
 .desk-live .mode-switch button[aria-checked=true]{background:#b42323}
 .chips{display:flex;flex-wrap:wrap;gap:7px}
-.chip{font-size:11px;letter-spacing:.05em;border-radius:30px;padding:6px 10px;background:#edf0f3;color:#687182;white-space:nowrap}
+.chip{font-size:11px;letter-spacing:.05em;border-radius:30px;padding:6px 10px;background:#edf0f3;color:#687182;white-space:nowrap;max-width:100%;box-sizing:border-box}
+@media(max-width:650px){.chip{white-space:normal;overflow-wrap:anywhere}}
 .chip.on{background:#e0f7ed;color:#007b57}.chip.live{background:#fdeceb;color:#a22}
 .desk .trading-actions{padding:0}
 .primary-action.live{background:#b42323;border-color:#b42323}
@@ -1287,6 +1288,18 @@ b {
 .strategy-kpis{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px}
 .strategy-kpis div{display:flex;flex-direction:column;gap:2px;min-width:0}
 .strategy-kpis span{font-size:11px;color:#7b8190}.strategy-kpis strong{font-size:14px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.strategy-bar{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 14px;padding:12px 16px;margin-bottom:12px}
+.strategy-bar label{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1 1 260px;max-width:460px}
+.strategy-bar label span,.strategy-editor label span{font-size:11px;color:#7b8190}
+.strategy-bar select,.strategy-editor input,.strategy-editor textarea{font:inherit;padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:#fff;min-width:0;width:100%;box-sizing:border-box}
+.strategy-bar small{flex:1 1 100%;color:#7b8190}
+.strategy-editor{border:1px solid var(--border);border-radius:14px;padding:16px 18px;background:#fff;display:flex;flex-direction:column;gap:12px;margin-bottom:14px}
+.strategy-editor fieldset{border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin:0;min-width:0}
+.strategy-editor legend{font-size:12px;font-weight:600;padding:0 4px}
+.spec-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px 12px}
+.spec-grid label,.spec-wide{display:flex;flex-direction:column;gap:4px;min-width:0}
+.spec-check{display:flex;align-items:center;gap:8px;font-size:13px}.spec-check input{width:auto}
+.spec-actions{display:flex;gap:10px;flex-wrap:wrap}
 .strategy details summary{cursor:pointer;font-size:12px;color:#3c4452;padding:4px 0}
 .strategy details ul{margin:4px 0;padding-left:18px;font-size:12px}
 .stages{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
