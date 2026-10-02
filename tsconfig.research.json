@@ -4,6 +4,12 @@
     "rootDir": ".",
     "outDir": "dist-research"
   },
-  "include": ["src/research/**/*.ts", "src/scripts/research.ts", "tests/research-*.test.ts"],
-  "exclude": ["node_modules", "dist", "dist-research"]
+  "include": [
+    "src/research/core/**/*.ts", "src/research/events/**/*.ts", "src/research/pit/**/*.ts", "src/research/features/**/*.ts",
+    "src/research/strategy/**/*.ts", "src/research/execution/**/*.ts", "src/research/risk/**/*.ts", "src/research/backtest/**/*.ts",
+    "src/research/experiments/**/*.ts", "src/research/regime/**/*.ts", "src/research/alerts/**/*.ts", "src/research/observability/**/*.ts",
+    "src/research/curiosity/**/*.ts", "src/research/api/**/*.ts", "src/research/ingest/**/*.ts", "src/research/integration/**/*.ts",
+    "src/research/platform.ts", "src/scripts/research-platform.ts", "tests/research-*.test.ts"
+  ],
+  "exclude": ["node_modules", "dist", "dist-research", "tests/research.test.ts"]
 }
