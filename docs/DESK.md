@@ -185,6 +185,7 @@ Backtest (`npm run desk:golden`, 12 h of graduations on 1 Oct, 533 pools, Birdey
 
 - The only-up result holds across its neighbours: 3 green candles, any volume filter ($0–60K in the first minutes; the pool reserves give no volume, so none is applied), 30–60 min holds. It does **not** hold past 2 hours, and a 10 % stop is worse than 5 %. Most trades lose about 9 % (the stop); a few runners (+100 … +700 %) carry it.
 - The retest caught 66hK2 (+37 %) and FIX6900 (+48 %), but over all pools about half the retests fall straight through the stop.
+- **Stop slippage decides it.** Most trades end at the stop, so what a stop really sells at matters most: the deployed rule makes +7.9 % per trade with 3 % slippage past the stop, +5.3 % with 6 %, +1.8 % with 10 % and −2.5 % with 15 %. The first live stop (TEST, 2 Oct) sold 8.7 % under its level: the TEST ledger, which sells at real Jupiter quotes, is the number to watch before LIVE.
 - One day of data: watch the GOLDEN ledger in TEST before switching it on in LIVE.
 
 How it works:
