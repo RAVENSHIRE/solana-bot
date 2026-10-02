@@ -75,3 +75,35 @@ the reserves before it must be some earlier trade's). On 2 Oct 99 % of normal la
 pump.fun's "mayhem mode" break by design (their curve moves without matching trades) and are a separate feature.
 A blind spot is an observer restart or every trade feed down at once; `--strict` drops rows with either.
 Cohorts are measured on the first 60 % of launches and checked, unchanged, on the last 40 %.
+
+## Qualified calls (the only thing that reaches the phone)
+
+The desk sends nothing to ntfy by default. The research layer sends one kind of message: a **call** from a rule that
+passed the qualification gate. No rule passes yet, so the phone stays quiet until one does.
+
+**Rules** (`src/research/rules.ts`, fixed in code): a group of launches, a decision time after creation (5, 15, 30, 60
+or 120 s) and an exit (+40 % or +100 % target, −20 %/−35 %/no stop, 15 or 60 min). Groups use only what the live
+observer knows by the decision time: trades and curve state, the creation message (dev buy) and the metadata —
+every normal launch; own X account; X + website; dev buy ≥ 1 SOL; ≥ 5 buyers; ≥ 15 buyers with no wallet over 30 %;
+organic demand (curve rising, ≥ 3 effective buyers, top buyer < 50 %, dev not sold); organic + own X.
+
+**Gate** (`npm run research:qualify`, `src/research/qualify.ts`, rerun by the observer every 6 h on the last 48 h):
+each group's exit is chosen on the earlier 60 % of launches; unchanged, on the later 40 % it must have
+
+- at least 100 trades,
+- a profit after costs on average ($2 trades, 1.25 % pump.fun fee per side, $0.10 per round trip),
+- a target hit rate at least the rate at which its trades break even ("hits +40 % often enough to cover the losers"),
+- a profit on the tuning period too,
+- and, once 30 of its live calls are judged, no average loss live.
+
+The result is `data-desk/research/qualified.json` — every candidate with its evidence and the reasons it failed.
+
+**Live** (`src/research/calls.ts`, inside the observer): at each rule's decision time the launch's facts go through the
+same feature code as the look-back (a test checks live and look-back features are identical). A qualified rule's
+match goes to the phone ("CALL ABC: +40% target — buy now at $X, sell at $Y, stop $Z, rule evidence, link"); every
+other candidate's match is a shadow call (`SIG` record, never sent). After the hold, each signal is judged with the
+look-back's simulation (`RES` record); those live results feed the next qualification. A launch first seen too late
+for a decision time is not called.
+
+Records: `SIG` obs, m, rule id, qualified 0/1, market cap SOL at the decision, sent 0/1, {features} · `RES` obs, m, rule
+id, qualified 0/1, net %, exit reason, entry and exit market cap SOL, peak % · `QUAL` obs, {qualified rule ids, data window}.

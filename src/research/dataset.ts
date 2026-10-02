@@ -36,7 +36,9 @@ export interface LaunchFacts {
 export interface Gap { obs: number; source: string; detail: string }
 /** The observer's runs: when each started and how many trade feeds it merged (one feed down is covered by another). */
 export interface Run { start: number; sources: number }
-export interface Dataset { launches: Map<string, LaunchFacts>; gaps: Gap[]; runs: Run[]; first: number; last: number; files: number; wallets: number }
+/** A judged live call or shadow call (observer `RES` records): what a rule's signal returned after its hold. */
+export interface ForwardResult { obs: number; mint: string; ruleId: string; qualified: boolean; netPct: number; reason: string }
+export interface Dataset { launches: Map<string, LaunchFacts>; gaps: Gap[]; runs: Run[]; results: ForwardResult[]; first: number; last: number; files: number; wallets: number }
 
 /** Ledger files in time order (gzipped or the open hour). */
 export function ledgerFiles(dir: string): string[] {
@@ -44,7 +46,7 @@ export function ledgerFiles(dir: string): string[] {
 }
 
 export function readDataset(files: string[], o: { from?: number; to?: number } = {}): Dataset {
-  const launches = new Map<string, LaunchFacts>(), gaps: Gap[] = [], runs: Run[] = [], walletIds = new Map<string, number>();
+  const launches = new Map<string, LaunchFacts>(), gaps: Gap[] = [], runs: Run[] = [], results: ForwardResult[] = [], walletIds = new Map<string, number>();
   let first = Infinity, last = 0;
   const launch = (mint: string, obs: number): LaunchFacts => {
     let l = launches.get(mint);
@@ -129,6 +131,11 @@ export function readDataset(files: string[], o: { from?: number; to?: number } =
         }
         case 'GAP': gaps.push({ obs, source: String(r[2]), detail: String(r[3]) }); break;
         case 'START': runs.push({ start: obs, sources: Number((r[2] as { sources?: number } | null)?.sources ?? 1) }); break;
+        case 'RES': {
+          const mint = mintOf(r[2]);
+          if (mint && typeof r[3] === 'string' && typeof r[5] === 'number') results.push({ obs, mint, ruleId: r[3], qualified: r[4] === 1, netPct: r[5], reason: String(r[6] ?? '') });
+          break;
+        }
         default: break;
       }
     }
@@ -140,7 +147,7 @@ export function readDataset(files: string[], o: { from?: number; to?: number } =
     // non-standard curve even when PumpPortal's creation message (with the flag) was missed.
     if (!l.mayhem && l.trades.some(t => curveMcapSol(t.vSol, t.vTok) < NORMAL_CURVE_FLOOR_SOL)) l.mayhem = true;
   }
-  return { launches, gaps, runs, first: Number.isFinite(first) ? first : 0, last, files: files.length, wallets: walletIds.size };
+  return { launches, gaps, runs, results, first: Number.isFinite(first) ? first : 0, last, files: files.length, wallets: walletIds.size };
 }
 
 // ------------------------------------------------------------------ features

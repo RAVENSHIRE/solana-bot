@@ -1,18 +1,27 @@
 /**
- * Research observer: records every pump.fun launch, its trades, metadata, X posts and website as observed facts.
- * Read-only: it never signs, never trades and never reads a private key.
+ * Research observer: records every pump.fun launch, its trades, metadata, X posts and website as observed facts, and
+ * makes the research layer's calls: a launch matching a QUALIFIED rule (data-desk/research/qualified.json) goes to the
+ * phone (DESK_NTFY_TOPIC / Telegram); every other candidate rule is recorded as a shadow call. Qualification is rerun
+ * every 6 h in a child process. Read-only on chain: it never signs, trades or reads a private key.
  *
- *   npm run research:observe -- [--dir data-desk/research] [--sources public,publicnode[,helius]] [--min-free-mb 700]
+ *   npm run research:observe -- [--dir data-desk/research] [--sources public,publicnode[,helius]] [--min-free-mb 700] [--no-calls] [--no-phone]
  *
  * Trade sources are merged, each transaction once. "helius" adds the first Helius endpoint of RPC_ENDPOINTS;
  * Helius may bill websocket traffic against the plan's credits, so it is off unless asked for.
  */
+import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { deskEnvironment } from '../desk/runtime';
+import { notifier, fomoUrl } from '../desk/watch';
 import { ResearchLedger } from '../research/ledger';
 import { ResearchObserver, PUBLIC_RPC_WS, PUBLICNODE_WS } from '../research/observer';
+import { CallEngine } from '../research/calls';
+import type { Qualification } from '../research/qualify';
 
 const arg = (name: string) => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : undefined; };
+const REQUALIFY_MS = 6 * 3_600_000;
+const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
 async function main(): Promise<void> {
   const repo = path.resolve(arg('env') ?? '.'), env = await deskEnvironment(repo);
@@ -28,9 +37,51 @@ async function main(): Promise<void> {
   if (!sources.length) sources.push(PUBLIC_RPC_WS);
   const ledger = new ResearchLedger({ dir, minFreeMb: Number(arg('min-free-mb') ?? process.env.RESEARCH_MIN_FREE_MB ?? 700) });
   await ledger.start();
-  const observer = new ResearchObserver({ ledger, tradeSources: sources, log: line => console.log(line) });
+
+  // The SOL price for dollar market caps in call messages (Jupiter's free price API), refreshed every 5 minutes.
+  let solUsd: number | null = null;
+  const refreshSol = async () => {
+    try {
+      const j = await (await fetch(`https://lite-api.jup.ag/price/v3?ids=${SOL_MINT}`, { signal: AbortSignal.timeout(8_000) })).json() as Record<string, { usdPrice?: number }>;
+      const p = j[SOL_MINT]?.usdPrice;
+      if (typeof p === 'number' && p > 0) solUsd = p;
+    } catch { /* keep the last price */ }
+  };
+  await refreshSol();
+  setInterval(() => void refreshSol(), 5 * 60_000).unref();
+
+  const phone = process.argv.includes('--no-phone') ? null : notifier(env);
+  const calls = process.argv.includes('--no-calls') ? null : new CallEngine({ ledger, notify: phone?.channels.length ? phone.notify : null, solUsd: () => solUsd, link: fomoUrl,
+    log: line => console.log(`${new Date().toISOString().slice(0, 19)} ${line}`) });
+  const file = path.join(dir, 'qualified.json');
+  const load = () => { try { calls?.setQualification(JSON.parse(fs.readFileSync(file, 'utf8')) as Qualification); } catch { calls?.setQualification(null); } };
+  let qualifying = false;
+  const requalify = () => {
+    if (!calls || qualifying) return;
+    qualifying = true;
+    const child = spawn(process.execPath, ['--max-old-space-size=1536', '--import', 'tsx', path.join(repo, 'src', 'scripts', 'research-qualify.ts'), '--dir', dir],
+      { cwd: repo, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    let out = '';
+    child.stdout.on('data', b => { out += String(b); });
+    child.stderr.on('data', b => { out += String(b); });
+    child.on('exit', code => {
+      qualifying = false;
+      fs.writeFile(path.join(dir, 'qualify.log'), out, () => undefined);
+      if (code === 0) load(); else console.log(`qualification failed (exit ${code}); see ${path.join(dir, 'qualify.log')}`);
+    });
+  };
+  if (calls) {
+    load();
+    // The first run a minute after start when the file is missing or older than 6 h, then every 6 h.
+    const age = fs.existsSync(file) ? Date.now() - fs.statSync(file).mtimeMs : Infinity;
+    const next = (ms: number) => { setTimeout(() => { requalify(); next(REQUALIFY_MS); }, ms).unref(); };
+    next(age > REQUALIFY_MS ? 60_000 : REQUALIFY_MS - age);
+  }
+
+  const observer = new ResearchObserver({ ledger, tradeSources: sources, calls, log: line => console.log(line) });
   observer.start();
-  console.log(`research observer: ${dir} · trade sources: ${wanted.filter(w => ['public', 'publicnode', 'helius'].includes(w)).join(' + ') || 'public'} · status every 10 min`);
+  console.log(`research observer: ${dir} · trade sources: ${wanted.filter(w => ['public', 'publicnode', 'helius'].includes(w)).join(' + ') || 'public'} · ` +
+    `calls: ${calls ? `on, phone ${phone?.channels.length ? phone.channels.join(' + ') : 'not configured'}` : 'off'} · status every minute`);
   const stop = async () => { observer.stop(); await ledger.close(); process.exit(0); };
   process.on('SIGINT', () => void stop());
   process.on('SIGTERM', () => void stop());

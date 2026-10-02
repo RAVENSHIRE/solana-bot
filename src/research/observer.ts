@@ -4,6 +4,8 @@ import type { ResearchLedger } from './ledger';
 import { pumpEvents, curveMcapSol, curveProgress, PUMP_PROGRAM_ID, type PumpTrade } from './pump-events';
 import { ReconnectingFeed, RecentSet, type SocketFactory } from './streams';
 import { readXTimeline, postAddresses, type XRead } from './xread';
+import { NORMAL_CURVE_FLOOR_SOL, type LaunchFacts } from './dataset';
+import type { CallEngine } from './calls';
 
 /**
  * The research observer: every pump.fun launch from its creation, recorded as facts with the time they were observed.
@@ -52,6 +54,8 @@ export interface ObserverDeps {
   tradeSources?: string[];
   pumpPortalUrl?: string | null;
   log?: (line: string) => void;
+  /** Live calls from the research layer (qualified rules to the phone, shadow calls recorded). */
+  calls?: CallEngine | null;
 }
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000;
@@ -60,6 +64,12 @@ const zero = () => ({ createsPortal: 0, createsLog: 0, trades: 0, tradesLogged: 
 
 export class ResearchObserver {
   readonly tracks = new Map<string, Track>();
+  /**
+   * The same facts the research dataset reads back from the ledger, kept live for the call engine: one code path for
+   * features in the look-back and in live calls.
+   */
+  readonly facts = new Map<string, LaunchFacts>();
+  private readonly walletIds = new Map<string, number>();
   private readonly now: () => number;
   private readonly seen = new RecentSet(200_000);
   private readonly feeds: ReconnectingFeed[] = [];
@@ -92,7 +102,8 @@ export class ResearchObserver {
       }, { factory: this.d.factory, idleMs: 30_000 }));
     }
     for (const f of this.feeds) f.start();
-    this.timers.push(setInterval(() => this.tick(), 5_000), setInterval(() => this.pump(), 250), setInterval(() => this.stat(), OBSERVE.statMs));
+    this.timers.push(setInterval(() => this.tick(), 5_000), setInterval(() => this.pump(), 250), setInterval(() => this.stat(), OBSERVE.statMs),
+      setInterval(() => { try { this.d.calls?.tick(this.facts.values()); } catch (error) { this.d.log?.(`calls: ${(error as Error).message}`); } }, 1_000));
     for (const t of this.timers) t.unref?.();
     this.d.ledger.put(['START', this.now(), { sources: (this.d.tradeSources ?? [PUBLIC_RPC_WS]).length, portal: this.d.pumpPortalUrl !== null, version: 1 }]);
   }
@@ -118,11 +129,17 @@ export class ResearchObserver {
       this.d.ledger.put(['PC', now, { $m: mint }, trader ? { $w: trader } : null, sig, String(m.name ?? '').slice(0, 40), String(m.symbol ?? '').slice(0, 20),
         typeof m.uri === 'string' ? m.uri.slice(0, 200) : null, Number(m.solAmount ?? 0), Number(m.initialBuy ?? 0), r3(Number(m.marketCapSol ?? 0)), m.is_mayhem_mode ? 1 : 0]);
       this.register(mint, now, typeof m.uri === 'string' ? m.uri : null);
+      const l = this.fact(mint, now);
+      l.creator ??= trader; l.devBuySol = Number(m.solAmount ?? 0); l.name ??= String(m.name ?? '').slice(0, 40); l.symbol ??= String(m.symbol ?? '').slice(0, 20);
+      if (m.is_mayhem_mode) l.mayhem = true;
+      if (l.creator) l.creatorW = this.wallet(l.creator);
     } else if (m.txType === 'migrate') {
       this.count('migrations');
       this.d.ledger.put(['G', now, { $m: mint }, sig, typeof m.pool === 'string' ? m.pool : null]);
       const t = this.tracks.get(mint);
       if (t) { this.closeCandle(t); t.completeMs ??= now; }
+      const l = this.facts.get(mint);
+      if (l) { l.migrateObs ??= now; l.completeObs ??= now; }
     }
   }
 
@@ -139,12 +156,17 @@ export class ResearchObserver {
         this.d.ledger.put(['C', now, e.ts, slot, { $m: e.mint }, { $w: e.user }, e.creator && e.creator !== e.user ? { $w: e.creator } : null, sig,
           e.name.slice(0, 40), e.symbol.slice(0, 20), e.uri.slice(0, 200)]);
         this.register(e.mint, now, e.uri);
+        const l = this.fact(e.mint, now);
+        l.createdTs = e.ts !== null ? e.ts * 1000 : l.createdTs; l.creator ??= e.creator ?? e.user; l.name ??= e.name.slice(0, 40); l.symbol ??= e.symbol.slice(0, 20);
+        if (l.creator) l.creatorW = this.wallet(l.creator);
       } else if (ev.kind === 'trade') this.onTrade(ev.e, slot, sig, now);
       else {
         this.count('completes');
         this.d.ledger.put(['X', now, ev.e.ts, { $m: ev.e.mint }]);
         const t = this.tracks.get(ev.e.mint);
         if (t) { this.closeCandle(t); t.completeMs ??= now; }
+        const l = this.facts.get(ev.e.mint);
+        if (l) l.completeObs ??= now;
       }
     }
   }
@@ -163,6 +185,11 @@ export class ResearchObserver {
     } else { c.sell += e.lamports; c.ns++; }
     t.progress = progress; t.lastTradeMs = now;
     const age = now - t.createdMs;
+    const l = this.facts.get(e.mint);
+    if (l && (age <= OBSERVE.rawWindowMs || (progress >= OBSERVE.extendProgress && age <= OBSERVE.extendWindowMs) || this.d.calls?.holding(e.mint))) {
+      l.trades.push({ obs: now, ts: e.ts, slot: slot ?? 0, w: this.wallet(e.user), buy: e.isBuy, lamports: e.lamports, vSol: e.vSol, vTok: e.vTok, realTok: e.realTok });
+      if (mc < NORMAL_CURVE_FLOOR_SOL) l.mayhem = true;
+    }
     if (!this.d.ledger.lowDisk && (age <= OBSERVE.rawWindowMs || (progress >= OBSERVE.extendProgress && age <= OBSERVE.extendWindowMs))) {
       this.count('tradesLogged');
       this.d.ledger.put(['T', now, e.ts, slot, { $m: e.mint }, { $w: e.user }, e.isBuy ? 1 : 0, e.lamports, e.tokens, e.vSol, e.vTok, e.realTok, sig]);
@@ -170,6 +197,22 @@ export class ResearchObserver {
   }
 
   // ------------------------------------------------------------------ tracking
+
+  private wallet(w: string): number {
+    let i = this.walletIds.get(w);
+    if (i === undefined) { i = this.walletIds.size; this.walletIds.set(w, i); if (this.walletIds.size > 2_000_000) this.walletIds.clear(); }
+    return i;
+  }
+
+  private fact(mint: string, now: number): LaunchFacts {
+    let l = this.facts.get(mint);
+    if (!l) {
+      l = { mint, createdObs: now, createdTs: null, creator: null, creatorW: null, devBuySol: null, name: null, symbol: null, mayhem: false, trades: [], candles: [],
+        completeObs: null, migrateObs: null, meta: null, metaError: false, xReads: [], xPosts: [], sites: [] };
+      this.facts.set(mint, l);
+    }
+    return l;
+  }
 
   private register(mint: string, now: number, uri: string | null): void {
     const t = this.tracks.get(mint);
@@ -183,6 +226,7 @@ export class ResearchObserver {
     const c = t.candle;
     if (!c) return;
     t.candle = null;
+    this.facts.get(t.mint)?.candles.push({ m: c.minute * 60_000, h: c.h, l: c.l, c: c.c });
     if (this.d.ledger.lowDisk || this.now() - t.createdMs > OBSERVE.candleForMs) return;
     this.count('candles');
     this.d.ledger.put(['K', c.minute, { $m: t.mint }, r3(c.o), r3(c.h), r3(c.l), r3(c.c), c.buy, c.sell, c.nb, c.ns, c.buyers.size, c.fresh, Math.round(c.progress * 10_000) / 10_000]);
@@ -199,6 +243,7 @@ export class ResearchObserver {
         || (age > OBSERVE.rawWindowMs && now - t.lastTradeMs > OBSERVE.dropIdleMs && !t.reads.some(r => !r.active));
       if (done) { this.closeCandle(t); this.tracks.delete(mint); }
     }
+    for (const mint of this.facts.keys()) if (!this.tracks.has(mint) && !this.d.calls?.holding(mint)) this.facts.delete(mint);
   }
 
   /** Metadata fetches, X reads and website reads that are due. */
@@ -241,6 +286,8 @@ export class ResearchObserver {
       const s = (v: unknown, n = 200) => typeof v === 'string' && v.trim() ? v.trim().slice(0, n) : null;
       const twitter = s(j.twitter), website = s(j.website), telegram = s(j.telegram), description = s(j.description, 300);
       t.metaDone = true; this.count('metaOk');
+      const lf = this.facts.get(t.mint);
+      if (lf) lf.meta = { tw: twitter, web: website, tg: telegram, desc: description };
       this.d.ledger.put(['META', this.now(), { $m: t.mint }, { tw: twitter, web: website, tg: telegram, desc: description, img: s(j.image, 120), keys: Object.keys(j).length }]);
       const x = parseXLink(twitter);
       if (x.kind === 'ACCOUNT' && x.handle) {
@@ -256,7 +303,11 @@ export class ResearchObserver {
       }
     } catch (error) {
       if (t.metaTries < 2) setTimeout(() => this.metaQueue.push(t.mint), OBSERVE.meta.retryMs).unref?.();
-      else { this.count('metaFail'); this.d.ledger.put(['META', this.now(), { $m: t.mint }, { error: (error as Error).message.slice(0, 80) }]); }
+      else {
+        this.count('metaFail'); this.d.ledger.put(['META', this.now(), { $m: t.mint }, { error: (error as Error).message.slice(0, 80) }]);
+        const lf = this.facts.get(t.mint);
+        if (lf) lf.metaError = true;
+      }
     }
   }
 
@@ -313,6 +364,7 @@ export class ResearchObserver {
     const s = this.stats;
     return `${new Date(this.now()).toISOString().slice(0, 19)} · tracked ${this.tracks.size} · creates ${s.createsPortal}/${s.createsLog} (portal/logs) · trades ${s.trades} (logged ${s.tradesLogged}, untracked ${s.untracked}) · ` +
       `completes ${s.completes} · migrations ${s.migrations} · meta ${s.metaOk} ok/${s.metaFail} failed · X ${s.xReads} reads (${s.xLimited} limited, ${s.xErrors} errors, ${s.xLate} late) · ` +
-      `sites ${s.siteReads} · gaps ${s.gaps} · ${(this.d.ledger.bytes / 1048576).toFixed(1)} MB written${this.d.ledger.lowDisk ? ' · LOW DISK: trades paused' : ''}`;
+      `sites ${s.siteReads} · gaps ${s.gaps} · ${(this.d.ledger.bytes / 1048576).toFixed(1)} MB written${this.d.ledger.lowDisk ? ' · LOW DISK: trades paused' : ''}` +
+      (this.d.calls ? ` · calls ${this.d.calls.stats.calls} sent, ${this.d.calls.stats.shadows} shadow, ${this.d.calls.stats.judged} judged` : '');
   }
 }

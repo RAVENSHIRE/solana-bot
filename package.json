@@ -42,6 +42,7 @@
     "research:observe": "node --import tsx src/scripts/research-observe.ts",
     "research:report": "node --import tsx src/scripts/research-report.ts",
     "research:direct": "node --import tsx src/scripts/research-direct.ts",
+    "research:qualify": "node --max-old-space-size=1536 --import tsx src/scripts/research-qualify.ts",
     "research:platform": "node --import tsx src/scripts/research-platform.ts",
     "research:build": "tsc -p tsconfig.research.json",
     "test:research": "node --import tsx --test tests/research-*.test.ts",
