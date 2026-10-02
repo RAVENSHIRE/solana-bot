@@ -2,9 +2,11 @@
  * Research report: point-in-time features of every recorded launch against what happened next, on a discovery
  * half and an untouched validation half (by creation time). Read-only; reads data-desk/research.
  *
- *   npm run research:report -- [--dir data-desk/research] [--t 60,120,300,600] [--split 0.6] [--from ISO] [--to ISO] [--strict] [--csv out.csv]
+ *   npm run research:report -- [--dir data-desk/research] [--t 60,120,300,600] [--split 0.6] [--from ISO] [--to ISO] [--strict] [--mayhem] [--csv out.csv]
  *
- * --strict leaves out launches whose window had a logs-feed disconnect or a detected missing trade.
+ * pump.fun "mayhem mode" launches are left out unless --mayhem (only them) is given: their curve gains SOL without
+ * matching trades (2 Oct: k = vSol × vTok grew 4× in 15 trades), so their multiples are not comparable.
+ * --strict also leaves out launches whose window had a blind spot or a detected missing trade.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -31,11 +33,13 @@ function main(): void {
   for (const t of times) {
     let all = rows(ds, t);
     if (t === times[0]) for (const line of coverage(ds, all)) console.log(`  ${line}`);
+    const mayhemRows = all.filter(r => r.f.mayhem).length;
+    all = all.filter(r => r.f.mayhem === process.argv.includes('--mayhem'));
     if (strict) all = all.filter(r => !r.f.gapInWindow && (r.f.mayhem || r.f.chainBreaks === 0));
     const cut = all[Math.floor(all.length * split)]?.createdObs ?? Infinity;
     const discovery = all.filter(r => r.createdObs < cut), validation = all.filter(r => r.createdObs >= cut);
     const baseD = outcome(discovery), baseV = outcome(validation);
-    console.log(`\n== DECISION ${t} s after creation · ${all.length} launches still on the curve${strict ? ' (strict)' : ''} · validation from ${Number.isFinite(cut) ? new Date(cut).toISOString().slice(0, 16) : '–'} UTC`);
+    console.log(`\n== DECISION ${t} s after creation · ${all.length} ${process.argv.includes('--mayhem') ? 'mayhem-mode' : `normal (${mayhemRows} mayhem-mode left out)`} launches still on the curve${strict ? ' (strict)' : ''} · validation from ${Number.isFinite(cut) ? new Date(cut).toISOString().slice(0, 16) : '–'} UTC`);
     console.log(`  outcomes from the price at ${t} s, within 1 h (counted only once the hour is in the data): win = 2× before halving · 2×/5× = reached · grad = curve completed · mfe1h/mae15m = median best/worst multiple`);
     console.log(`  base rate         D ${cell(baseD)} | V ${cell(baseV)}`);
     const found: Array<{ k: FeatureKey; b: Bin; l: CohortLine }> = [];
