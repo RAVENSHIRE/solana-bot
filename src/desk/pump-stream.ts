@@ -11,7 +11,10 @@ export interface PumpEventSource {
   drainCreates(): LaunchEvent[];
   /** The graduations seen recently (not drained: the TEST and LIVE engines each keep their own feed and read it). */
   migrations(): Graduation[];
+  /** Each curve's market cap (SOL) as the last observed trade left it; null when the stream cannot answer. */
+  curves(mints: string[]): Promise<Map<string, StreamCurve> | null>;
 }
+export interface StreamCurve { sol: number; at: number; complete: boolean }
 
 export class LocalPumpStream implements PumpEventSource {
   private after = 0;
@@ -34,6 +37,17 @@ export class LocalPumpStream implements PumpEventSource {
   healthy(now = Date.now()): boolean { return this.upstreamHealthy && now - this.lastOkAt < 10_000; }
   drainCreates(): LaunchEvent[] { const out = this.creates; this.creates = []; return out; }
   migrations(): Graduation[] { return this.recentMigrations; }
+
+  async curves(mints: string[]): Promise<Map<string, StreamCurve> | null> {
+    if (!mints.length) return new Map();
+    try {
+      const res = await this.fetcher(`${this.url.replace(/\/pump\/events$/, '/pump/curves')}?mints=${mints.join(',')}`, { signal: AbortSignal.timeout(3_000) });
+      if (!res.ok) return null;
+      const j = await res.json() as { healthy: boolean; curves: Record<string, [number, number, 0 | 1]> };
+      if (!j.healthy) return null;
+      return new Map(Object.entries(j.curves).map(([m, [sol, at, complete]]) => [m, { sol, at, complete: complete === 1 }]));
+    } catch { return null; }
+  }
 
   async poll(): Promise<void> {
     if (this.busy) return;

@@ -13,8 +13,9 @@ import { OPENING_RULES } from './config';
  *      An alert goes out at once, and the OPEN strategy buys.
  *   4. Hold for at least 6×; the $6.7K floor stays the stop. Add to the position as it proves itself.
  *
- * Market caps come straight from each launch's bonding curve (one getMultipleAccounts call per 100 curves every few
- * seconds), so the opening candle is measured from the first seconds, long before DexScreener lists the token.
+ * Market caps come straight from each launch's bonding curve, so the opening candle is measured from the first seconds,
+ * long before DexScreener lists the token: from the research observer's live stream when it runs (the curve state each
+ * trade leaves, no RPC), otherwise one getMultipleAccounts call per 100 curves every few seconds.
  */
 export const OPENING = Object.freeze({
   pollMs: 4_000,
@@ -81,11 +82,27 @@ export function openingStep(s: OpeningState, at: number, usd: number): boolean {
 }
 
 type Rpc = { execute<T>(label: string, fn: (c: Connection) => Promise<T>): Promise<T> };
+type CurveStream = { healthy(now: number): boolean; curves(mints: string[]): Promise<Map<string, { sol: number; complete: boolean }> | null> };
 
 /** Watches every new launch's curve; reports each breakout signal once. Never throws. */
 export class OpeningTracker {
   private readonly states = new Map<string, OpeningState>();
-  constructor(private readonly rpc: Rpc) {}
+  /** Where the last read's market caps came from. */
+  source: 'stream' | 'rpc' | null = null;
+  constructor(private readonly rpc: Rpc, private readonly stream: CurveStream | null = null) {}
+
+  /** One batch of curves: from the live stream while it is healthy, otherwise from the RPC. Null: no answer. */
+  private async read(batch: OpeningState[], now: number): Promise<Array<{ sol: number; complete: boolean } | null> | null> {
+    if (this.stream?.healthy(now)) {
+      const got = await this.stream.curves(batch.map(s => s.mint));
+      if (got) { this.source = 'stream'; return batch.map(s => got.get(s.mint) ?? null); }
+    }
+    try {
+      const infos = await this.rpc.execute('opening:curves', c => c.getMultipleAccountsInfo(batch.map(s => new PublicKey(bondingCurveAddress(s.mint))), 'confirmed')) as Array<{ data: Buffer } | null>;
+      this.source = 'rpc';
+      return infos.map(info => info ? curveMarketCapSol(Buffer.from(info.data)) : null);
+    } catch { this.source = null; return null; }
+  }
 
   /** Launches the radar has decoded (mint, name, creation time); new ones start being watched. */
   observe(launches: Array<{ mint: string; symbol: string; name: string; at: number }>, now: number): void {
@@ -113,14 +130,10 @@ export class OpeningTracker {
     const signals: OpeningState[] = [];
     for (let i = 0; i < due.length; i += 100) {
       const batch = due.slice(i, i + 100);
-      let infos: Array<{ data: Buffer } | null>;
-      try {
-        infos = await this.rpc.execute('opening:curves', c => c.getMultipleAccountsInfo(batch.map(s => new PublicKey(bondingCurveAddress(s.mint))), 'confirmed')) as Array<{ data: Buffer } | null>;
-      } catch { continue; }
+      const caps = await this.read(batch, now);
+      if (!caps) continue;
       batch.forEach((s, j) => {
-        const info = infos[j];
-        if (!info) return;
-        const cap = curveMarketCapSol(Buffer.from(info.data));
+        const cap = caps[j];
         if (!cap) return;
         if (cap.complete) { if (s.status === 'OPENING' || s.status === 'STRONG') { s.status = 'GRADUATED'; s.detail = `graduated before a breakout (last ${k(s.lastUsd)})`; } return; }
         const usd = cap.sol * solUsd;

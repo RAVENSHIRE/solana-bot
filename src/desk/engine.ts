@@ -581,7 +581,7 @@ export class DeskEngine {
       found.tokens.set(x.mint, row);
     }
     if (d.launches) this.sources['Launch radar (pump.fun, on-chain)'] = `${this.launchList.size} shortlisted · ${d.pumpStream?.healthy(Date.now()) ? 'launches from the research live stream' : 'launches polled from the RPC'} · X pages read without a key · ${d.aiReview ? d.aiReview() : 'Claude review off'}`;
-    if (d.opening) { const o = d.opening.counts(); this.sources['Opening screen (curves, every 4 s)'] = `${o.OPENING} in their first minute · ${o.STRONG} strong opens watched · ${o.SIGNAL} breakouts · ${o.RUG} fell below the floor`; }
+    if (d.opening) { const o = d.opening.counts(); this.sources['Opening screen (curves, every 4 s)'] = `${o.OPENING} in their first minute · ${o.STRONG} strong opens watched · ${o.SIGNAL} breakouts · ${o.RUG} fell below the floor${d.opening.source ? ` · curves ${d.opening.source === 'stream' ? 'from the research live stream' : 'read from the RPC'}` : ''}`; }
     if (d.golden) { const g = d.golden.counts(); this.sources['Golden pocket (graduated pools, every 4 s)'] = `${g.watched} pools watched · ${g.DIP} dipped · ${g.BROKEN_OUT} broke out, waiting for the retest · ${g.ENTRY} filled`; }
     if (d.xfeed) { const x = d.xfeed.status(); this.sources['X feed (X API search)'] = x.configured ? (x.lastError ?? `${x.signals} token posts from ${x.posts} posts`) : 'off — set X_BEARER_TOKEN in .env'; }
     const staged = await this.stage(found.tokens);

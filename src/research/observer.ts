@@ -59,7 +59,7 @@ export interface ObserverDeps {
   log?: (line: string) => void;
   /** Live calls from the research layer (qualified rules to the phone, shadow calls recorded). */
   calls?: CallEngine | null;
-  /** Shares new launches and migrations with the desk on this machine (research/local-feed.ts). */
+  /** Shares new launches, migrations and curve market caps with the desk on this machine (research/local-feed.ts). */
   feed?: LocalFeed | null;
 }
 
@@ -177,6 +177,7 @@ export class ResearchObserver {
       else {
         this.count('completes');
         this.d.ledger.put(['X', now, ev.e.ts, { $m: ev.e.mint }]);
+        this.d.feed?.addCurve(ev.e.mint, 0, now, true);
         const t = this.tracks.get(ev.e.mint);
         if (t) { this.closeCandle(t); t.completeMs ??= now; }
         const l = this.facts.get(ev.e.mint);
@@ -187,6 +188,7 @@ export class ResearchObserver {
 
   private onTrade(e: PumpTrade, slot: number | null, sig: string, now: number): void {
     this.count('trades');
+    this.d.feed?.addCurve(e.mint, curveMcapSol(e.vSol, e.vTok), now);
     const t = this.tracks.get(e.mint);
     if (!t) { this.count('untracked'); return; }
     const mc = curveMcapSol(e.vSol, e.vTok), progress = curveProgress(e.realTok), minute = Math.floor(e.ts / 60);

@@ -370,7 +370,7 @@ test('live and look-back features are the same code over the same facts', async 
   }
 });
 
-test('local feed: the observer shares new launches and migrations with the desk, which then leaves the RPC alone', async () => {
+test('local feed: the observer shares new launches, migrations and curve market caps with the desk, which then leaves the RPC alone', async () => {
   const { LocalFeed } = await import('../src/research/local-feed');
   const { LocalPumpStream } = await import('../src/desk/pump-stream');
   const { LaunchFeed } = await import('../src/desk/launches');
@@ -398,12 +398,26 @@ test('local feed: the observer shares new launches and migrations with the desk,
     // TEST and LIVE each keep a graduation feed on the same stream: both see every graduation.
     const other = await new GraduationFeed(rpc as never, undefined, undefined, stream).poll(Date.now());
     assert.deepEqual(other.map(g => g.mint), [grad]);
+    // The opening screen reads curve market caps from the stream (the state each trade left), not the curve accounts.
+    const { OpeningTracker } = await import('../src/desk/opening');
+    const opening = new OpeningTracker(rpc as never, stream);
+    const fresh = pk().toBase58(), done = pk().toBase58();
+    opening.observe([{ mint: fresh, symbol: 'NEW', name: 'New', at: now }, { mint: done, symbol: 'DONE', name: 'Done', at: now }, { mint: grad, symbol: 'X', name: 'No trade yet', at: now }], now);
+    feed.addCurve(fresh, 80, now + 1_000); feed.addCurve(fresh, 120, now + 2_000);
+    feed.addCurve(done, 300, now + 1_000); feed.addCurve(done, 0, now + 2_000, true); feed.addCurve(done, 50, now + 3_000);
+    await opening.poll(now + 4_000, 150);
+    assert.equal(opening.source, 'stream');
+    assert.equal(opening.get(fresh)!.lastUsd, 120 * 150, 'the latest trade\'s market cap');
+    assert.equal(opening.get(done)!.status, 'GRADUATED', 'a completed curve stays complete');
+    assert.equal(opening.get(grad)!.lastUsd, null, 'no trade seen yet: no sample');
     assert.equal(rpcCalls, 0);
     // The observer's upstream is down: the desk falls back to the RPC.
     upstream = false; await stream.poll();
     assert.equal(stream.healthy(Date.now()), false);
     await launches.poll(Date.now());
     assert.ok(rpcCalls > 0, 'fallback to the RPC');
+    const before = rpcCalls; await opening.poll(now + 8_000, 150);
+    assert.ok(rpcCalls > before); assert.equal(opening.source, null, 'the RPC read failed: no source');
   } finally { feed.close(); }
 });
 

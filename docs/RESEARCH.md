@@ -33,11 +33,13 @@ Read-only: it never signs, trades or reads a key. It runs beside the desk and do
 | fxtwitter mirror (`api.fxtwitter.com/2/profile/<handle>/statuses`) | profile (incl. checkmark type: blue / gold business / grey government) and last 20 posts with exact times | free, unofficial; read at +20 s and +6 min for every launch with its own X account, +2.5/+15/+30 min while active; one read per 1.2 s |
 | The launch's website | whether it shows this contract address | free; +6 min, +20 min while active |
 
-**Local feed for the desk.** The observer serves the creations and migrations it sees on `127.0.0.1:3101/pump/events`
-(`RESEARCH_FEED_PORT`; local only). The desk's launch radar and graduation feed read them from there instead of
-polling Helius for pump.fun signatures every few seconds; when the observer is not running (no answer for 10 s) or its own websockets are down, the desk
+**Local feed for the desk.** The observer serves the creations and migrations it sees on `127.0.0.1:3101/pump/events`,
+and each curve's market cap as its last trade left it on `/pump/curves` (`RESEARCH_FEED_PORT`; local only). The desk's
+launch radar, graduation feed and opening screen read them from there instead of polling Helius for pump.fun
+signatures and curve accounts every few seconds; when the observer is not running (no answer for 10 s) or its own websockets are down, the desk
 falls back to the RPC by itself (`DESK_PUMP_STREAM=off` forces the RPC). The dashboard's source line says which one
-is in use: *launches from the research live stream* or *launches polled from the RPC*.
+is in use: *launches from the research live stream* or *launches polled from the RPC*, and for the opening screen
+*curves from the research live stream* or *read from the RPC*.
 
 PumpPortal's trade stream needs a funded key (0.01 SOL per 10,000 messages); the RPC logs give the same trades for free.
 

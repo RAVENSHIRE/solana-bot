@@ -123,14 +123,14 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
     ];
     const reviewer: Reviewer | null = reviewers.length > 1 ? new RotatingReviewer(reviewers) : reviewers[0] ?? null;
     const xfeed = new XFeed(env.X_BEARER_TOKEN?.trim() || null, fetch, env.DESK_X_QUERY?.trim() || XFEED.query);
-    // Opening screen: every launch's curve market cap from its first seconds (the owner's basic screen, OPEN strategy).
-    const opening = new OpeningTracker(rpc);
-    // GOLDEN POCKET: every fresh graduation's PumpSwap pool, its reserves read on chain every few seconds.
-    const golden = new GoldenTracker(rpc, GOLDEN_RULES);
-    // Launches and graduations from the research observer's live stream on this machine, when it runs (no RPC);
+    // Launches, graduations and curve market caps from the research observer's live stream on this machine, when it runs (no RPC);
     // otherwise the radar and the graduation feed poll the RPC as before.
     const pumpStream = env.DESK_PUMP_STREAM?.trim().toLowerCase() === 'off' ? null : new LocalPumpStream(`http://127.0.0.1:${Number(env.RESEARCH_FEED_PORT) || 3101}/pump/events`);
     pumpStream?.start();
+    // Opening screen: every launch's curve market cap from its first seconds (the owner's basic screen, OPEN strategy).
+    const opening = new OpeningTracker(rpc, pumpStream);
+    // GOLDEN POCKET: every fresh graduation's PumpSwap pool, its reserves read on chain every few seconds.
+    const golden = new GoldenTracker(rpc, GOLDEN_RULES);
     const alerts = notifier(env), launches = new LaunchFeed(rpc, fetch, undefined, undefined,
       { rugs, review: reviewer ? (i, now) => reviewer.review(i, now) : null, reviewAvailable: reviewer ? now => reviewer.available(now) : undefined,
         onDecoded: (events, now) => opening.observe(events, now), stream: pumpStream });
