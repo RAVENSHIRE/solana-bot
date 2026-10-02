@@ -97,7 +97,8 @@ function convert(tag: string, r: unknown[], mints: string[], wallets: string[], 
     }
     case 'K': {
       const minute = num(r[1]), m = mint(r[2]); if (!m || minute === null) return null;
-      const start = minute * 1000, close = start + 60_000, sol = o.solUsd?.(close) ?? null;
+      // The observer's candle field is the minute in unix MINUTES (Math.floor(ts / 60)), not seconds.
+      const start = minute * 60_000, close = start + 60_000, sol = o.solUsd?.(close) ?? null;
       const [op, hi, lo, cl] = [num(r[3]), num(r[4]), num(r[5]), num(r[6])];
       const out: EventInput[] = [];
       const progress = num(r[13]);

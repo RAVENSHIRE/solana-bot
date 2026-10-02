@@ -226,7 +226,7 @@ test('observer ledger import: launches, trades, curve, X posts and gaps as canon
     ['C', T0 + 300, sec(T0), 100, 0, 0, null, 'sigc', 'Agency', 'AGENCY', 'ipfs://x'],
     ['T', T0 + 5_000, sec(T0) + 4, 110, 0, 1, 1, 2e9, 6e13, 32e9, 1.0e15, 7.0e14, 'sigt1'],
     ['T', T0 + 9_000, sec(T0) + 8, 115, 0, 0, 0, 5e8, 1e13, 31e9, 1.0e15, 7.1e14, 'sigt2'],
-    ['K', sec(T0), 0, 30, 34, 29, 33, 4e9, 5e8, 5, 1, 4, 4, 0.12],
+    ['K', Math.floor(sec(T0) / 60), 0, 30, 34, 29, 33, 4e9, 5e8, 5, 1, 4, 4, 0.12],
     ['META', T0 + 2_000, 0, { tw: 'https://x.com/agency', web: 'https://agency.example', tg: null, desc: 'Agency' }],
     ['XT', T0 + 360_000, 0, 'agency', '1974', T0 + 120_000, { a: 'agency', t: 'CA: …', v: 5_000, mint: 1 }],
     ['GAP', T0 + 50_000, 'rpc-logs', 'stalled 12 s'],
@@ -250,6 +250,7 @@ test('observer ledger import: launches, trades, curve, X posts and gaps as canon
   assert.equal(post.payload.own_account, true);
   const candle = events.find(e => e.event_type === 'Candle')!;
   assert.equal(candle.payload.c, 33 * 150 / 1e9);
+  assert.equal(candle.timestamp, (Math.floor(sec(T0) / 60) + 1) * 60_000, 'a candle is dated at its close: minute (unix minutes) + 1');
   assert.equal(events.find(e => e.event_type === 'CurveProgress')!.payload.progress_pct, 12);
   // The own-account CA post is a feature only from when it was knowable.
   const idx = new KnowledgeIndex(events, 'AVAILABLE'), r = standardRegistry();
