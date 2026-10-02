@@ -41,9 +41,19 @@ export class GraduationFeed {
   private readonly seen = new Set<string>();
   private readonly failures = new Map<string, number>();
   private readonly recent = new Map<string, Graduation>();
-  constructor(private readonly rpc: ConnectionManager, private readonly windowMs = 30 * 60_000, private readonly maxNewPerPoll = 12) {}
+  constructor(private readonly rpc: ConnectionManager, private readonly windowMs = 30 * 60_000, private readonly maxNewPerPoll = 12,
+    /** The research observer's live stream: graduations within seconds, no RPC, while it is healthy. */
+    private readonly stream: { healthy(now: number): boolean; migrations(): Graduation[] } | null = null) {}
 
   async poll(now = Date.now()): Promise<Graduation[]> {
+    if (this.stream?.healthy(now)) {
+      for (const g of this.stream.migrations()) if (!this.recent.has(g.mint) && now - g.at <= this.windowMs) this.recent.set(g.mint, g);
+    } else await this.pollRpc(now);
+    for (const [mint, g] of this.recent) if (now - g.at > this.windowMs) this.recent.delete(mint);
+    return [...this.recent.values()].sort((a, b) => b.at - a.at);
+  }
+
+  private async pollRpc(now: number): Promise<void> {
     const sigs = await this.rpc.execute('desk:graduations', c => c.getSignaturesForAddress(PUMP_MIGRATION_AUTHORITY, { limit: 40 }, 'confirmed'));
     const fresh = sigs.filter(s => !s.err && s.blockTime && !this.seen.has(s.signature) && s.blockTime * 1000 >= now - this.windowMs)
       .sort((a, b) => b.blockTime! - a.blockTime!).slice(0, this.maxNewPerPoll);
@@ -62,8 +72,6 @@ export class GraduationFeed {
       const mint = graduatedMint(tx);
       if (mint) this.recent.set(mint, { mint, signature: s.signature, at: s.blockTime! * 1000 });
     }
-    for (const [mint, g] of this.recent) if (now - g.at > this.windowMs) this.recent.delete(mint);
     if (this.seen.size > 5_000) for (const sig of [...this.seen].slice(0, 2_500)) this.seen.delete(sig);
-    return [...this.recent.values()].sort((a, b) => b.at - a.at);
   }
 }

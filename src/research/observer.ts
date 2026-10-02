@@ -6,6 +6,7 @@ import { ReconnectingFeed, RecentSet, type SocketFactory } from './streams';
 import { readXTimeline, postAddresses, type XRead } from './xread';
 import { NORMAL_CURVE_FLOOR_SOL, type LaunchFacts } from './dataset';
 import type { CallEngine } from './calls';
+import type { LocalFeed } from './local-feed';
 
 /**
  * The research observer: every pump.fun launch from its creation, recorded as facts with the time they were observed.
@@ -24,7 +25,9 @@ export const OBSERVE = Object.freeze({
   candleForMs: 6 * 3_600_000, dropIdleMs: 30 * 60_000, dropAfterCompleteMs: 10 * 60_000,
   /** Candles of a minute are closed this long after it ended (trades arrive a few seconds late). */
   candleGraceMs: 20_000,
-  x: { atMs: [6 * 60_000], activeAtMs: [15 * 60_000, 30 * 60_000], gapMs: 1_200, maxLateMs: 5 * 60_000, handleCacheMs: 60_000, backoffMs: 60_000, maxBackoffMs: 10 * 60_000 },
+  // X reads: +20 s for every launch with its own X account (a checkmark or an early CA post is known within seconds),
+  // +2.5 min while it is active, +6 min for all, +15/+30 min while active.
+  x: { atMs: [20_000, 6 * 60_000], activeAtMs: [150_000, 15 * 60_000, 30 * 60_000], gapMs: 1_200, maxLateMs: 5 * 60_000, handleCacheMs: 60_000, backoffMs: 60_000, maxBackoffMs: 10 * 60_000 },
   site: { atMs: [6 * 60_000], activeAtMs: [20 * 60_000], concurrency: 2 },
   active: { buyers: 10, progress: 0.05 },
   meta: { concurrency: 6, timeoutMs: 5_000, retryMs: 30_000 },
@@ -56,6 +59,8 @@ export interface ObserverDeps {
   log?: (line: string) => void;
   /** Live calls from the research layer (qualified rules to the phone, shadow calls recorded). */
   calls?: CallEngine | null;
+  /** Shares new launches and migrations with the desk on this machine (research/local-feed.ts). */
+  feed?: LocalFeed | null;
 }
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000;
@@ -70,6 +75,9 @@ export class ResearchObserver {
    */
   readonly facts = new Map<string, LaunchFacts>();
   private readonly walletIds = new Map<string, number>();
+  /** When a creation last arrived from any feed: the shared stream is healthy while creations keep coming. */
+  lastCreateAt = 0;
+  streamHealthy(now = this.now()): boolean { return now - this.lastCreateAt < 60_000; }
   private readonly now: () => number;
   private readonly seen = new RecentSet(200_000);
   private readonly feeds: ReconnectingFeed[] = [];
@@ -129,6 +137,9 @@ export class ResearchObserver {
       this.d.ledger.put(['PC', now, { $m: mint }, trader ? { $w: trader } : null, sig, String(m.name ?? '').slice(0, 40), String(m.symbol ?? '').slice(0, 20),
         typeof m.uri === 'string' ? m.uri.slice(0, 200) : null, Number(m.solAmount ?? 0), Number(m.initialBuy ?? 0), r3(Number(m.marketCapSol ?? 0)), m.is_mayhem_mode ? 1 : 0]);
       this.register(mint, now, typeof m.uri === 'string' ? m.uri : null);
+      this.lastCreateAt = now;
+      if (typeof m.signature === 'string') this.d.feed?.addCreate({ mint, name: String(m.name ?? '').slice(0, 40), symbol: String(m.symbol ?? '').slice(0, 20),
+        uri: typeof m.uri === 'string' ? m.uri : '', creator: trader, signature: m.signature, at: now });
       const l = this.fact(mint, now);
       l.creator ??= trader; l.devBuySol = Number(m.solAmount ?? 0); l.name ??= String(m.name ?? '').slice(0, 40); l.symbol ??= String(m.symbol ?? '').slice(0, 20);
       if (m.is_mayhem_mode) l.mayhem = true;
@@ -136,6 +147,7 @@ export class ResearchObserver {
     } else if (m.txType === 'migrate') {
       this.count('migrations');
       this.d.ledger.put(['G', now, { $m: mint }, sig, typeof m.pool === 'string' ? m.pool : null]);
+      if (typeof m.signature === 'string') this.d.feed?.addMigration({ mint, signature: m.signature, at: now });
       const t = this.tracks.get(mint);
       if (t) { this.closeCandle(t); t.completeMs ??= now; }
       const l = this.facts.get(mint);
@@ -156,6 +168,8 @@ export class ResearchObserver {
         this.d.ledger.put(['C', now, e.ts, slot, { $m: e.mint }, { $w: e.user }, e.creator && e.creator !== e.user ? { $w: e.creator } : null, sig,
           e.name.slice(0, 40), e.symbol.slice(0, 20), e.uri.slice(0, 200)]);
         this.register(e.mint, now, e.uri);
+        this.lastCreateAt = now;
+        this.d.feed?.addCreate({ mint: e.mint, name: e.name.slice(0, 40), symbol: e.symbol.slice(0, 20), uri: e.uri, creator: e.creator ?? e.user, signature: v.signature, at: now });
         const l = this.fact(e.mint, now);
         l.createdTs = e.ts !== null ? e.ts * 1000 : l.createdTs; l.creator ??= e.creator ?? e.user; l.name ??= e.name.slice(0, 40); l.symbol ??= e.symbol.slice(0, 20);
         if (l.creator) l.creatorW = this.wallet(l.creator);
@@ -331,14 +345,18 @@ export class ResearchObserver {
     }
     const obs = this.now(), p = read.profile;
     this.d.ledger.put(['XP', obs, { $m: t.mint }, handle, { st: read.status, http: read.http, f: p?.followers ?? null, fg: p?.following ?? null, n: p?.statuses ?? null,
-      j: p?.joinedAt ?? null, v: p?.verified ?? null, web: p?.website?.slice(0, 100) ?? null, bio: p?.bio?.slice(0, OBSERVE.textChars) ?? null, posts: read.posts.length }]);
+      j: p?.joinedAt ?? null, v: p?.verified ?? null, vt: p?.verifiedType ?? null, web: p?.website?.slice(0, 100) ?? null, bio: p?.bio?.slice(0, OBSERVE.textChars) ?? null, posts: read.posts.length }]);
+    const lf = this.facts.get(t.mint);
+    if (lf && read.status === 'OK') lf.xReads.push({ obs, st: read.status, followers: p?.followers ?? null, joined: p?.joinedAt ?? null, statuses: p?.statuses ?? null });
     for (const post of read.posts) {
       if (post.at < t.createdMs - OBSERVE.postsBeforeCreateMs || t.posts.has(post.id)) continue;
       t.posts.add(post.id);
       const a = postAddresses(post.raw, t.mint);
       this.d.ledger.put(['XT', obs, { $m: t.mint }, handle, post.id, post.at, { a: post.author, t: post.text.slice(0, OBSERVE.textChars), v: post.views, l: post.likes,
         rp: post.reposts, c: post.replies, q: post.quotes, rt: post.repost ? 1 : 0, re: post.replyTo, mint: a.mint ? 1 : 0, ca: a.other }]);
+      if (lf) lf.xPosts.push({ obs, at: post.at, mint: a.mint, author: post.author, views: post.views });
     }
+    if (lf && read.status === 'OK') this.d.calls?.xRead(lf, handle, read);
   }
 
   private async readSite(t: Track, _r: Read): Promise<void> {

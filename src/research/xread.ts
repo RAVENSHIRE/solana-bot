@@ -5,7 +5,8 @@
  */
 export interface XProfileFacts {
   handle: string; followers: number | null; following: number | null; statuses: number | null; joinedAt: number | null;
-  verified: boolean | null; website: string | null; bio: string | null;
+  /** A checkmark, and its kind: "individual" (blue, bought), "business" (gold, an organisation), "government" (grey). */
+  verified: boolean | null; verifiedType: string | null; website: string | null; bio: string | null;
 }
 export interface XPostFacts {
   id: string; at: number; author: string | null; text: string; views: number | null; likes: number | null; reposts: number | null;
@@ -20,7 +21,7 @@ const num = (v: unknown) => typeof v === 'number' && Number.isFinite(v) ? v : nu
 const text = (v: unknown) => typeof v === 'string' ? v : null;
 
 type FxAuthor = { screen_name?: string; followers?: number; following?: number; statuses?: number; tweets?: number; joined?: string; description?: string;
-  website?: { url?: string } | null; verification?: { verified?: boolean } | null };
+  website?: { url?: string } | null; verification?: { verified?: boolean; type?: string | null } | null };
 type FxPost = { id?: string; text?: string; author?: FxAuthor; created_timestamp?: number; views?: number; likes?: number; reposts?: number; replies?: number; quotes?: number;
   reposted_by?: unknown; replying_to?: string | null; raw_text?: unknown; card?: unknown; quote?: { text?: string } | null };
 
@@ -29,6 +30,7 @@ export function profileFacts(handle: string, a: FxAuthor | null | undefined): XP
   const joined = a.joined ? Date.parse(a.joined) : NaN;
   return { handle: a.screen_name ?? handle, followers: num(a.followers), following: num(a.following), statuses: num(a.statuses ?? a.tweets),
     joinedAt: Number.isFinite(joined) ? joined : null, verified: typeof a.verification?.verified === 'boolean' ? a.verification.verified : null,
+    verifiedType: a.verification?.verified ? text(a.verification.type) : null,
     website: text(a.website?.url), bio: text(a.description) };
 }
 

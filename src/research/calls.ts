@@ -3,6 +3,7 @@ import { simulate, DIRECT_DEFAULTS, type DirectOptions } from './direct';
 import { GROUPS, describeExit } from './rules';
 import type { Qualification, RuleEvidence } from './qualify';
 import type { ResearchLedger } from './ledger';
+import type { XRead } from './xread';
 
 /**
  * Live calls from the research layer. At each rule's decision time the observer's facts about a launch go through the
@@ -17,6 +18,12 @@ export const CALLS = Object.freeze({
   /** Results are judged this long after the hold ends (the last minute candle must close). */
   judgeAfterMs: 90_000,
   maxOpen: 50_000,
+  /**
+   * INFO messages (not calls): a launch whose own X account posted its contract address and has a checkmark or
+   * ≥ `infoMinFollowers` followers, or whose linked account has a gold (organisation) or grey (government) checkmark.
+   * At most `infoPerHour`, once per launch.
+   */
+  infoMinFollowers: 1_000, infoPerHour: 8,
 });
 export interface CallDeps {
   ledger: ResearchLedger;
@@ -36,17 +43,65 @@ export class CallEngine {
   private q: Qualification | null = null;
   private readonly done = new Map<string, Set<number>>();
   private open: Signal[] = [];
-  stats = { calls: 0, shadows: 0, late: 0, judged: 0, notFilled: 0 };
+  private readonly infoSent = new Map<string, number>();
+  private lastSummaryDay: string | null = null;
+  stats = { calls: 0, shadows: 0, late: 0, judged: 0, notFilled: 0, info: 0 };
   constructor(private readonly d: CallDeps) {}
 
   private get now(): number { return (this.d.now ?? Date.now)(); }
 
   /** A new qualification (the rule set and its evidence); recorded so the dataset knows which rules were live when. */
   setQualification(q: Qualification | null): void {
+    const before = new Set(this.q?.rules.filter(r => r.qualified).map(r => r.id) ?? []), hadOne = this.q !== null;
     this.q = q;
     const live = q?.rules.filter(r => r.qualified).map(r => r.id) ?? [];
     this.d.ledger.put(['QUAL', this.now, { generatedAt: q?.generatedAt ?? null, qualified: live, candidates: q?.rules.length ?? 0, data: q?.data ?? null }]);
     this.d.log?.(`qualification ${q ? new Date(q.generatedAt).toISOString().slice(0, 16) : 'none'}: ${live.length} qualified rule(s) of ${q?.rules.length ?? 0}${live.length ? ` — ${live.join(', ')}` : ''}`);
+    if (!q || !this.d.notify) return;
+    // The phone hears when a rule starts or stops calling, and once a day how the research stands.
+    const added = q.rules.filter(r => r.qualified && !before.has(r.id)), removed = [...before].filter(id => !live.includes(id));
+    const day = new Date(this.now).toISOString().slice(0, 10), daily = hadOne && this.lastSummaryDay !== day;
+    if (!added.length && !removed.length && !daily) { this.lastSummaryDay ??= day; return; }
+    this.lastSummaryDay = day;
+    const best = [...q.rules].sort((a, b) => b.validation.meanPct - a.validation.meanPct)[0];
+    const pct = (x: number) => `${x >= 0 ? '+' : ''}${x.toFixed(1)}%`;
+    const lines = [
+      ...added.map(r => `NOW CALLING: ${r.groupLabel} · ${r.delayS} s · ${describeExit(r.exit)} — later period ${r.validation.n} trades, ${pct(r.validation.meanPct)} avg, target hit ${r.validation.tpPct.toFixed(0)}%.`),
+      ...removed.map(id => `STOPPED: ${id} (${q.rules.find(r => r.id === id)?.reasons.join('; ') ?? 'no longer in the catalog'}).`),
+      `${live.length} of ${q.rules.length} rules qualified on ${q.data.launches} launches (${new Date(q.data.from).toISOString().slice(5, 16)} → ${new Date(q.data.to).toISOString().slice(5, 16)} UTC).`,
+      best ? `Closest: ${best.groupLabel} · ${best.delayS} s · ${describeExit(best.exit)}: ${pct(best.validation.meanPct)} avg after costs, target hit ${best.validation.tpPct.toFixed(0)}% (needs ${best.requiredHitPct?.toFixed(0) ?? '–'}%).` : '',
+    ].filter(Boolean);
+    void this.d.notify(added.length || removed.length ? `Research: ${added.length ? `${added.length} rule(s) now calling` : 'a rule stopped calling'}` : 'Research update', lines.join('\n')).catch(() => undefined);
+  }
+
+  /**
+   * An X read of a launch's linked account: an INFO message (not a call) for a checkmarked or established project
+   * account that posted this contract address, or a gold/grey-checkmark account.
+   */
+  xRead(l: LaunchFacts, handle: string, read: XRead): void {
+    if (!this.d.notify || this.infoSent.has(l.mint) || !read.profile) return;
+    const now = this.now, p = read.profile;
+    for (const [m, at] of this.infoSent) if (now - at > 3_600_000) this.infoSent.delete(m);
+    if (this.infoSent.size >= CALLS.infoPerHour) return;
+    const own = read.posts.find(x => x.author?.toLowerCase() === handle.toLowerCase() && x.raw.includes(l.mint));
+    const org = p.verifiedType === 'business' || p.verifiedType === 'government';
+    const established = p.verified === true || (p.followers ?? 0) >= CALLS.infoMinFollowers;
+    if (!(own && established) && !org) return;
+    this.infoSent.set(l.mint, now); this.stats.info++;
+    const badge = p.verifiedType === 'business' ? 'gold check (organisation)' : p.verifiedType === 'government' ? 'grey check (government)' : p.verified ? 'blue check' : 'no check';
+    const last = [...l.trades].sort((a, b) => a.obs - b.obs).at(-1), sol = this.d.solUsd?.() ?? null;
+    const mcSol = last ? last.vSol / last.vTok * 1e6 : null, ageMin = (now - l.createdObs) / 60_000;
+    const buyers = new Set(l.trades.filter(t => t.buy).map(t => t.w)).size;
+    const age = p.joinedAt ? (now - p.joinedAt) / 86_400_000 : null;
+    const body = [
+      `Not a qualified call — for your eyes.`,
+      `@${handle}: ${badge}, ${(p.followers ?? 0).toLocaleString('en-US')} followers${age !== null ? `, account ${age < 2 ? `${Math.round(age * 24)} h` : `${Math.round(age)} days`} old` : ''}.`,
+      own ? `It posted this contract address ${Math.max(0, Math.round((own.at - l.createdObs) / 1000))} s after launch.` : `It is linked by the launch but has not posted this contract address.`,
+      `Now ${mcSol !== null ? (sol ? `${usdK(mcSol * sol)} (${mcSol.toFixed(0)} SOL)` : `${mcSol.toFixed(0)} SOL`) : 'no trade yet'} market cap · ${buyers} buyers · ${ageMin < 1 ? `${Math.round(ageMin * 60)} s` : `${ageMin.toFixed(1)} min`} old${l.mayhem ? ' · mayhem mode' : ''}${l.completeObs ? ' · graduated' : ''}.`,
+      this.d.link ? this.d.link(l.mint) : `https://pump.fun/coin/${l.mint}`,
+    ].join('\n');
+    this.d.ledger.put(['INFO', now, { $m: l.mint }, handle, { badge: p.verifiedType ?? (p.verified ? 'blue' : null), f: p.followers, ownCa: own ? 1 : 0, mcSol }]);
+    void this.d.notify(`INFO ${l.symbol ?? l.mint.slice(0, 6)}: ${own ? 'project posted its CA' : badge}`, body).catch(() => undefined);
   }
   qualification(): Qualification | null { return this.q; }
   /** Mints with a signal still waiting for its result: the observer keeps their trades. */

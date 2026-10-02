@@ -30,8 +30,14 @@ Read-only: it never signs, trades or reads a key. It runs beside the desk and do
 | PumpPortal websocket (`subscribeNewToken`, `subscribeMigration`) | every creation (creator, dev buy, metadata URI), every migration | free |
 | Solana RPC websockets `logsSubscribe` (pump.fun program): api.mainnet-beta + publicnode, merged | every TradeEvent (wallet, SOL, tokens, curve reserves), CreateEvent, CompleteEvent | free. In a 45 s test (2 Oct) the public RPC delivered 81 % of the merged set and dropped its connection once; publicnode added the rest. `--sources public,publicnode,helius` adds Helius (may bill websocket traffic) |
 | Launch metadata JSON via pump.fun's gateway (`pump.mypinata.cloud`) | X, website, Telegram, description, image | free; ~0.1 s. Never ipfs.io, which rate-limited this IP to HTTP 429 for every request (the desk's radar now uses the same gateway) |
-| fxtwitter mirror (`api.fxtwitter.com/2/profile/<handle>/statuses`) | profile and last 20 posts with exact times | free, unofficial; read at +6 min for every launch with its own X account, +15/+30 min while active; one read per 1.2 s |
+| fxtwitter mirror (`api.fxtwitter.com/2/profile/<handle>/statuses`) | profile (incl. checkmark type: blue / gold business / grey government) and last 20 posts with exact times | free, unofficial; read at +20 s and +6 min for every launch with its own X account, +2.5/+15/+30 min while active; one read per 1.2 s |
 | The launch's website | whether it shows this contract address | free; +6 min, +20 min while active |
+
+**Local feed for the desk.** The observer serves the creations and migrations it sees on `127.0.0.1:3101/pump/events`
+(`RESEARCH_FEED_PORT`; local only). The desk's launch radar and graduation feed read them from there instead of
+polling Helius for pump.fun signatures every few seconds; when the observer is not running (no answer for 10 s) or its own websockets are down, the desk
+falls back to the RPC by itself (`DESK_PUMP_STREAM=off` forces the RPC). The dashboard's source line says which one
+is in use: *launches from the research live stream* or *launches polled from the RPC*.
 
 PumpPortal's trade stream needs a funded key (0.01 SOL per 10,000 messages); the RPC logs give the same trades for free.
 
@@ -76,10 +82,21 @@ pump.fun's "mayhem mode" break by design (their curve moves without matching tra
 A blind spot is an observer restart or every trade feed down at once; `--strict` drops rows with either.
 Cohorts are measured on the first 60 % of launches and checked, unchanged, on the last 40 %.
 
-## Qualified calls (the only thing that reaches the phone)
+## What reaches the phone: qualified calls, interesting coins, research updates
 
-The desk sends nothing to ntfy by default. The research layer sends one kind of message: a **call** from a rule that
-passed the qualification gate. No rule passes yet, so the phone stays quiet until one does.
+The desk sends nothing to ntfy by default (no rug confirmations). The research observer sends three kinds of message:
+
+1. **CALL** — a buy signal from a rule that passed the qualification gate below. No rule passes yet, so there are none
+   until one does.
+2. **INFO** — an interesting coin, *not* a call ("Not a qualified call — for your eyes"): the launch's own X account
+   posted this contract address and is checkmarked or has ≥ 1,000 followers, or the linked account has a gold
+   (organisation, like E/ACC) or grey (government) checkmark. At most 8 per hour, one per coin; the message gives the
+   account (badge, followers, age), how many seconds after launch it posted the CA, the market cap, buyers and the link.
+   Blue checks alone are not enough: about 70 % of linked X accounts carry one. `INFO` records keep every message.
+3. **Research** — when a rule starts or stops calling, and once a day (first requalification after 00:00 UTC): how
+   many rules qualify and the closest candidate with its later-period result and the hit rate it still needs.
+
+`--no-phone` keeps all three off the phone (records are still written); `--no-calls` turns the call engine off.
 
 **Rules** (`src/research/rules.ts`, fixed in code): a group of launches, a decision time after creation (5, 15, 30, 60
 or 120 s) and an exit (+40 % or +100 % target, −20 %/−35 %/no stop, 15 or 60 min). Groups use only what the live

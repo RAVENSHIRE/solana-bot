@@ -25,6 +25,7 @@ import { discover, pairMetrics, selectPair, tierFor, tokenTimes, type Discovered
 import { creatorHolding, gatherOnchain, holderCount, holders as readHolders, type Holders, type OnchainEvidence } from './onchain';
 import { launchCheck, type LaunchCheck } from './launch';
 import { GraduationFeed, type Graduation } from './migrations';
+import type { PumpEventSource } from './pump-stream';
 import { reclaimRent } from './rent';
 import { assessAuthenticity, checkWebsite, parseXLink, type WebsiteCheck, type XClient } from './social';
 import { analyze, type SocialEvidence, type WatchState } from './analysis';
@@ -66,6 +67,8 @@ export interface DeskDeps {
   opening?: OpeningTracker | null;
   /** GOLDEN POCKET: every fresh graduation's PumpSwap pool (reserves read on chain), run through the pattern. */
   golden?: GoldenTracker | null;
+  /** New launches and graduations from the research observer's live stream (falls back to the RPC when down). */
+  pumpStream?: PumpEventSource | null;
   /** Claude review of shortlisted launches: its status line; absent when off. */
   aiReview?: (() => string) | null;
   /** Phone/desktop alerts (ntfy, Telegram) for launch-radar finds and entry-ready signals. */
@@ -208,7 +211,7 @@ export class DeskEngine {
 
   private constructor(private readonly d: DeskDeps) {
     this.events = new EventLog(d.mode, path.join(d.dir, `events-${d.mode}.json`));
-    this.graduations = new GraduationFeed(d.rpc);
+    this.graduations = new GraduationFeed(d.rpc, undefined, undefined, d.pumpStream ?? null);
     const base = d.strategies ?? strategyProfiles({}, d.capital, d.cfg.rs);
     const copy = (p: StrategyProfile): StrategyProfile => ({ ...p, exits: { ...p.exits } });
     this.strategies = { FAIR: copy(base.FAIR), CRASH: copy(base.CRASH), LAUNCH: copy(base.LAUNCH), OPEN: copy(base.OPEN), GOLDEN: copy(base.GOLDEN) };
@@ -577,7 +580,7 @@ export class DeskEngine {
       if (!row.sources.includes('x-feed')) row.sources.push('x-feed');
       found.tokens.set(x.mint, row);
     }
-    if (d.launches) this.sources['Launch radar (pump.fun, on-chain)'] = `${this.launchList.size} shortlisted · X pages read without a key · ${d.aiReview ? d.aiReview() : 'Claude review off'}`;
+    if (d.launches) this.sources['Launch radar (pump.fun, on-chain)'] = `${this.launchList.size} shortlisted · ${d.pumpStream?.healthy(Date.now()) ? 'launches from the research live stream' : 'launches polled from the RPC'} · X pages read without a key · ${d.aiReview ? d.aiReview() : 'Claude review off'}`;
     if (d.opening) { const o = d.opening.counts(); this.sources['Opening screen (curves, every 4 s)'] = `${o.OPENING} in their first minute · ${o.STRONG} strong opens watched · ${o.SIGNAL} breakouts · ${o.RUG} fell below the floor`; }
     if (d.golden) { const g = d.golden.counts(); this.sources['Golden pocket (graduated pools, every 4 s)'] = `${g.watched} pools watched · ${g.DIP} dipped · ${g.BROKEN_OUT} broke out, waiting for the retest · ${g.ENTRY} filled`; }
     if (d.xfeed) { const x = d.xfeed.status(); this.sources['X feed (X API search)'] = x.configured ? (x.lastError ?? `${x.signals} token posts from ${x.posts} posts`) : 'off — set X_BEARER_TOKEN in .env'; }

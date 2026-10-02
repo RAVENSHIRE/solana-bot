@@ -305,6 +305,10 @@ test('call engine: a qualified rule calls the phone at its decision time, other 
   const sent: Array<[string, string]> = [];
   const engine = new CallEngine({ ledger, now: () => now, notify: async (t, b) => { sent.push([t, b]); }, solUsd: () => 150, costs: freeCosts, link: m => `https://fomo.family/tokens/solana/${m}` });
   engine.setQualification(q);
+  // Rules that start calling are announced once; the phone hears it before any call.
+  assert.equal(sent.length, 1);
+  assert.match(sent[0]![0], /^Research: \d+ rule\(s\) now calling$/);
+  sent.length = 0;
   const l = syntheticLaunch(0, t0, true);
   now = t0 + 5_000; engine.tick([l]);
   const live = q.rules.filter(r => r.qualified && r.delayS === 5);
@@ -364,4 +368,98 @@ test('live and look-back features are the same code over the same facts', async 
     for (const k of ['buyers', 'top1', 'effectiveBuyers', 'mcapSol', 'progress', 'velocity60', 'devBuySol', 'devSold', 'hasX', 'hasSite', 'netSol'] as const)
       assert.deepEqual(a[k], b[k], `${k} at ${t} s: live ${a[k]} vs look-back ${b[k]}`);
   }
+});
+
+test('local feed: the observer shares new launches and migrations with the desk, which then leaves the RPC alone', async () => {
+  const { LocalFeed } = await import('../src/research/local-feed');
+  const { LocalPumpStream } = await import('../src/desk/pump-stream');
+  const { LaunchFeed } = await import('../src/desk/launches');
+  const { GraduationFeed } = await import('../src/desk/migrations');
+  let upstream = true;
+  const feed = new LocalFeed(() => upstream), port = 39_000 + Math.floor(Math.random() * 1_000);
+  await feed.listen(port);
+  try {
+    const mint = pk().toBase58(), grad = pk().toBase58(), now = Date.now();
+    feed.addCreate({ mint, name: 'Agency', symbol: 'AGENCY', uri: 'https://meta/a', creator: 'DEV', signature: 'SIGC', at: now });
+    feed.addCreate({ mint, name: 'Agency', symbol: 'AGENCY', uri: 'https://meta/a', creator: 'DEV', signature: 'SIGC', at: now });
+    feed.addMigration({ mint: grad, signature: 'SIGG', at: now });
+    const stream = new LocalPumpStream(`http://127.0.0.1:${port}/pump/events`);
+    await stream.poll();
+    assert.equal(stream.healthy(Date.now()), true);
+    let rpcCalls = 0;
+    const rpc = { execute: async () => { rpcCalls++; throw new Error('the RPC must not be used while the stream is healthy'); } };
+    const launches = new LaunchFeed(rpc as never, (async () => new Response(JSON.stringify({ twitter: 'https://x.com/tryagency' }))) as typeof fetch,
+      async url => ({ url, status: 'NONE', httpStatus: null, title: null, description: null, xHandles: [], detail: '', addresses: [], claimed: [] }),
+      async handle => ({ handle, status: 'UNAVAILABLE', detail: 'test', addresses: [], claimed: [] }), { stream, insiders: null });
+    const got = await launches.poll(Date.now());
+    assert.deepEqual(got.map(l => [l.mint, l.symbol, l.signature, l.creator]), [[mint, 'AGENCY', 'SIGC', 'DEV']], 'one launch, once');
+    const grads = await new GraduationFeed(rpc as never, undefined, undefined, stream).poll(Date.now());
+    assert.deepEqual(grads.map(g => g.mint), [grad]);
+    // TEST and LIVE each keep a graduation feed on the same stream: both see every graduation.
+    const other = await new GraduationFeed(rpc as never, undefined, undefined, stream).poll(Date.now());
+    assert.deepEqual(other.map(g => g.mint), [grad]);
+    assert.equal(rpcCalls, 0);
+    // The observer's upstream is down: the desk falls back to the RPC.
+    upstream = false; await stream.poll();
+    assert.equal(stream.healthy(Date.now()), false);
+    await launches.poll(Date.now());
+    assert.ok(rpcCalls > 0, 'fallback to the RPC');
+  } finally { feed.close(); }
+});
+
+test('reviews: Gemini answers while Claude is out of credits', async () => {
+  const { GeminiReviewer, RotatingReviewer, REVIEWER_COOLDOWN_MS } = await import('../src/desk/review');
+  const verdict = { verdict: 'OK', idea: 6, professionalism: 12, aiGenerated: 'POSSIBLE', scamSignals: [], summary: 'Plausible.' };
+  const urls: string[] = [];
+  const gemini = new GeminiReviewer('KEY', 'gemini-old-flash', (async (url: string, init?: RequestInit) => {
+    urls.push(url);
+    assert.equal((init?.headers as Record<string, string>)['x-goog-api-key'], 'KEY', 'the key goes in a header, never the URL');
+    if (url.includes('gemini-old-flash:')) return new Response('{}', { status: 404 });
+    if (url.endsWith('/models?pageSize=200')) return new Response(JSON.stringify({ models: [
+      { name: 'models/gemini-2.0-flash', supportedGenerationMethods: ['generateContent'] }, { name: 'models/gemini-3.5-flash', supportedGenerationMethods: ['generateContent'] },
+      { name: 'models/gemini-3.5-pro', supportedGenerationMethods: ['generateContent'] }] }));
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(verdict) }] } }] }));
+  }) as typeof fetch);
+  let claudeCalls = 0, claudeDown = 0;
+  const claude = { available: () => true, status: () => 'Claude review: 0 done', downUntil: () => claudeDown,
+    review: async (_i: unknown, now = Date.now()) => { claudeCalls++; claudeDown = now + REVIEWER_COOLDOWN_MS; return null; } };
+  const r = new RotatingReviewer([claude, gemini]);
+  const input = { mint: 'M', name: 'A', symbol: 'A', description: null, ageMin: 1, x: null, website: null, ca: 'CA not posted yet', insiders: null };
+  const first = await r.review(input, 1_000);
+  assert.equal(first?.verdict, 'OK'); assert.equal(first?.professionalism, 10, 'clamped to 0–10'); assert.equal(first?.model, 'gemini-3.5-flash', 'newest flash picked');
+  assert.equal(claudeCalls, 1);
+  await r.review(input, 2_000);
+  assert.equal(claudeCalls, 1, 'Claude is skipped while out of credits');
+  await r.review(input, 2_000 + REVIEWER_COOLDOWN_MS);
+  assert.equal(claudeCalls, 2, 'and tried again after the cooldown');
+  assert.match(r.status(), /Gemini review \(gemini-3\.5-flash\): 3 done/);
+});
+
+test('info messages: a checkmarked project account that posted its CA, or an organisation badge; capped, once per launch', async () => {
+  const { CallEngine, CALLS } = await import('../src/research/calls');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'research-info-'));
+  const now = Date.parse('2026-10-03T10:00:00Z');
+  const ledger = new ResearchLedger({ dir, now: () => now, freeBytes: async () => 5e9 });
+  await ledger.start();
+  const sent: Array<[string, string]> = [];
+  const engine = new CallEngine({ ledger, now: () => now, notify: async (t, b) => { sent.push([t, b]); }, solUsd: () => 150, link: m => `https://fomo.family/tokens/solana/${m}` });
+  const profile = (o: Partial<import('../src/research/xread').XProfileFacts>) => ({ handle: 'proj', followers: 50, following: 0, statuses: 3, joinedAt: now - 5 * 86_400_000,
+    verified: false, verifiedType: null, website: null, bio: null, ...o });
+  const read = (mint: string, p: ReturnType<typeof profile>, posted: boolean) => ({ status: 'OK' as const, http: 200, detail: '', profile: p,
+    posts: posted ? [{ id: '1', at: now - 30_000, author: 'proj', text: `CA ${mint}`, views: 100, likes: 1, reposts: 0, replies: 0, quotes: 0, repost: false, replyTo: null, raw: JSON.stringify({ t: `CA ${mint}` }) }] : [] });
+  const l = syntheticLaunch(0, now - 60_000, true);
+  engine.xRead(l, 'proj', read(l.mint, profile({}), true));
+  assert.equal(sent.length, 0, 'an unchecked 50-follower account posting its CA is not enough');
+  engine.xRead(l, 'proj', read(l.mint, profile({ verified: true, verifiedType: 'individual' }), true));
+  assert.equal(sent.length, 1);
+  assert.match(sent[0]![0], /^INFO T0: project posted its CA$/);
+  assert.match(sent[0]![1], /Not a qualified call/); assert.match(sent[0]![1], /blue check, 50 followers, account 5 days old/); assert.match(sent[0]![1], /posted this contract address 30 s after launch/);
+  engine.xRead(l, 'proj', read(l.mint, profile({ verified: true, verifiedType: 'individual' }), true));
+  assert.equal(sent.length, 1, 'once per launch');
+  const org = syntheticLaunch(1, now - 60_000, true);
+  engine.xRead(org, 'bigco', read(org.mint, profile({ handle: 'bigco', verified: true, verifiedType: 'business', followers: 120_000 }), false));
+  assert.match(sent[1]![0], /gold check \(organisation\)/); assert.match(sent[1]![1], /has not posted this contract address/);
+  for (let i = 2; i < 30; i++) { const x = syntheticLaunch(i, now - 60_000, true); engine.xRead(x, 'bigco', read(x.mint, profile({ verified: true, verifiedType: 'government' }), false)); }
+  assert.equal(sent.length, CALLS.infoPerHour, 'capped per hour');
+  await ledger.close();
 });

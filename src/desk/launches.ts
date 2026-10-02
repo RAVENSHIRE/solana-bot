@@ -271,6 +271,11 @@ export interface LaunchFeedOptions {
   insiders?: ((l: Launch) => Promise<Insiders | null>) | null;
   /** Called with each poll's new launches as soon as they are decoded, before metadata, website and X are read. */
   onDecoded?: (events: LaunchEvent[], now: number) => void;
+  /**
+   * The research observer's live stream (launches within seconds, no RPC); while it is healthy the radar reads new
+   * launches from it instead of the mint authority's signatures and one transaction per launch.
+   */
+  stream?: { healthy(now: number): boolean; drainCreates(): LaunchEvent[] } | null;
 }
 
 /** Reads new launches from the pump.fun mint authority's signatures, one poll per scan. Never throws. */
@@ -326,13 +331,23 @@ export class LaunchFeed implements LaunchSource {
   }
 
   async poll(now: number): Promise<Launch[]> {
+    const events: LaunchEvent[] = [];
+    if (this.o.stream?.healthy(now)) {
+      for (const e of this.o.stream.drainCreates()) if (!this.launches.has(e.mint) && !events.some(x => x.mint === e.mint)) events.push(e);
+      // Once the stream is down, the RPC poll starts from the newest signature now, not from where it left off hours ago.
+      this.newest = null;
+    } else await this.pollRpc(now, events);
+    return this.finish(events, now);
+  }
+
+  /** The fallback: the pump.fun mint authority's signatures since the last poll, and each creation transaction. */
+  private async pollRpc(now: number, events: LaunchEvent[]): Promise<void> {
     let sigs: Array<{ signature: string; blockTime?: number | null; err: unknown }> = [];
     try {
       sigs = await this.rpc.execute('launches:signatures', c => c.getSignaturesForAddress(new PublicKey(PUMP_MINT_AUTHORITY),
-        { limit: LAUNCH.pollLimit, ...(this.newest ? { until: this.newest } : {}) }, 'confirmed'));
+        { limit: this.newest ? LAUNCH.pollLimit : 20, ...(this.newest ? { until: this.newest } : {}) }, 'confirmed'));
     } catch { sigs = []; }
     if (sigs.length) this.newest = sigs[0]!.signature;
-    const events: LaunchEvent[] = [];
     await Promise.all(sigs.filter(s => !s.err).map(async s => {
       try {
         const tx = await this.rpc.execute('launches:tx', async c => {
@@ -345,6 +360,9 @@ export class LaunchFeed implements LaunchSource {
         if (e && !this.launches.has(e.mint)) events.push({ ...e, at: (s.blockTime ?? Math.floor(now / 1000)) * 1000, signature: s.signature });
       } catch { /* one unreadable transaction never stops the radar */ }
     }));
+  }
+
+  private async finish(events: LaunchEvent[], now: number): Promise<Launch[]> {
     if (events.length) { try { this.o.onDecoded?.(events, now); } catch { /* a listener never stops the radar */ } }
     const fresh: Launch[] = [];
     for (let i = 0; i < events.length; i += LAUNCH.metadataConcurrency) {

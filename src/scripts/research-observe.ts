@@ -17,6 +17,7 @@ import { notifier, fomoUrl } from '../desk/watch';
 import { ResearchLedger } from '../research/ledger';
 import { ResearchObserver, PUBLIC_RPC_WS, PUBLICNODE_WS } from '../research/observer';
 import { CallEngine } from '../research/calls';
+import { LocalFeed, LOCAL_FEED } from '../research/local-feed';
 import type { Qualification } from '../research/qualify';
 
 const arg = (name: string) => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : undefined; };
@@ -78,14 +79,18 @@ async function main(): Promise<void> {
     next(age > REQUALIFY_MS ? 60_000 : REQUALIFY_MS - age);
   }
 
-  const observer = new ResearchObserver({ ledger, tradeSources: sources, calls, log: line => console.log(line) });
+  // New launches and migrations for the desk on this machine (it stops polling the RPC for them while this runs).
+  let observer: ResearchObserver | null = null;
+  const feed = new LocalFeed(() => observer?.streamHealthy() ?? false);
+  await feed.listen(Number(env.RESEARCH_FEED_PORT) || LOCAL_FEED.port).catch((error: Error) => console.log(`local feed for the desk not started: ${error.message}`));
+  observer = new ResearchObserver({ ledger, tradeSources: sources, calls, feed, log: line => console.log(line) });
   observer.start();
   console.log(`research observer: ${dir} · trade sources: ${wanted.filter(w => ['public', 'publicnode', 'helius'].includes(w)).join(' + ') || 'public'} · ` +
     `calls: ${calls ? `on, phone ${phone?.channels.length ? phone.channels.join(' + ') : 'not configured'}` : 'off'} · status every minute`);
-  const stop = async () => { observer.stop(); await ledger.close(); process.exit(0); };
+  const stop = async () => { observer?.stop(); feed.close(); await ledger.close(); process.exit(0); };
   process.on('SIGINT', () => void stop());
   process.on('SIGTERM', () => void stop());
-  setInterval(() => console.log(observer.status()), 60_000).unref();
+  setInterval(() => console.log(observer!.status()), 60_000).unref();
 }
 
 main().catch(error => { console.error(`research:observe failed: ${(error as Error).message}`); process.exit(1); });

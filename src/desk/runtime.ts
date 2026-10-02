@@ -14,6 +14,7 @@ import { acquireProcessLock } from '../utils/fs';
 import { JupiterClient } from '../execution/jupiter-client';
 import { TransactionSender } from '../execution/tx-sender';
 import { LaunchFeed } from './launches';
+import { LocalPumpStream } from './pump-stream';
 import { HoldingsWatch, notifier, walletHoldings, type Holding } from './watch';
 import { StrategyAssistant } from './assistant';
 import { walletHistory, type WalletHistory } from './wallet-history';
@@ -23,7 +24,7 @@ import { ALERT_KINDS, DEFAULT_ALERTS, DeskEngine, type AlertKind, type DeskWalle
 import { DeskReject } from './guard';
 import { XClient } from './social';
 import { KNOWN_RUGS, RugList } from './launch-risk';
-import { LaunchReviewer, REVIEW } from './review';
+import { GeminiReviewer, LaunchReviewer, REVIEW, RotatingReviewer, type Reviewer } from './review';
 import { XFeed, XFEED } from './xfeed';
 import { OpeningTracker } from './opening';
 import { GoldenTracker } from './golden-pocket';
@@ -49,7 +50,7 @@ const ENV_KEYS = ['RPC_ENDPOINTS', 'RPC_MAX_RPS', 'RPC_TIMEOUT_MS', 'JUPITER_API
   'DESK_LIVE_FAIR_ENABLED', 'DESK_LIVE_CRASH_ENABLED', 'DESK_FAIR_LOSS_REENTRY_MIN', 'DESK_CRASH_LOSS_REENTRY_MIN',
   'DESK_FAIR_FRESH_SIGNAL', 'DESK_CRASH_FRESH_SIGNAL', 'DESK_NTFY_TOPIC', 'DESK_NTFY_SERVER', 'DESK_TELEGRAM_BOT_TOKEN', 'DESK_TELEGRAM_CHAT_ID', 'ANTHROPIC_API_KEY',
   'DESK_X_QUERY', 'DESK_AI_REVIEW', 'DESK_AI_REVIEWS_PER_HOUR', 'OPEN_CAPITAL_USD', 'OPEN_ADD_AT', 'GOLDEN_CAPITAL_USD', 'GOLDEN_RETEST_ENTRIES', 'BIRDEYE_API_KEY', 'DESK_ALERTS',
-  'DESK_RESEARCH', 'DESK_ALERT_EVIDENCE'];
+  'DESK_RESEARCH', 'DESK_ALERT_EVIDENCE', 'DESK_PUMP_STREAM', 'RESEARCH_FEED_PORT', 'GEMINI_API_KEY', 'GEMINI_MODEL'];
 /** DESK_ALERTS: a comma list of golden, rug, open, launch, radar (or "all", or "none"); unknown names are ignored, empty means the default (none). */
 export function alertKinds(raw: string | undefined): ReadonlySet<AlertKind> {
   const names = (raw ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
@@ -115,16 +116,24 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
     // DESK_AI_REVIEW=off), and the X feed when an X API token is set.
     const rugs = await RugList.open(path.join(o.dataDir, 'rugs.json'), KNOWN_RUGS);
     const reviewsPerHour = Math.max(0, Math.min(120, Number(env.DESK_AI_REVIEWS_PER_HOUR ?? '') || REVIEW.maxPerHour));
-    const reviewer = env.ANTHROPIC_API_KEY?.trim() && env.DESK_AI_REVIEW?.trim().toLowerCase() !== 'off' && reviewsPerHour > 0
-      ? new LaunchReviewer(env.ANTHROPIC_API_KEY.trim(), undefined, reviewsPerHour) : null;
+    // Claude first; Gemini (GEMINI_API_KEY) takes over while Claude has no credits or rejects the key.
+    const reviewers: Reviewer[] = env.DESK_AI_REVIEW?.trim().toLowerCase() === 'off' || reviewsPerHour <= 0 ? [] : [
+      ...(env.ANTHROPIC_API_KEY?.trim() ? [new LaunchReviewer(env.ANTHROPIC_API_KEY.trim(), undefined, reviewsPerHour)] : []),
+      ...(env.GEMINI_API_KEY?.trim() ? [new GeminiReviewer(env.GEMINI_API_KEY.trim(), env.GEMINI_MODEL?.trim() || undefined, fetch, reviewsPerHour)] : []),
+    ];
+    const reviewer: Reviewer | null = reviewers.length > 1 ? new RotatingReviewer(reviewers) : reviewers[0] ?? null;
     const xfeed = new XFeed(env.X_BEARER_TOKEN?.trim() || null, fetch, env.DESK_X_QUERY?.trim() || XFEED.query);
     // Opening screen: every launch's curve market cap from its first seconds (the owner's basic screen, OPEN strategy).
     const opening = new OpeningTracker(rpc);
     // GOLDEN POCKET: every fresh graduation's PumpSwap pool, its reserves read on chain every few seconds.
     const golden = new GoldenTracker(rpc, GOLDEN_RULES);
+    // Launches and graduations from the research observer's live stream on this machine, when it runs (no RPC);
+    // otherwise the radar and the graduation feed poll the RPC as before.
+    const pumpStream = env.DESK_PUMP_STREAM?.trim().toLowerCase() === 'off' ? null : new LocalPumpStream(`http://127.0.0.1:${Number(env.RESEARCH_FEED_PORT) || 3101}/pump/events`);
+    pumpStream?.start();
     const alerts = notifier(env), launches = new LaunchFeed(rpc, fetch, undefined, undefined,
       { rugs, review: reviewer ? (i, now) => reviewer.review(i, now) : null, reviewAvailable: reviewer ? now => reviewer.available(now) : undefined,
-        onDecoded: (events, now) => opening.observe(events, now) });
+        onDecoded: (events, now) => opening.observe(events, now), stream: pumpStream });
     // Research record (src/research): every alert as an immutable evidence snapshot, and the signal tape, as events in
     // data-desk/research-store. DESK_RESEARCH=off turns it off, =full also records the tape live (large; the tape file
     // already holds it for import). DESK_ALERT_EVIDENCE=off keeps the phone text as before.
@@ -139,10 +148,10 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
     const sender = new TransactionSender(rpc, logger, { confirmTimeoutMs: cfg.execution.confirmTimeoutMs, pollIntervalMs: 1500, rebroadcastIntervalMs: 2000 });
     const engines = {
       // TEST needs only an address to build and simulate; without Phantom it uses the public key from .env, never a secret.
-      PAPER: await DeskEngine.create({ ...shared, ...researchDeps, launches, xfeed, opening, golden, aiReview: reviewer ? () => reviewer.status() : null, notify: alerts.notify, alerts: phoneAlerts, mode: 'PAPER', sender: null,
+      PAPER: await DeskEngine.create({ ...shared, ...researchDeps, launches, xfeed, opening, golden, pumpStream, aiReview: reviewer ? () => reviewer.status() : null, notify: alerts.notify, alerts: phoneAlerts, mode: 'PAPER', sender: null,
         wallet: () => context.wallet('PAPER') ?? (paperAddress ? { owner: paperAddress, signer: null } : null) }),
       // LOCAL_KEY: signed in this process and independent of the browser session; PHANTOM: the browser session signs.
-      LIVE: await DeskEngine.create({ ...shared, ...researchDeps, launches, xfeed, opening, golden, aiReview: reviewer ? () => reviewer.status() : null, notify: alerts.notify, alerts: phoneAlerts, mode: 'LIVE', sender, signerKind: live.signer, liveMaxEntries: live.maxEntries,
+      LIVE: await DeskEngine.create({ ...shared, ...researchDeps, launches, xfeed, opening, golden, pumpStream, aiReview: reviewer ? () => reviewer.status() : null, notify: alerts.notify, alerts: phoneAlerts, mode: 'LIVE', sender, signerKind: live.signer, liveMaxEntries: live.maxEntries,
         ...(localSigner ? { authorized: () => true, wallet: () => ({ owner: localSigner.publicKey, signer: localSigner }) }
           : { wallet: () => context.wallet('LIVE') }) }),
     };

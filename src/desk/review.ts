@@ -56,10 +56,23 @@ export function reviewPrompt(i: ReviewInput, now: number): string {
   return lines.filter(Boolean).join('\n');
 }
 
-export class LaunchReviewer {
+/** One launch reviewer (Claude, Gemini, or several in turn). */
+export interface Reviewer {
+  available(now: number): boolean;
+  status(): string;
+  review(input: ReviewInput, now?: number): Promise<LaunchReview | null>;
+  /** Out of service after a hard failure (no credits, key rejected) until this time; 0 when fine. */
+  downUntil(): number;
+}
+/** Hard failures (no credits, a rejected key) take a reviewer out of the rotation this long. */
+export const REVIEWER_COOLDOWN_MS = 30 * 60_000;
+
+export class LaunchReviewer implements Reviewer {
   private readonly client: Anthropic;
   private readonly used: number[] = [];
   private readonly stats = { sent: 0, ok: 0, failed: 0, lastError: null as string | null };
+  private down = 0;
+  downUntil(): number { return this.down; }
   constructor(apiKey: string, client?: Anthropic, private readonly maxPerHour: number = REVIEW.maxPerHour) {
     this.client = client ?? new Anthropic({ apiKey, timeout: REVIEW.timeoutMs, maxRetries: 1 });
   }
@@ -97,11 +110,100 @@ export class LaunchReviewer {
         scamSignals: out.scamSignals.slice(0, 5).map(s => clip(s, 160)), summary: clip(out.summary, 300), model: response.model, at: now };
     } catch (error) {
       this.stats.failed++;
+      if (/credit balance is too low/i.test((error as Error).message ?? '') || error instanceof Anthropic.AuthenticationError) this.down = now + REVIEWER_COOLDOWN_MS;
       this.stats.lastError = /credit balance is too low/i.test((error as Error).message ?? '') ? 'no API credits — add credits under Plans & Billing in the Anthropic console'
         : error instanceof Anthropic.AuthenticationError ? 'API key rejected' : error instanceof Anthropic.RateLimitError ? 'rate limited'
         : error instanceof Anthropic.APIConnectionError ? 'offline' : error instanceof Anthropic.APIError ? `API ${error.status}` : 'failed';
       return null;
     }
+  }
+}
+
+/**
+ * Gemini as a second reviewer (GEMINI_API_KEY): the same prompt and verdict schema through Google's REST API. The
+ * model comes from GEMINI_MODEL; if Google no longer serves it, the newest "flash" model the key can use is picked.
+ */
+export const GEMINI = Object.freeze({ base: 'https://generativelanguage.googleapis.com/v1beta', defaultModel: 'gemini-2.5-flash' });
+const GEMINI_SCHEMA = {
+  type: 'OBJECT', required: ['verdict', 'idea', 'professionalism', 'aiGenerated', 'scamSignals', 'summary'],
+  properties: {
+    verdict: { type: 'STRING', enum: ['STRONG', 'OK', 'WEAK', 'SCAM'] }, idea: { type: 'NUMBER' }, professionalism: { type: 'NUMBER' },
+    aiGenerated: { type: 'STRING', enum: ['LIKELY', 'POSSIBLE', 'UNLIKELY'] }, scamSignals: { type: 'ARRAY', items: { type: 'STRING' } }, summary: { type: 'STRING' },
+  },
+};
+export class GeminiReviewer implements Reviewer {
+  private readonly used: number[] = [];
+  private readonly stats = { sent: 0, ok: 0, failed: 0, lastError: null as string | null };
+  private down = 0;
+  private modelChecked = false;
+  constructor(private readonly apiKey: string, private model: string = GEMINI.defaultModel, private readonly fetcher: typeof fetch = fetch,
+    private readonly maxPerHour: number = REVIEW.maxPerHour) {}
+  downUntil(): number { return this.down; }
+  available(now: number): boolean {
+    while (this.used.length && now - this.used[0]! > 3_600_000) this.used.shift();
+    return this.used.length < this.maxPerHour;
+  }
+  status(): string {
+    const s = this.stats;
+    return `Gemini review (${this.model}): ${s.ok} done${s.failed ? `, ${s.failed} failed (${s.lastError})` : ''}, ${this.used.length}/${this.maxPerHour} this hour`;
+  }
+  private async call(input: ReviewInput, now: number): Promise<Response> {
+    return this.fetcher(`${GEMINI.base}/models/${this.model}:generateContent`, { method: 'POST', signal: AbortSignal.timeout(REVIEW.timeoutMs),
+      headers: { 'content-type': 'application/json', 'x-goog-api-key': this.apiKey },
+      body: JSON.stringify({ systemInstruction: { parts: [{ text: SYSTEM }] }, contents: [{ role: 'user', parts: [{ text: reviewPrompt(input, now) }] }],
+        generationConfig: { responseMimeType: 'application/json', responseSchema: GEMINI_SCHEMA, temperature: 0.2, maxOutputTokens: 2_048 } }) });
+  }
+  /** The newest "flash" model this key can call, when the configured one is gone. */
+  private async pickModel(): Promise<boolean> {
+    if (this.modelChecked) return false;
+    this.modelChecked = true;
+    const res = await this.fetcher(`${GEMINI.base}/models?pageSize=200`, { headers: { 'x-goog-api-key': this.apiKey }, signal: AbortSignal.timeout(15_000) }).catch(() => null);
+    const list = res?.ok ? ((await res.json()) as { models?: Array<{ name: string; supportedGenerationMethods?: string[] }> }).models ?? [] : [];
+    const flash = list.filter(m => m.supportedGenerationMethods?.includes('generateContent') && /^models\/gemini-[\d.]+-flash$/.test(m.name))
+      .map(m => m.name.slice('models/'.length)).sort((a, b) => parseFloat(b.slice(7)) - parseFloat(a.slice(7)));
+    if (!flash[0] || flash[0] === this.model) return false;
+    this.model = flash[0];
+    return true;
+  }
+  async review(input: ReviewInput, now = Date.now()): Promise<LaunchReview | null> {
+    if (!this.available(now)) return null;
+    this.used.push(now); this.stats.sent++;
+    try {
+      let res = await this.call(input, now);
+      if (res.status === 404 && await this.pickModel()) res = await this.call(input, now);
+      if (res.status === 401 || res.status === 403) { this.down = now + REVIEWER_COOLDOWN_MS; throw new Error(`API key rejected (HTTP ${res.status})`); }
+      if (res.status === 429) throw new Error('rate limited or out of quota');
+      if (!res.ok) throw new Error(`API ${res.status}`);
+      const body = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }> };
+      const text = body.candidates?.[0]?.content?.parts?.map(p => p.text ?? '').join('') ?? '';
+      const out = Verdict.safeParse(JSON.parse(text));
+      if (!out.success) throw new Error(`unreadable answer (${body.candidates?.[0]?.finishReason ?? 'no reason'})`);
+      this.stats.ok++;
+      const v = out.data;
+      return { ...v, idea: Math.max(0, Math.min(10, v.idea)), professionalism: Math.max(0, Math.min(10, v.professionalism)),
+        scamSignals: v.scamSignals.slice(0, 5).map(x => clip(x, 160)), summary: clip(v.summary, 300), model: this.model, at: now };
+    } catch (error) {
+      this.stats.failed++; this.stats.lastError = (error as Error).name === 'TimeoutError' ? 'timed out' : (error as Error).message.slice(0, 80);
+      return null;
+    }
+  }
+}
+
+/** Several reviewers in turn: the first one in service answers; one that ran out of credits steps aside for a while. */
+export class RotatingReviewer implements Reviewer {
+  constructor(private readonly list: Reviewer[]) {}
+  private pick(now: number): Reviewer | null { return this.list.find(r => r.downUntil() <= now && r.available(now)) ?? null; }
+  available(now: number): boolean { return this.pick(now) !== null; }
+  downUntil(): number { return Math.min(...this.list.map(r => r.downUntil())); }
+  status(): string { return this.list.map(r => r.status()).join(' · '); }
+  async review(input: ReviewInput, now = Date.now()): Promise<LaunchReview | null> {
+    const first = this.pick(now);
+    if (!first) return null;
+    const out = await first.review(input, now);
+    if (out || first.downUntil() <= now) return out;
+    // The first one just went out of service (no credits): the next one answers this launch.
+    const next = this.pick(now);
+    return next && next !== first ? next.review(input, now) : null;
   }
 }
 
