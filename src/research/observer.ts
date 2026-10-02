@@ -1,5 +1,5 @@
 import { parseXLink, checkWebsite, caVerdict, type WebsiteCheck } from '../desk/social';
-import { projectSite } from '../desk/launches';
+import { metadataUrl, projectSite } from '../desk/launches';
 import type { ResearchLedger } from './ledger';
 import { pumpEvents, curveMcapSol, curveProgress, PUMP_PROGRAM_ID, type PumpTrade } from './pump-events';
 import { ReconnectingFeed, RecentSet, type SocketFactory } from './streams';
@@ -31,6 +31,8 @@ export const OBSERVE = Object.freeze({
 });
 export const PUMPPORTAL_URL = 'wss://pumpportal.fun/api/data';
 export const PUBLIC_RPC_WS = 'wss://api.mainnet-beta.solana.com';
+/** A second free websocket: on 2 Oct each of the two missed transactions the other one delivered; merged they covered both. */
+export const PUBLICNODE_WS = 'wss://solana-rpc.publicnode.com';
 
 interface Candle { minute: number; o: number; h: number; l: number; c: number; buy: number; sell: number; nb: number; ns: number; buyers: Set<string>; fresh: number; progress: number }
 interface Read { at: number; kind: 'x' | 'site'; active: boolean }
@@ -231,7 +233,9 @@ export class ResearchObserver {
   private async meta(t: Track): Promise<void> {
     t.metaTries++;
     try {
-      const res = await (this.d.fetcher ?? fetch)(t.uri!, { signal: AbortSignal.timeout(OBSERVE.meta.timeoutMs), headers: { Accept: 'application/json' } });
+      // pump.fun's gateway first; the second try asks Pinata's public gateway. Never ipfs.io: the desk's radar needs its budget.
+      const url = t.metaTries === 1 ? metadataUrl(t.uri!) : metadataUrl(t.uri!).replace('https://pump.mypinata.cloud/', 'https://gateway.pinata.cloud/');
+      const res = await (this.d.fetcher ?? fetch)(url, { signal: AbortSignal.timeout(OBSERVE.meta.timeoutMs), headers: { Accept: 'application/json' } });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const j = await res.json() as Record<string, unknown>;
       const s = (v: unknown, n = 200) => typeof v === 'string' && v.trim() ? v.trim().slice(0, n) : null;

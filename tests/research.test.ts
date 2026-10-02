@@ -155,3 +155,62 @@ test('observer: a launch from creation to candles, raw trades only in its first 
   assert.equal(of('XP').length, 1);
   assert.equal((of('S')[0]![3] as { v: string }).v, 'CONFIRMED');
 });
+
+test('metadata goes through pump.fun\'s gateway, never ipfs.io', async () => {
+  const { metadataUrl } = await import('../src/desk/launches');
+  const cid = 'bafkreih5thta47hbpo36sc7l5jygoxqz6nnqvzojeriu6gh6fdpejejdfu';
+  assert.equal(metadataUrl(`https://ipfs.io/ipfs/${cid}`), `https://pump.mypinata.cloud/ipfs/${cid}`);
+  assert.equal(metadataUrl(`https://cf-ipfs.com/ipfs/${cid}/meta.json`), `https://pump.mypinata.cloud/ipfs/${cid}/meta.json`);
+  assert.equal(metadataUrl('https://metadata.j7tracker.io/abc.json'), 'https://metadata.j7tracker.io/abc.json');
+});
+
+test('dataset: point-in-time features and labels — nothing after the decision time leaks into a feature', async () => {
+  const { readDataset, rows, features } = await import('../src/research/dataset');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'research-ds-'));
+  const t0 = Date.parse('2026-10-02T12:00:00Z'), s0 = t0 / 1000;
+  // Curve: virtual SOL starts at 30 SOL; each buy adds its lamports, each sell removes them. vTok shrinks so price rises.
+  let vSol = 30e9, vTok = 1_073_000_000e6, realTok = 793_100_000e6;
+  const T: unknown[][] = [];
+  const trade = (sec: number, w: number, buy: boolean, sol: number, mint = 0) => {
+    const lam = sol * 1e9, k = vSol * vTok;
+    vSol += buy ? lam : -lam; const nt = k / vSol; realTok -= vTok - nt; vTok = nt;
+    T.push(['T', t0 + sec * 1000 + 3000, s0 + sec, 100 + sec, mint, w, buy ? 1 : 0, lam, 1, vSol, vTok, realTok, 'sig']);
+  };
+  trade(5, 1, true, 1); trade(20, 2, true, 1); trade(40, 3, true, 2); trade(50, 4, true, 1); trade(70, 1, false, 0.5); trade(90, 5, true, 3);
+  const at90 = vSol / vTok;
+  trade(200, 6, true, 20);
+  const lines: unknown[][] = [['M', 0, 'MINTA'], ['W', 0, 'DEV'], ['W', 1, 'B1'], ['W', 2, 'B2'], ['W', 3, 'B3'], ['W', 4, 'B4'], ['W', 5, 'B5'], ['W', 6, 'WHALE'],
+    ['PC', t0, 0, 0, 'sig', 'Agency', 'AGENCY', 'https://x/meta', 0.5, 1e7, 28, 0],
+    ['META', t0 + 9 * 60_000, 0, { tw: 'https://x.com/tryagency', web: 'https://agencypad.fun', tg: null, desc: 'living tokens', img: null, keys: 5 }],
+    ['XT', t0 + 6 * 60_000, 0, 'tryagency', '2', t0 + 80_000, { a: 'tryagency', t: 'CA', mint: 1 }],
+    ...T,
+    ['K', s0 + 60 * 30, 0, 50, 400, 50, 400, 0, 0, 0, 0, 0, 0, 1],
+    ['X', t0 + 31 * 60_000, s0 + 1860, 0],
+    ['GAP', t0 + 400_000, 'logs0', 'logs0: closed (1006)'],
+    ['M', 1, 'MINTB'], ['PC', t0 + 7 * 3600e3, 0, 1, 'sig', 'Later', 'LATER', null, 0.1, 1e6, 28, 0]];
+  await fs.writeFile(path.join(dir, 'ev-20261002-12.jsonl'), lines.map(l => JSON.stringify(l)).join('\n') + '\n');
+  const ds = readDataset([path.join(dir, 'ev-20261002-12.jsonl')]);
+  const a = ds.launches.get('MINTA')!;
+  assert.equal(a.creator, 'DEV'); assert.equal(a.trades.length, 7);
+  const f60 = features(a, 60, { creatorLaunches: 0, creatorGraduations: 0 }, ds.gaps);
+  assert.equal(f60.buyers, 4, 'buyers up to 60 s only'); assert.equal(f60.trades, 4);
+  assert.equal(f60.xCaPost, false, 'the CA post at +80 s is not known at 60 s (nor before +110 s: 30 s to see it)');
+  assert.equal(f60.hasX, true, 'metadata is an immutable document named at creation: known from the start');
+  assert.equal(f60.gapInWindow, false); assert.equal(f60.chainBreaks, 0);
+  assert.ok(Math.abs(f60.top1! - 2 / 5) < 1e-9, 'B3 bought 2 of 5 SOL');
+  const f120 = features(a, 120, { creatorLaunches: 0, creatorGraduations: 0 }, ds.gaps);
+  assert.equal(f120.xCaPost, true); assert.equal(f120.xCaPostDelayS, 80);
+  assert.equal(features(a, 100, { creatorLaunches: 0, creatorGraduations: 0 }, ds.gaps).xCaPost, false, 'posted at +80 s, seen at +110 s');
+  assert.equal(f120.devSold, false); assert.equal(f120.sellSol, 0.5);
+  assert.ok(Math.abs(f120.mcapSol! - at90 / 1e9 * 1e6 * 1e9) < 1e-6, 'market cap from the last trade before 120 s');
+  const r120 = rows(ds, 120).find(r => r.mint === 'MINTA')!;
+  assert.equal(r120.y.graduated, true); assert.ok(r120.y.mfe[60]! > 3, 'the minute-30 candle at 400 SOL is in the 1 h window');
+  assert.equal(r120.y.reached[5], true);
+  assert.equal(r120.y.twoBeforeHalf, true);
+  const f600 = features(a, 600, { creatorLaunches: 0, creatorGraduations: 0 }, ds.gaps);
+  assert.equal(f600.gapInWindow, true, 'the logs disconnect at +400 s is inside the 600 s window');
+  // A trade lost in a disconnect shows up as a break in the curve-state chain.
+  a.trades.splice(2, 1);
+  assert.equal(features(a, 60, { creatorLaunches: 0, creatorGraduations: 0 }, ds.gaps).chainBreaks, 1);
+  assert.equal(rows(ds, 60).some(r => r.mint === 'MINTB'), false, 'a launch at the very end of the data has no decision time yet');
+});

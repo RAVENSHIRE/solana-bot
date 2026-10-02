@@ -25,8 +25,8 @@ Read-only: it never signs, trades or reads a key. It runs beside the desk and do
 | Source | What | Cost |
 | --- | --- | --- |
 | PumpPortal websocket (`subscribeNewToken`, `subscribeMigration`) | every creation (creator, dev buy, metadata URI), every migration | free |
-| Solana RPC websocket `logsSubscribe` (pump.fun program) | every TradeEvent (wallet, SOL, tokens, curve reserves), CreateEvent, CompleteEvent | public RPC free; delivered ~90 % of transactions in a 30 s test (Helius ~96 % of the public set) — `--sources public,helius` merges both, but Helius may bill websocket traffic |
-| Launch metadata JSON | X, website, Telegram, description, image | free |
+| Solana RPC websockets `logsSubscribe` (pump.fun program): api.mainnet-beta + publicnode, merged | every TradeEvent (wallet, SOL, tokens, curve reserves), CreateEvent, CompleteEvent | free. In a 45 s test (2 Oct) the public RPC delivered 81 % of the merged set and dropped its connection once; publicnode added the rest. `--sources public,publicnode,helius` adds Helius (may bill websocket traffic) |
+| Launch metadata JSON via pump.fun's gateway (`pump.mypinata.cloud`) | X, website, Telegram, description, image | free; ~0.1 s. Never ipfs.io, which rate-limited this IP to HTTP 429 for every request (the desk's radar now uses the same gateway) |
 | fxtwitter mirror (`api.fxtwitter.com/2/profile/<handle>/statuses`) | profile and last 20 posts with exact times | free, unofficial; read at +6 min for every launch with its own X account, +15/+30 min while active; one read per 1.2 s |
 | The launch's website | whether it shows this contract address | free; +6 min, +20 min while active |
 

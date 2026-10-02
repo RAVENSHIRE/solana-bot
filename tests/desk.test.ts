@@ -596,7 +596,8 @@ test('several coins at once: FAIR fills both slots in one scan while CRASH trade
     assert.equal(view.positions.filter(p => p.mint === M4).length, 1, 'one coin, one strategy');
     assert.equal(view.candidates.find(c => c.mint === M4)!.status, 'QUALIFIED', 'FAIR would qualify it, but CRASH already holds it');
     assert.ok(engine.events.list().some(e => /^FAIR · 1 candidate\(s\), but 2\/2 positions are open$/.test(e.message)));
-    assert.equal(engine.events.list().filter(e => /slots|positions are open/.test(e.message)).length, 1, 'the full-slots note is logged once, not every scan');
+    assert.equal(engine.events.list().filter(e => /positions are open/.test(e.message)).length, 1, 'the full-slots note is logged once, not every scan');
+    assert.equal(engine.events.list().filter(e => /^FAIR · entry skipped: all 2 FAIR slots in use$/.test(e.message)).length, 1, 'and the token\'s skip reason once');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
@@ -724,6 +725,11 @@ test('RIDE mode has no take profit and trails the move; CRASH may re-enter after
     assert.match(view.strategies.find(s => s.id === 'CRASH')!.exitRules.join(' | '), /Exit mode RIDE \| No take profit/);
     w.priceFactor = 1; await engine.pulse();
     assert.match(engine.status({ connected: false, address: null }).candidates.find(c => c.mint === MINT)!.entryNotes!.CRASH!, /^re-entry cooldown until \d\d:\d\d$/);
+    // The skip reason is in the event log too, once: a later scan with the same reason adds nothing.
+    const skips = () => engine.events.list().filter(e => e.mint === MINT && /^CRASH · entry skipped: re-entry cooldown until \d\d:\d\d$/.test(e.message));
+    assert.equal(skips().length, 1);
+    await engine.pulse();
+    assert.equal(skips().length, 1);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 

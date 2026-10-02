@@ -138,6 +138,8 @@ export class DeskEngine {
   private names = new Map<string, Map<string, { mint: string; symbol: string | null; marketCapUsd: number; createdAt: number | null; volume1hUsd?: number | null; at: number }>>();
   /** `${strategy}:${mint}` → why this scan did not enter a token (shown on the candidate). */
   private entryNotes = new Map<string, string>();
+  /** `${strategy}:${mint}` → the last skip reason written to the event log (each reason once per token and strategy). */
+  private loggedSkips = new Map<string, string>();
   /** TEST: sleeves that ran dry and were re-funded; their trades still count in the strategy stats. */
   private cycles = new Map<StrategyId, LedgerState[]>();
   private currentScanAt = 0;
@@ -425,7 +427,7 @@ export class DeskEngine {
       }
       this.cycles.delete(id);
     }
-    this.preflights = []; this.entrySkips.clear(); this.drillSkips.clear(); this.holdLog.clear(); this.noRouteChecks.clear(); this.valuationLog.clear(); this.notes.clear(); this.entryNotes.clear(); this.message = null;
+    this.preflights = []; this.entrySkips.clear(); this.drillSkips.clear(); this.holdLog.clear(); this.noRouteChecks.clear(); this.valuationLog.clear(); this.notes.clear(); this.entryNotes.clear(); this.loggedSkips.clear(); this.message = null;
     this.event('SYSTEM', `TEST reset: ${archived.length ? `archived ${archived.join(', ')}` : 'nothing to archive'}; every sleeve restarts at its planned capital`);
     await this.persist();
     return archived;
@@ -1246,7 +1248,7 @@ export class DeskEngine {
     if (ledger.state.halted || ledger.state.pending) { this.message = ledger.state.halted ?? 'TRANSACTION_RECONCILIATION_REQUIRED'; return; }
     // TEST: a sleeve that ran dry with nothing open becomes a completed cycle and is re-funded, so testing never stalls.
     if (this.d.mode === 'PAPER' && !ledger.state.positions.length && this.sleeveShort(ledger, p)) ledger = await this.cycleSleeve(id, ledger);
-    const s = ledger.state, now = Date.now(), note = (mint: string, text: string) => this.entryNotes.set(`${id}:${mint}`, text);
+    const s = ledger.state, now = Date.now(), note = (c: Candidate, text: string) => this.skipped(id, c, text);
     // Exits in completed TEST cycles count too: a re-funded sleeve never forgets a cooldown.
     const history = [...(this.d.mode === 'PAPER' ? this.cycles.get(id) ?? [] : []).flatMap(c => c.entries), ...s.entries];
     const lastExit = (mint: string) => history.filter(e => e.mint === mint && e.side === 'SELL' && (e.status === 'CONFIRMED' || e.status === 'PAPER_FILLED')).at(-1) ?? null;
@@ -1262,9 +1264,9 @@ export class DeskEngine {
     const pool: Candidate[] = [];
     for (const c of list) {
       const holder = this.heldBy(c.mint), exitBlock = blockedExit(c.mint, c.updatedAt), skip = this.entrySkips.get(`${id}:${c.mint}`);
-      if (holder) { if (holder !== id) note(c.mint, `held by ${holder}`); continue; }
-      if (exitBlock) { note(c.mint, exitBlock); continue; }
-      if (skip) { note(c.mint, `${skip.code} at ${hhmm(skip.at)}; retry after ${hhmm(skip.at + DESK.entrySkipMs)}`); continue; }
+      if (holder) { if (holder !== id) note(c, `held by ${holder}`); continue; }
+      if (exitBlock) { note(c, exitBlock); continue; }
+      if (skip) { note(c, `${skip.code} at ${hhmm(skip.at)}; retry after ${hhmm(skip.at + DESK.entrySkipMs)}`); continue; }
       pool.push(c);
     }
     pool.sort((a, b) => id === 'CRASH' ? crashRank(b) - crashRank(a) : id === 'FAIR' ? composite(b) - composite(a)
@@ -1287,12 +1289,12 @@ export class DeskEngine {
         else if (stopped() || !this.execution || s.halted || this.entryAllowance === 0) halt = 'execution stopped or paused';
         else { const short = this.sleeveShort(ledger, p); if (short) { this.note(id, 'WAITING', short); halt = 'TEST sleeve cannot fund an entry'; } }
       }
-      if (halt) { note(c.mint, halt); continue; }
-      if (c.onchain.decimals === null) { note(c.mint, 'token decimals unknown; deferred'); continue; }
-      if (this.heldBy(c.mint)) continue;
+      if (halt) { note(c, halt); continue; }
+      if (c.onchain.decimals === null) { note(c, 'token decimals unknown; deferred'); continue; }
+      if (this.heldBy(c.mint)) { note(c, `held by ${this.heldBy(c.mint)}`); continue; }
       const copy = await this.copycatOf(c);
       if (copy) {
-        note(c.mint, copy); this.entrySkips.set(`${id}:${c.mint}`, { at: Date.now(), code: 'COPYCAT' });
+        this.entryNotes.set(`${id}:${c.mint}`, copy); this.entrySkips.set(`${id}:${c.mint}`, { at: Date.now(), code: 'COPYCAT' });
         this.event('FILTERED', `${id} · entry refused: ${copy}`, { mint: c.mint, symbol: c.symbol, detail: { strategy: id } });
         continue;
       }
@@ -1311,10 +1313,23 @@ export class DeskEngine {
         continue;
       }
       const reason = code ?? 'ORDER_FAILED';
-      note(c.mint, `blocked: ${reason} at ${hhmm(Date.now())}`);
+      note(c, `blocked: ${reason} at ${hhmm(Date.now())}`);
       if (FUNDS_CODES.has(reason)) { halt = reason; continue; }
       this.entrySkips.set(`${id}:${c.mint}`, { at: Date.now(), code: reason });
     }
+  }
+
+  /**
+   * Why a strategy with an entry signal did not buy a token: shown on the candidate, and written to the event log once
+   * per token, strategy and reason (2 Oct: MIGRATION2 flagged AGENCY entry-ready twice and the reason it skipped was lost).
+   */
+  private skipped(id: StrategyId, c: Candidate, reason: string): void {
+    const key = `${id}:${c.mint}`;
+    this.entryNotes.set(key, reason);
+    if (this.loggedSkips.get(key) === reason) return;
+    this.loggedSkips.set(key, reason);
+    if (this.loggedSkips.size > 5_000) this.loggedSkips.delete(this.loggedSkips.keys().next().value!);
+    this.event('WAITING', `${id} · entry skipped: ${reason}`, { mint: c.mint, symbol: c.symbol, detail: { strategy: id } });
   }
 
   /** TEST: archives a sleeve that ran dry with nothing open as a completed cycle and re-funds it at its planned capital. */

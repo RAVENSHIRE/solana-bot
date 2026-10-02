@@ -115,6 +115,16 @@ export function projectSite(raw: string | null): string | null {
   } catch { return null; }
 }
 
+/**
+ * Launch metadata through pump.fun's own IPFS gateway. Most URIs name ipfs.io, which rate-limits a busy IP to nothing
+ * (HTTP 429 for every launch, 2 Oct) and then the radar sees no X account or website at all; the same document
+ * (content-addressed, immutable) comes from pump.mypinata.cloud in ~0.1 s.
+ */
+export function metadataUrl(uri: string): string {
+  const cid = /^https?:\/\/[^/]+\/ipfs\/([A-Za-z0-9]{40,100})(\/.*)?$/.exec(uri);
+  return cid ? `https://pump.mypinata.cloud/ipfs/${cid[1]}${cid[2] ?? ''}` : uri;
+}
+
 const short = (a: string) => `${a.slice(0, 4)}…${a.slice(-4)}`;
 const host = (site: WebsiteCheck | null) => { try { return new URL(site!.url!).hostname.replace(/^www\./, ''); } catch { return 'the website'; } };
 
@@ -445,7 +455,7 @@ export class LaunchFeed implements LaunchSource {
   private async enrich(e: LaunchEvent, now: number): Promise<Launch> {
     let meta: LaunchMeta | null = null;
     try {
-      const res = await this.fetcher(e.uri, { signal: AbortSignal.timeout(LAUNCH.metadataTimeoutMs), headers: { Accept: 'application/json' } });
+      const res = await this.fetcher(metadataUrl(e.uri), { signal: AbortSignal.timeout(LAUNCH.metadataTimeoutMs), headers: { Accept: 'application/json' } });
       if (res.ok) {
         const j = await res.json() as Record<string, unknown>;
         const str = (v: unknown) => typeof v === 'string' && v.trim() ? v.trim().slice(0, 500) : null;
