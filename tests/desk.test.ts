@@ -982,6 +982,7 @@ test('LAUNCH rug defence: insiders selling is a RUG exit (remembered); insiders 
         ca: { status: 'UNCONFIRMED' as const, detail: '' }, insiders: { wallets: [INS], creatorPct: 5.1, insiderPct: 14.7, slot: 1, detail: 'insiders hold 14.7%: dev 5.1% + 3 wallets in the creation slot' } };
       const rugs: Array<{ mint: string; reason: string }> = [], alerts: string[] = [];
       const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }), notify: async t => { alerts.push(t); },
+        alerts: scenario === 'dump' ? new Set(['rug']) : undefined,
         launches: { poll: async () => [], recent: () => [launch], markRug: async (mint, reason) => { rugs.push({ mint, reason }); } } });
       engine.setStrategy('CRASH', false); engine.start(); await engine.pulse();
       let view = engine.status({ connected: false, address: null });
@@ -997,7 +998,7 @@ test('LAUNCH rug defence: insiders selling is a RUG exit (remembered); insiders 
       if (scenario === 'dump') {
         assert.match(exit, /^LAUNCH · exit signal: RUG insiders sold: they hold 9\.0% \(was 14\.7% at entry\)$/);
         assert.deepEqual(rugs.map(r => r.mint), [MINT], 'remembered: its creator, X account and website never get an entry again');
-        assert.ok(alerts.includes('ABC: RUG — selling'));
+        assert.ok(alerts.includes('ABC: RUG — selling'), 'with DESK_ALERTS=rug the rug sale reaches the phone');
       } else {
         assert.match(exit, /^LAUNCH · exit signal: PRE_GRADUATION curve 92% full while insiders hold 14\.7%/);
         assert.equal(rugs.length, 0, 'a precaution, not a rug');
