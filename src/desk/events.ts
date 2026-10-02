@@ -61,7 +61,8 @@ export class EventLog {
     const rows = this.unlogged.splice(0), history = this.file.replace(/\.json$/, '.log.jsonl');
     if (!rows.length) return;
     const size = await fs.stat(history).then(st => st.size, () => 0);
-    if (size > 20 * 1024 * 1024) await fs.rename(history, `${history}.1`).catch(() => undefined);
+    // A unique suffix: renaming to `.1` overwrote the previous rotation and destroyed older history.
+    if (size > 20 * 1024 * 1024) await fs.rename(history, `${history}.${new Date().toISOString().replace(/[:.]/g, '-')}`).catch(() => undefined);
     await fs.appendFile(history, rows.map(r => JSON.stringify(r)).join('\n') + '\n');
   }
 }

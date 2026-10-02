@@ -1,3 +1,5 @@
+> **Research platform** (2 Oct 2026): immutable event store, point-in-time features, versioned strategies, execution realism, pre-registered experiments with a sealed holdout, alert evidence and an agent API without trading capability — [docs/research/ARCHITECTURE.md](docs/research/ARCHITECTURE.md) · audit: [docs/research/AUDIT.md](docs/research/AUDIT.md).
+
 # Solana Autonomous Trading Bot
 
 Die zuvor fehlenden DexScreener-, GeckoTerminal- und Raydium-Clients sind auf dem Feature-Branch implementiert. Datenqualitätsprüfungen, Provider-Health, begrenzte Historie und frische Ausführungsquotes sind integriert. [Audit, Datenfluss und Betrieb](docs/DATA-INTEGRATION.md) · [Testergebnisse und Grenzen](docs/DATA-ENGINEERING-REPORT.md).

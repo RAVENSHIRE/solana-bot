@@ -1,6 +1,7 @@
 import { canonicalJson } from '../core/canonical';
 import { seededRng } from '../core/random';
 import { knownAt, type KnowledgeMode, type ResearchEvent } from '../events/types';
+import { knowledgeOrder } from '../events/store';
 import { KnowledgeIndex, LeakageError, type PointInTimeView } from './view';
 
 /**
@@ -61,9 +62,9 @@ function asViolation(error: unknown, subject: string, at: number): Violation {
   return { kind: 'ERROR', subject, at, detail: error instanceof Error ? error.message : String(error) };
 }
 
-/** Multiplies every number in a payload by a random factor (0.25–4.25×): an adversarial "other future". */
+/** Multiplies every number in a payload by a log-uniform random factor in [1/20, 20]: an adversarial "other future". */
 function scaled(value: unknown, rng: () => number): unknown {
-  if (typeof value === 'number') return Number.isFinite(value) ? value * (0.25 + rng() * 4) : value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value * Math.exp((rng() * 2 - 1) * Math.log(20)) : value;
   if (Array.isArray(value)) return value.map(v => scaled(v, rng));
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, scaled(v, rng)]));
   return value;
@@ -79,18 +80,30 @@ function scaled(value: unknown, rng: () => number): unknown {
  */
 export function viewLeakageTest<R>(subject: string, compute: (view: PointInTimeView) => R, events: readonly ResearchEvent[],
   decisionTimes: readonly number[], mode: KnowledgeMode = 'AVAILABLE', o: { perturbFuture?: boolean; seed?: number } = {}): LeakageReport {
-  const full = new KnowledgeIndex(events, mode), violations: Violation[] = [], rng = seededRng(o.seed ?? 11);
-  for (const t of decisionTimes) {
+  return viewLeakageCases(subject, decisionTimes.map(t => ({ t, compute })), events, mode, o);
+}
+
+/**
+ * viewLeakageTest for (decision time, computation) pairs, e.g. one token per case; the full index is built once. With a
+ * `token` on the case, every not-yet-known event of that token is perturbed and a random fifth of all others (enough to
+ * catch reads of other tokens' futures without copying the whole dataset per case).
+ */
+export function viewLeakageCases<R>(subject: string, cases: ReadonlyArray<{ t: number; token?: string; compute: (view: PointInTimeView) => R }>, events: readonly ResearchEvent[],
+  mode: KnowledgeMode = 'AVAILABLE', o: { perturbFuture?: boolean; seed?: number } = {}): LeakageReport {
+  const ordered = events.filter(e => e.quality.status !== 'INVALID').sort(knowledgeOrder(mode)), known = ordered.map(e => knownAt(e, mode));
+  const full = new KnowledgeIndex(ordered, mode, { sorted: true }), violations: Violation[] = [], rng = seededRng(o.seed ?? 11);
+  const upTo = (t: number) => { let lo = 0, hi = known.length; while (lo < hi) { const m = (lo + hi) >>> 1; if (known[m]! <= t) lo = m + 1; else hi = m; } return lo; };
+  for (const { t, token, compute } of cases) {
     let a: R, b: R, c: R;
     try {
       a = sandboxed(() => compute(full.at(t)));
       b = sandboxed(() => compute(full.at(t)));
-      c = sandboxed(() => compute(new KnowledgeIndex(events.filter(e => knownAt(e, mode) <= t), mode).at(t)));
+      c = sandboxed(() => compute(new KnowledgeIndex(ordered.slice(0, upTo(t)), mode, { sorted: true }).at(t)));
     } catch (error) { violations.push(asViolation(error, subject, t)); continue; }
     if (!sameValue(a, b)) violations.push({ kind: 'NONDETERMINISM', subject, at: t, detail: 'two computations on the same view differ' });
     if (!sameValue(a, c)) violations.push({ kind: 'TRUNCATION_MISMATCH', subject, at: t, detail: 'value changes when the future is removed from the data' });
     if (o.perturbFuture === false) continue;
-    const future = events.filter(e => knownAt(e, mode) > t), saved = future.map(e => e.payload);
+    const future = ordered.slice(upTo(t)).filter(e => token === undefined || e.token === token || rng() < 0.2), saved = future.map(e => e.payload);
     let d: R;
     try {
       future.forEach(e => { (e as { payload: unknown }).payload = scaled(e.payload, rng); });
@@ -99,7 +112,7 @@ export function viewLeakageTest<R>(subject: string, compute: (view: PointInTimeV
     finally { future.forEach((e, i) => { (e as { payload: unknown }).payload = saved[i]; }); }
     if (!sameValue(a, d)) violations.push({ kind: 'FUTURE_SENSITIVITY', subject, at: t, detail: 'value changes when only data not yet known at t changes' });
   }
-  return { passed: violations.length === 0, checked: decisionTimes.length, violations };
+  return { passed: violations.length === 0, checked: cases.length, violations };
 }
 
 /**

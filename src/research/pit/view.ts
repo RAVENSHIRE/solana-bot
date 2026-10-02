@@ -34,11 +34,12 @@ export class KnowledgeIndex {
   private readonly all: Entry[];
   readonly excludedInvalid: number;
 
-  constructor(events: readonly ResearchEvent[], readonly mode: KnowledgeMode = 'AVAILABLE', o: { includeInvalid?: boolean } = {}) {
+  /** `sorted`: the events are already in knowledge order for this mode (see knowledgeOrder), so the sort is skipped. */
+  constructor(events: readonly ResearchEvent[], readonly mode: KnowledgeMode = 'AVAILABLE', o: { includeInvalid?: boolean; sorted?: boolean } = {}) {
     const usable = events.filter(e => o.includeInvalid || e.quality.status !== 'INVALID');
     this.excludedInvalid = events.length - usable.length;
-    this.all = usable.map(e => ({ e, known: knownAt(e, mode) }))
-      .sort((a, b) => a.known - b.known || a.e.timestamp - b.e.timestamp || (a.e.event_id < b.e.event_id ? -1 : 1));
+    this.all = usable.map(e => ({ e, known: knownAt(e, mode) }));
+    if (!o.sorted) this.all.sort((a, b) => a.known - b.known || a.e.timestamp - b.e.timestamp || (a.e.event_id < b.e.event_id ? -1 : 1));
     const push = <K>(m: Map<K, Entry[]>, k: K, x: Entry) => { const l = m.get(k); if (l) l.push(x); else m.set(k, [x]); };
     for (const x of this.all) {
       push(this.byToken, x.e.token, x);
