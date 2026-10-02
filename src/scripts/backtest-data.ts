@@ -17,6 +17,8 @@ export interface BacktestDataOptions {
   cachedOnly: boolean; refreshPools: boolean;
   /** Minute candles from Birdeye (token price in USD, 1 request per second) instead of GeckoTerminal (pool, shared with the desk). */
   birdeyeKey?: string | null;
+  /** Use Birdeye candles already downloaded, without a key (no credits); GeckoTerminal for the rest. */
+  birdeyeCache?: boolean;
 }
 export interface PoolInfo { mint: string; symbol: string | null; pool: string; dex: string; createdAt: number; priceUsd: number; liquidityUsd: number; marketCapUsd: number; volume24hUsd: number }
 type DexPair = { pairAddress: string; dexId: string; baseToken: { address: string; symbol?: string }; priceUsd?: string; liquidity?: { usd?: number };
@@ -38,21 +40,35 @@ async function retry<T>(label: string, fn: () => Promise<T>): Promise<T> {
 export function backtestData(o: BacktestDataOptions) {
   let lastGecko = 0, lastBirdeye = 0, birdeyeCalls = 0;
   /** Birdeye token candles (USD, the most liquid market: the curve until graduation, then the pool). */
-  const birdeye = async (p: PoolInfo, spanMin: number, latest: boolean): Promise<VCandle[]> => {
+  type BirdeyeItem = { unixTime: number; o: number; h: number; l: number; c: number; v: number };
+  const toCandles = (p: PoolInfo, list: BirdeyeItem[]) =>
+    list.map(k => ({ t: k.unixTime * 1000, o: k.o, h: k.h, l: k.l, c: k.c, v: k.v * (k.o + k.c) / 2 })).filter(k => k.t >= p.createdAt - MINUTE).sort((a, b) => a.t - b.t);
+  /** An earlier Birdeye download of this token's range (credits are scarce: the free plan's month), the latest first. */
+  const birdeyeRange = (p: PoolInfo, spanMin: number, latest: boolean) => {
     const now = Math.floor(Date.now() / 600_000) * 600_000;
     const to = Math.floor((latest ? now : Math.min(p.createdAt + spanMin * MINUTE, now)) / 1000), from = Math.max(Math.floor(p.createdAt / 1000) - 60, to - 999 * 60);
+    return { from, to, dir: path.join(o.cacheDir, 'birdeye') };
+  };
+  const birdeyeCached = async (p: PoolInfo, spanMin: number, latest: boolean): Promise<VCandle[] | null> => {
+    const { from, dir } = birdeyeRange(p, spanMin, latest);
+    const earlier = (await fs.readdir(dir).catch(() => [] as string[])).filter(n => n.startsWith(`${p.mint}-${from}-`)).sort((a, b) => parseInt(b.split('-')[2]!) - parseInt(a.split('-')[2]!));
+    const list = earlier[0] ? await readJson<BirdeyeItem[]>(path.join(dir, earlier[0])) : null;
+    return list ? toCandles(p, list) : null;
+  };
+  const birdeye = async (p: PoolInfo, spanMin: number, latest: boolean): Promise<VCandle[]> => {
+    const { from, to, dir } = birdeyeRange(p, spanMin, latest);
     // A pool younger than the rounded "now" has no range to ask for yet.
     if (to - from < 120) return [];
-    const dir = path.join(o.cacheDir, 'birdeye'), file = path.join(dir, `${p.mint}-${from}-${to}.json`);
-    // Credits are scarce (the free plan's month): any earlier download of this token's range is reused, the latest first.
-    const earlier = (await fs.readdir(dir).catch(() => [] as string[])).filter(n => n.startsWith(`${p.mint}-${from}-`)).sort((a, b) => parseInt(b.split('-')[2]!) - parseInt(a.split('-')[2]!));
-    let list = await readJson<Array<{ unixTime: number; o: number; h: number; l: number; c: number; v: number }>>(earlier[0] ? path.join(dir, earlier[0]) : file);
-    if (!list && o.cachedOnly) return [];
+    const cached = await birdeyeCached(p, spanMin, latest);
+    if (cached) return cached;
+    const file = path.join(dir, `${p.mint}-${from}-${to}.json`);
+    let list: BirdeyeItem[] | null = null;
+    if (o.cachedOnly) return [];
     for (let attempt = 0; !list; attempt++) {
       await sleep(Math.max(0, lastBirdeye + 1_100 - Date.now())); lastBirdeye = Date.now(); birdeyeCalls++;
       const res = await fetch(`https://public-api.birdeye.so/defi/ohlcv?address=${p.mint}&type=1m&currency=usd&time_from=${from}&time_to=${to}`,
         { headers: { 'X-API-KEY': o.birdeyeKey!, 'x-chain': 'solana', accept: 'application/json' } }).catch(() => null);
-      const body = res?.ok ? await res.json().catch(() => null) as { success?: boolean; data?: { items?: typeof list } } | null : null;
+      const body = res?.ok ? await res.json().catch(() => null) as { success?: boolean; data?: { items?: BirdeyeItem[] } } | null : null;
       if (body?.success) list = body.data?.items ?? [];
       // A token Birdeye does not know (or a range it refuses) has no candles; it never stops the run.
       else if (res?.status === 400 || res?.status === 404) list = [];
@@ -60,7 +76,7 @@ export function backtestData(o: BacktestDataOptions) {
       else await sleep(res?.status === 429 ? 2_000 * (attempt + 1) : 3_000);
     }
     await writeJson(file, list);
-    return list.map(k => ({ t: k.unixTime * 1000, o: k.o, h: k.h, l: k.l, c: k.c, v: k.v * (k.o + k.c) / 2 })).filter(k => k.t >= p.createdAt - MINUTE).sort((a, b) => a.t - b.t);
+    return toCandles(p, list!);
   };
   return {
     /** Requests sent to Birdeye in this run (cached candles are free). */
@@ -121,11 +137,15 @@ export function backtestData(o: BacktestDataOptions) {
     /** Minute candles from pool creation until every entry window and hold could have ended (or the latest ones). */
     async candles(p: PoolInfo, spanMin: number, latest = false): Promise<VCandle[]> {
       if (o.birdeyeKey) return birdeye(p, spanMin, latest);
+      if (o.birdeyeCache) { const cached = await birdeyeCached(p, spanMin, latest); if (cached) return cached; }
       // Rounded to 10 minutes, so reruns hit the same cache entries.
       const now = Math.floor(Date.now() / 600_000) * 600_000;
       const before = Math.floor((latest ? now : Math.min(p.createdAt + spanMin * MINUTE, now)) / 1000), limit = Math.min(1000, spanMin + 5);
       const file = path.join(o.cacheDir, 'ohlcv', `${p.pool}-${before}-${limit}.json`);
-      let list = await readJson<number[][]>(file);
+      // Any earlier download of this pool is reused (the latest first): GeckoTerminal is slow while the desk shares it.
+      const earlier = (await fs.readdir(path.join(o.cacheDir, 'ohlcv')).catch(() => [] as string[])).filter(n => n.startsWith(`${p.pool}-`))
+        .sort((a, b) => parseInt(b.split('-')[1]!) - parseInt(a.split('-')[1]!));
+      let list = await readJson<number[][]>(earlier[0] ? path.join(o.cacheDir, 'ohlcv', earlier[0]) : file);
       if (!list && o.cachedOnly) return [];
       if (!list) {
         for (let attempt = 0; !list; attempt++) {

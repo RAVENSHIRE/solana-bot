@@ -23,7 +23,15 @@ const fixedUsd = Number(arg('fixed-usd') ?? 0.02);
 const maxPools = Number(arg('max-pools') ?? Infinity);
 const minVolume24hUsd = Number(arg('min-volume') ?? 5_000);
 const MINUTE = 60_000;
-const source = arg('source') ?? 'birdeye';
+/** auto: Birdeye candles already downloaded, GeckoTerminal (free) for the rest; birdeye: download with credits; gecko: GeckoTerminal only. */
+const source = arg('source') ?? 'auto';
+/** Realistic stops by default: a stop gapped within a minute sells at that minute's close (--level-fill: at the stop level). */
+const gapFill = !process.argv.includes('--level-fill');
+/** Entries from this time on are out of sample: rules are ranked on the entries before it, then shown after it. */
+const oosFrom = arg('oos-from') ? Date.parse(arg('oos-from')!) : Infinity;
+/** A pump.fun graduation opens its pool at about 412 SOL market cap (~$48.5K at $118 SOL). */
+const GRADUATION_USD = Number(arg('graduation-usd') ?? 48_500);
+type EntrySpec = { rules: PocketRules; minVolumeUsd: number; maxFirstX: number };
 
 // ------------------------------------------------------------------ grids
 
@@ -31,15 +39,15 @@ const retest = (p: Partial<PocketRules>): PocketRules => ({ retest: true, dipMin
   resistanceAbovePct: 3, fibTop: 0.5, fibBottom: 0.65, stopBelowPct: 7.5, retestWindowMin: 30, maxPatternMin: 120, onlyUp: null, floorUsd: 0, ...p });
 const onlyUp = (u: NonNullable<PocketRules['onlyUp']>, maxPatternMin = 60): PocketRules => ({ ...retest({ retest: false, maxPatternMin }), onlyUp: u });
 
-function entryGrid(): Array<{ rules: PocketRules; minVolumeUsd: number }> {
-  const out: Array<{ rules: PocketRules; minVolumeUsd: number }> = [];
+function entryGrid(): EntrySpec[] {
+  const out: EntrySpec[] = [];
   const zones: Array<Partial<PocketRules>> = [{ zone: 'RESISTANCE' }, { zone: 'FIB', fibTop: 0.5, fibBottom: 0.65 }, { zone: 'FIB', fibTop: 0.618, fibBottom: 0.65 },
     { zone: 'EITHER', fibTop: 0.5, fibBottom: 0.65 }];
   for (const dipMinPct of [15, 25]) for (const dipMaxPct of [50, 70]) for (const breakoutOverHigh of [1.1, 1.25, 1.4]) for (const z of zones)
     for (const stopBelowPct of [5, 10]) for (const retestWindowMin of [20, 60]) for (const maxPatternMin of [60, 180]) for (const minVolumeUsd of [0, 30_000])
-      out.push({ rules: retest({ dipMinPct, dipMaxPct, breakoutOverHigh, ...z, stopBelowPct, retestWindowMin, maxPatternMin }), minVolumeUsd });
+      for (const maxFirstX of [Infinity, 3, 1.5]) out.push({ rules: retest({ dipMinPct, dipMaxPct, breakoutOverHigh, ...z, stopBelowPct, retestWindowMin, maxPatternMin }), minVolumeUsd, maxFirstX });
   for (const bars of [2, 3]) for (const ref of [1, 2]) for (const chasePct of [5, 12, 20]) for (const windowMin of [10, 30]) for (const stopBelowPct of [5, 10])
-    for (const minVolumeUsd of [0, 30_000]) out.push({ rules: onlyUp({ bars, ref, chasePct, windowMin, stopBelowPct }), minVolumeUsd });
+    for (const minVolumeUsd of [0, 30_000]) for (const maxFirstX of [Infinity, 3, 1.5]) out.push({ rules: onlyUp({ bars, ref, chasePct, windowMin, stopBelowPct }), minVolumeUsd, maxFirstX });
   return out;
 }
 function exitGrid(): PocketExit[] {
@@ -51,8 +59,8 @@ function exitGrid(): PocketExit[] {
   return out;
 }
 const pct = (v: number) => `${v}%`;
-const describeEntry = (e: { rules: PocketRules; minVolumeUsd: number }) => {
-  const r = e.rules, vol = e.minVolumeUsd ? ` · vol≥$${e.minVolumeUsd / 1000}K` : '';
+const describeEntry = (e: EntrySpec) => {
+  const r = e.rules, vol = (e.minVolumeUsd ? ` · vol≥$${e.minVolumeUsd / 1000}K` : '') + (Number.isFinite(e.maxFirstX) ? ` · first minute ≤${e.maxFirstX}× graduation` : '');
   if (r.onlyUp) return `ONLY_UP ${r.onlyUp.bars} green · ≤+${r.onlyUp.chasePct}% of candle ${r.onlyUp.ref} within ${r.onlyUp.windowMin}m · stop −${r.onlyUp.stopBelowPct}%${vol}`;
   const zone = r.zone === 'RESISTANCE' ? `old high −${r.resistanceBelowPct}%..+${r.resistanceAbovePct}%` : r.zone === 'FIB' ? `fib ${r.fibTop}–${r.fibBottom}` : `either (high −${r.resistanceBelowPct}% / fib ${r.fibTop}–${r.fibBottom})`;
   return `RETEST dip ${pct(r.dipMinPct)}–${pct(r.dipMaxPct)} · breakout ×${r.breakoutOverHigh} · ${zone} · stop −${r.stopBelowPct}% · retest ≤${r.retestWindowMin}m · pattern ≤${r.maxPatternMin}m${vol}`;
@@ -75,16 +83,17 @@ function firstEntry(s: PoolSeries, rules: PocketRules): (PocketEntry & { volumeU
   return null;
 }
 
-interface Result { entry: { rules: PocketRules; minVolumeUsd: number }; exit: PocketExit; all: Summary; first: Summary; second: Summary; score: number; trades: SimTrade[] }
+interface Result { entry: EntrySpec; exit: PocketExit; all: Summary; first: Summary; second: Summary; oos: Summary; score: number; trades: SimTrade[] }
 const row = (r: Result) => `n ${String(r.all.trades).padStart(3)} · win ${r.all.winRatePct.toFixed(0).padStart(2)}% · mean ${r.all.meanPct.toFixed(1).padStart(6)}% · median ${r.all.medianPct.toFixed(1).padStart(6)}%` +
-  ` · PF ${Number.isFinite(r.all.profitFactor) ? r.all.profitFactor.toFixed(2) : '∞'} · total $${r.all.totalUsd.toFixed(2).padStart(6)} · best ${r.all.bestPct.toFixed(0)}% · halves ${r.first.meanPct.toFixed(1)}% (${r.first.trades}) / ${r.second.meanPct.toFixed(1)}% (${r.second.trades})`;
+  ` · PF ${Number.isFinite(r.all.profitFactor) ? r.all.profitFactor.toFixed(2) : '∞'} · total $${r.all.totalUsd.toFixed(2).padStart(6)} · best ${r.all.bestPct.toFixed(0)}% · halves ${r.first.meanPct.toFixed(1)}% (${r.first.trades}) / ${r.second.meanPct.toFixed(1)}% (${r.second.trades})` +
+  (r.oos.trades ? ` · OUT OF SAMPLE ${r.oos.meanPct.toFixed(1)}% (${r.oos.trades}, PF ${Number.isFinite(r.oos.profitFactor) ? r.oos.profitFactor.toFixed(2) : '∞'})` : '');
 
 async function main(): Promise<void> {
   const env = await deskEnvironment(path.resolve(arg('env-dir') ?? '.'));
   if (source === 'birdeye' && !env.BIRDEYE_API_KEY) throw new Error('BIRDEYE_API_KEY not set in .env (or run with --source gecko)');
   const { graduations, pools, candles, birdeyeCalls } = backtestData({ cacheDir: path.resolve(arg('cache') ?? 'data-desk/backtest-cache'), hours,
     geckoMs: Number(arg('gecko-ms') ?? 4_000), cachedOnly: process.argv.includes('--cached-only'), refreshPools: process.argv.includes('--refresh-pools'),
-    birdeyeKey: source === 'birdeye' ? env.BIRDEYE_API_KEY : null });
+    birdeyeKey: source === 'birdeye' ? env.BIRDEYE_API_KEY : null, birdeyeCache: source === 'auto' });
   const endpoint = (env.RPC_ENDPOINTS ?? 'https://api.mainnet-beta.solana.com').split(',').map(s => s.trim()).find(s => /^https?:\/\//.test(s)) ?? 'https://api.mainnet-beta.solana.com';
   const grads = await graduations(new Connection(endpoint, 'confirmed'));
   const watch = (arg('mints') ?? '').split(',').map(m => m.trim()).filter(Boolean);
@@ -106,22 +115,28 @@ async function main(): Promise<void> {
     if ((i + 1) % 50 === 0) console.log(`  candles ${i + 1}/${active.length}`);
   }
   if (source === 'birdeye') console.log(`candles: Birdeye token prices (USD), ${birdeyeCalls()} requests this run`);
-  const split = [...series].sort((a, b) => a.createdAt - b.createdAt)[Math.floor(series.length / 2)]?.createdAt ?? 0;
-  const costs: Costs = { sizeUsd, venueFeePct: 0.3, fixedUsd, stopSlipPct: 3 };
+  const inSample = series.filter(s => s.createdAt < oosFrom);
+  const split = [...inSample].sort((a, b) => a.createdAt - b.createdAt)[Math.floor(inSample.length / 2)]?.createdAt ?? 0;
+  const costs: Costs = { sizeUsd, venueFeePct: 0.3, fixedUsd, stopSlipPct: 3, gapFill };
+  // The user's "first candle": the pool's first minute high against a normal graduation (sniped launches open at 3–15×).
+  const firstX = new Map(series.map(s => [s.pool, Math.max(...s.candles.filter(k => k.t < s.createdAt + MINUTE).map(k => k.h), 0) / GRADUATION_USD]));
+  console.log(`stops: ${gapFill ? 'a stop gapped within a minute sells at that minute\'s close' : 'filled at their level (--level-fill)'}` +
+    `${Number.isFinite(oosFrom) ? ` · out of sample from ${new Date(oosFrom).toISOString()}: ${series.length - inSample.length} pools` : ''}`);
   console.log(`\n${series.length} pools with candles · ${new Date(Math.min(...series.map(s => s.createdAt))).toISOString()} → ${new Date(Math.max(...series.map(s => s.createdAt))).toISOString()}` +
     ` · split ${new Date(split).toISOString()} · $${sizeUsd} per trade, ${costs.venueFeePct}% venue fee per side, $${fixedUsd} fixed, ${costs.stopSlipPct}% stop slippage`);
 
   const entries = new Map<string, Array<{ s: PoolSeries; e: PocketEntry & { volumeUsd: number } }>>();
-  const entriesOf = (e: { rules: PocketRules; minVolumeUsd: number }) => {
+  const entriesOf = (e: EntrySpec) => {
     const key = JSON.stringify(e.rules);
     if (!entries.has(key)) entries.set(key, series.flatMap(s => { const x = firstEntry(s, e.rules); return x ? [{ s, e: x }] : []; }));
-    return entries.get(key)!.filter(x => x.e.volumeUsd >= e.minVolumeUsd);
+    return entries.get(key)!.filter(x => x.e.volumeUsd >= e.minVolumeUsd && (firstX.get(x.s.pool) ?? 0) <= e.maxFirstX);
   };
-  const run = (entry: { rules: PocketRules; minVolumeUsd: number }, exit: PocketExit): Result => {
+  const run = (entry: EntrySpec, exit: PocketExit): Result => {
     const trades = entriesOf(entry).map(({ s, e }) => pocketTrade(s, e, exit, costs));
-    const first = summarize(trades.filter(t => t.entryAt < split)), second = summarize(trades.filter(t => t.entryAt >= split));
+    const ins = trades.filter(t => t.entryAt < oosFrom);
+    const first = summarize(ins.filter(t => t.entryAt < split)), second = summarize(ins.filter(t => t.entryAt >= split));
     const score = first.trades >= 6 && second.trades >= 6 ? Math.min(first.meanPct, second.meanPct) : -Infinity;
-    return { entry, exit, all: summarize(trades), first, second, score, trades };
+    return { entry, exit, all: summarize(ins), first, second, oos: summarize(trades.filter(t => t.entryAt >= oosFrom)), score, trades };
   };
 
   // Baseline: the same exits on every pool bought 10 minutes after graduation (does the pattern add anything?).
@@ -132,10 +147,10 @@ async function main(): Promise<void> {
   }));
 
   // The owner's rules as stated: retest of the old high down to 12 % under it, stop 5–10 % below; only-up within 12 % of candle 1 / 2.
-  const owner: Array<[string, { rules: PocketRules; minVolumeUsd: number }]> = [
-    ['retest, stop −5%', { rules: retest({ stopBelowPct: 5 }), minVolumeUsd: 0 }], ['retest, stop −10%', { rules: retest({ stopBelowPct: 10 }), minVolumeUsd: 0 }],
-    ['only up, candle 1', { rules: onlyUp({ bars: 2, ref: 1, chasePct: 12, windowMin: 30, stopBelowPct: 7.5 }), minVolumeUsd: 0 }],
-    ['only up, candle 2', { rules: onlyUp({ bars: 2, ref: 2, chasePct: 12, windowMin: 30, stopBelowPct: 7.5 }), minVolumeUsd: 0 }]];
+  const owner: Array<[string, EntrySpec]> = [
+    ['retest, stop −5%', { rules: retest({ stopBelowPct: 5 }), minVolumeUsd: 0, maxFirstX: Infinity }], ['retest, stop −10%', { rules: retest({ stopBelowPct: 10 }), minVolumeUsd: 0, maxFirstX: Infinity }],
+    ['only up, candle 1', { rules: onlyUp({ bars: 2, ref: 1, chasePct: 12, windowMin: 30, stopBelowPct: 7.5 }), minVolumeUsd: 0, maxFirstX: Infinity }],
+    ['only up, candle 2', { rules: onlyUp({ bars: 2, ref: 2, chasePct: 12, windowMin: 30, stopBelowPct: 7.5 }), minVolumeUsd: 0, maxFirstX: Infinity }]];
   const ownerExits: PocketExit[] = [{ mode: 'TRAIL', trailing: { activationPct: 50, stopPct: 25 }, belowResistancePct: 0, maxHoldMin: 240 },
     { mode: 'RESISTANCE', trailing: null, belowResistancePct: 5, maxHoldMin: 240 }, { mode: 'RESISTANCE', trailing: null, belowResistancePct: 10, maxHoldMin: 240 },
     { mode: 'SPLIT', trailing: { activationPct: 50, stopPct: 25 }, belowResistancePct: 7.5, maxHoldMin: 240 }];
@@ -165,7 +180,7 @@ async function main(): Promise<void> {
   // Sensitivity of the only-up variant: is the result one lucky setting, or does it hold across its neighbours?
   console.log('\nONLY_UP sensitivity (mean % per trade · PF · trades · weaker half):');
   for (const bars of [2, 3]) for (const minVolumeUsd of [0, 10_000, 30_000, 60_000]) for (const stopBelowPct of [5, 10]) {
-    const e = { rules: onlyUp({ bars, ref: bars, chasePct: 12, windowMin: 10, stopBelowPct }), minVolumeUsd };
+    const e = { rules: onlyUp({ bars, ref: bars, chasePct: 12, windowMin: 10, stopBelowPct }), minVolumeUsd, maxFirstX: Infinity };
     const cells = [[30, 20], [50, 25], [100, 35]].flatMap(([activationPct, stopPct]) => [30, 60, 120, 240].map(maxHoldMin => {
       const r = run(e, { mode: 'TRAIL', trailing: { activationPct: activationPct!, stopPct: stopPct! }, belowResistancePct: 0, maxHoldMin });
       return `${r.all.meanPct.toFixed(1).padStart(5)}/${r.all.profitFactor.toFixed(1)}/${Math.min(r.first.meanPct, r.second.meanPct).toFixed(0).padStart(3)}`;
@@ -174,9 +189,10 @@ async function main(): Promise<void> {
   }
 
   // Stop slippage: a fast pool falls through the stop between two checks (live, 1 Oct: $358K sold under a $392.5K stop).
-  const deployed = { rules: onlyUp({ bars: 2, ref: 2, chasePct: 12, windowMin: 10, stopBelowPct: 5 }), minVolumeUsd: 0 };
+  const deployed: EntrySpec = { rules: onlyUp({ bars: 2, ref: 2, chasePct: 12, windowMin: 10, stopBelowPct: 5 }), minVolumeUsd: 0, maxFirstX: Infinity };
   console.log('\nONLY_UP as deployed (2 green, stop −5%, trail 25% after +50%, 60m) by stop slippage:');
   for (const gapFill of [false, true]) for (const stopSlipPct of [3, 6, 10, 15]) {
+    // (both stop models side by side, whatever the run's default)
     const trades = entriesOf(deployed).map(({ s, e }) => pocketTrade(s, e, { mode: 'TRAIL', trailing: { activationPct: 50, stopPct: 25 }, belowResistancePct: 0, maxHoldMin: 60 }, { ...costs, stopSlipPct, gapFill }));
     const all = summarize(trades), a = summarize(trades.filter(t => t.entryAt < split)), b = summarize(trades.filter(t => t.entryAt >= split));
     console.log(`  ${gapFill ? 'gapped stops at the minute close' : 'stops at their level'} · ${String(stopSlipPct).padStart(2)}% · n ${all.trades} · mean ${all.meanPct.toFixed(1)}% · PF ${all.profitFactor.toFixed(2)} · halves ${a.meanPct.toFixed(1)}% / ${b.meanPct.toFixed(1)}% · worst ${all.worstPct.toFixed(0)}%`);
@@ -190,6 +206,23 @@ async function main(): Promise<void> {
     console.log(`  $${lo / 1000}K–${hi > 1e9 ? '…' : `$${hi / 1000}K`} · n ${all.trades} · mean ${all.meanPct.toFixed(1)}% · PF ${all.profitFactor.toFixed(2)} · worst ${all.worstPct.toFixed(0)}%`);
   }
 
+  // The user's "first candle" (2 Oct): results by the pool's first-minute high against a normal graduation.
+  const bands: Array<[number, number]> = [[0, 1.5], [1.5, 3], [3, 6], [6, Infinity]];
+  const byFirst = (label: string, e: EntrySpec, x: PocketExit) => {
+    console.log(`  ${label}`);
+    for (const [lo, hi] of bands) {
+      const list = entriesOf({ ...e, maxFirstX: Infinity }).filter(({ s }) => (firstX.get(s.pool) ?? 0) >= lo && (firstX.get(s.pool) ?? 0) < hi);
+      const t = list.map(({ s, e: f }) => pocketTrade(s, f, x, costs)), ins = summarize(t.filter(v => v.entryAt < oosFrom)), out = summarize(t.filter(v => v.entryAt >= oosFrom));
+      console.log(`    first minute ${lo}–${Number.isFinite(hi) ? hi : '…'}× graduation · n ${ins.trades} · mean ${ins.meanPct.toFixed(1)}% · PF ${ins.profitFactor.toFixed(2)}${out.trades ? ` · out of sample ${out.meanPct.toFixed(1)}% (${out.trades})` : ''}`);
+    }
+  };
+  const poolsIn = (lo: number, hi: number) => series.filter(s => (firstX.get(s.pool) ?? 0) >= lo && (firstX.get(s.pool) ?? 0) < hi).length;
+  console.log(`\nBY THE POOL'S FIRST MINUTE (high ÷ $${GRADUATION_USD / 1000}K graduation) · pools: ${bands.map(([lo, hi]) => `${lo}–${Number.isFinite(hi) ? hi : '…'}×: ${poolsIn(lo, hi)}`).join(' · ')}`);
+  byFirst('only up as deployed | trail 25% after +50% · 60m', deployed, { mode: 'TRAIL', trailing: { activationPct: 50, stopPct: 25 }, belowResistancePct: 0, maxHoldMin: 60 });
+  byFirst('retest, owner\'s levels, stop −5% | trail 25% after +50% · 240m', owner[0]![1], ownerExits[0]!);
+  const bestRetest = results.find(r => !r.entry.rules.onlyUp && r.score > -Infinity);
+  if (bestRetest) byFirst(`best retest: ${describeEntry(bestRetest.entry)} | ${describeExit(bestRetest.exit)}`, bestRetest.entry, bestRetest.exit);
+
   // Tokens named on the command line: the pattern each rule set saw and the trade it made.
   const bestOf = (kind: boolean) => results.find(r => !!r.entry.rules.onlyUp === kind && r.score > -Infinity);
   for (const mint of watch) {
@@ -198,7 +231,7 @@ async function main(): Promise<void> {
     if (!p || !s) { console.log(`\nWATCH ${mint}: no pool or candles`); continue; }
     const peak = Math.max(...s.candles.map(k => k.h));
     console.log(`\nWATCH ${p.symbol ?? mint} · ${p.dex} pool ${new Date(p.createdAt).toISOString()} · ${s.candles.length} candles · first $${(s.candles[0]!.o / 1000).toFixed(0)}K · peak $${(peak / 1000).toFixed(0)}K`);
-    const runs: Array<[string, { rules: PocketRules; minVolumeUsd: number } | undefined, PocketExit | undefined]> = [
+    const runs: Array<[string, EntrySpec | undefined, PocketExit | undefined]> = [
       ...owner.map(([l, e]) => [l, e, ownerExits[0]] as [string, typeof e, PocketExit]), ['best retest', bestOf(false)?.entry, bestOf(false)?.exit], ['best only-up', bestOf(true)?.entry, bestOf(true)?.exit]];
     for (const [label, e, x] of runs) {
       if (!e || !x) continue;

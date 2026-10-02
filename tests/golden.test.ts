@@ -136,3 +136,19 @@ test('phone alerts (DESK_ALERTS): rug sales of held positions by default; golden
   assert.deepEqual([...alertKinds('all')].sort(), ['golden', 'launch', 'open', 'radar', 'rug']);
   assert.deepEqual([...alertKinds('nonsense')].sort(), ['rug'], 'nothing valid named: the default');
 });
+
+test('replay: a gapped stop sells at the minute close (gapFill); the volume-fade exit sells when the pulse is over', async () => {
+  const { replayExit } = await import('../src/desk/replay');
+  const t0 = Date.parse('2026-10-02T12:00:00Z');
+  const rules = { takeProfitPct: Infinity, stopLossPct: 10, maxHoldMin: 60, trailing: null, giveback: null };
+  const rug = [{ t: t0, o: 100, h: 100, l: 100, c: 100 }, { t: t0 + MIN, o: 100, h: 101, l: 4, c: 6 }];
+  assert.equal(replayExit(rug, t0, 100, rules, 60 * MIN).exitPrice, 90, 'the old model: filled at the stop level');
+  assert.equal(replayExit(rug, t0, 100, rules, 60 * MIN, { gapFill: true }).exitPrice, 6, 'rugged in one minute: sold at its close');
+  const wick = [{ t: t0, o: 100, h: 100, l: 100, c: 100 }, { t: t0 + MIN, o: 100, h: 101, l: 85, c: 97 }];
+  assert.equal(replayExit(wick, t0, 100, rules, 60 * MIN, { gapFill: true }).exitPrice, 90, 'a wick that closed above the stop: at the level');
+  const pulse = [{ t: t0, o: 100, h: 100, l: 100, c: 100, v: 500 }, { t: t0 + MIN, o: 100, h: 125, l: 99, c: 120, v: 1_000 },
+    { t: t0 + 2 * MIN, o: 120, h: 130, l: 118, c: 128, v: 900 }, { t: t0 + 3 * MIN, o: 128, h: 129, l: 120, c: 124, v: 200 }];
+  const x = replayExit(pulse, t0, 100, { ...rules, volumeFade: { afterMin: 2, dropPct: 75 } }, 60 * MIN);
+  assert.equal(x.reason, 'VOLUME_FADE'); assert.equal(x.exitPrice, 124); assert.equal(x.exitAt, t0 + 4 * MIN);
+  assert.equal(replayExit(pulse, t0, 100, rules, 60 * MIN).reason, 'END_OF_DATA', 'without the rule the position is held');
+});

@@ -151,6 +151,11 @@ export interface ExitRules {
   graceMs?: number;
   /** The trailing stop only applies once the price reached this multiple of the first entry (OPEN: "stay in for at least 6×"). */
   holdUntilMultiple?: number;
+  /**
+   * The pulse is over (backtests only, for now): after `afterMin` minutes, sell at the close of a minute whose volume fell
+   * `dropPct` % below the largest minute since entry — "exit into the rising volume, never wait for the top".
+   */
+  volumeFade?: { afterMin: number; dropPct: number } | null;
 }
 export interface StrategyProfile {
   id: StrategyId; label: string; summary: string; enabled: boolean;

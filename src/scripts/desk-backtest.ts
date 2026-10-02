@@ -23,8 +23,15 @@ const fixedUsd = Number(arg('fixed-usd') ?? 0.02);
 const currentFixedUsd = Number(arg('current-fixed-usd') ?? 0.22);
 const maxPools = Number(arg('max-pools') ?? Infinity);
 const MINUTE = 60_000;
+/** Candles: Birdeye downloads already in the cache, GeckoTerminal (free) for the rest — no Birdeye credits. */
 const { graduations, pools, candles } = backtestData({ cacheDir: path.resolve(arg('cache') ?? 'data-desk/backtest-cache'), hours,
-  geckoMs: Number(arg('gecko-ms') ?? 6_000), cachedOnly: process.argv.includes('--cached-only'), refreshPools: process.argv.includes('--refresh-pools') });
+  geckoMs: Number(arg('gecko-ms') ?? 6_000), cachedOnly: process.argv.includes('--cached-only'), refreshPools: process.argv.includes('--refresh-pools'),
+  birdeyeCache: arg('source') !== 'gecko' });
+/** Realistic stops by default: a stop gapped within a minute sells at that minute's close (--level-fill: at the stop level). */
+const gapFill = !process.argv.includes('--level-fill');
+/** Trades from this time on are out of sample: rules are ranked on the trades before it, then shown after it. */
+const oosFrom = arg('oos-from') ? Date.parse(arg('oos-from')!) : Infinity;
+const spanArg = Number(arg('span-min') ?? 155);
 
 // ------------------------------------------------------------------ search
 
@@ -48,15 +55,17 @@ function exitGrid(): ExitRules[] {
   for (const stopLossPct of [10, 15, 20, 25, 35, 50]) for (const takeProfitPct of [30, 50, 100, 200, Infinity])
     for (const trailing of [null, { activationPct: 20, stopPct: 15 }, { activationPct: 30, stopPct: 20 }, { activationPct: 50, stopPct: 35 }, { activationPct: 100, stopPct: 40 }])
       for (const giveback of [null, { lockPeakPct: 40, points: 15 }]) for (const maxHoldMin of [4, 10, 20, 45, 90])
-        out.push({ takeProfitPct, stopLossPct, maxHoldMin, trailing, giveback });
+        for (const volumeFade of [null, { afterMin: 2, dropPct: 50 }, { afterMin: 2, dropPct: 75 }])
+          out.push({ takeProfitPct, stopLossPct, maxHoldMin, trailing, giveback, volumeFade });
   return out;
 }
 const describeEntry = (e: EntryRule) => `age≤${e.maxPoolAgeMin}m · 5m ${e.minChange5mPct}..${e.maxChange5mPct}% · vol5m≥$${e.minVolume5mUsd / 1000}K` +
   `${Number.isFinite(e.maxMarketCapUsd) ? ` · mcap≤$${e.maxMarketCapUsd / 1000}K` : ''}${e.pullbackPct ? ` · pullback ${e.pullbackPct}% within ${e.pullbackWindowMin}m` : ''}`;
 const describeExit = (x: ExitRules) => `SL ${x.stopLossPct}% · TP ${Number.isFinite(x.takeProfitPct) ? `+${x.takeProfitPct}%` : 'none'}` +
-  `${x.trailing ? ` · trail ${x.trailing.stopPct}% after +${x.trailing.activationPct}%` : ''}${x.giveback ? ` · lock ${x.giveback.points}pts after +${x.giveback.lockPeakPct}%` : ''} · ${x.maxHoldMin}m`;
+  `${x.trailing ? ` · trail ${x.trailing.stopPct}% after +${x.trailing.activationPct}%` : ''}${x.giveback ? ` · lock ${x.giveback.points}pts after +${x.giveback.lockPeakPct}%` : ''}` +
+  `${x.volumeFade ? ` · out when a minute's volume is ${x.volumeFade.dropPct}% under the busiest (after ${x.volumeFade.afterMin}m)` : ''} · ${x.maxHoldMin}m`;
 
-interface Result { entry: EntryRule; exit: ExitRules; all: Summary; first: Summary; second: Summary; score: number; trades: SimTrade[] }
+interface Result { entry: EntryRule; exit: ExitRules; all: Summary; first: Summary; second: Summary; oos: Summary; score: number; trades: SimTrade[] }
 const signalCache = new Map<string, Map<string, Signal[]>>();
 function run(series: PoolSeries[], split: number, entry: EntryRule, exit: ExitRules, costs: Costs): Result {
   const key = JSON.stringify(entry), cache = signalCache.get(key) ?? new Map<string, Signal[]>();
@@ -65,13 +74,15 @@ function run(series: PoolSeries[], split: number, entry: EntryRule, exit: ExitRu
     if (!cache.has(s.pool)) cache.set(s.pool, signals(s, entry));
     return simulatePool(s, entry, exit, costs, c.reentryMin, undefined, cache.get(s.pool));
   });
-  const first = summarize(trades.filter(t => t.entryAt < split)), second = summarize(trades.filter(t => t.entryAt >= split));
+  const ins = trades.filter(t => t.entryAt < oosFrom);
+  const first = summarize(ins.filter(t => t.entryAt < split)), second = summarize(ins.filter(t => t.entryAt >= split));
   // Robust: judged by the weaker half, and only with enough trades in both.
   const score = first.trades >= 8 && second.trades >= 8 ? Math.min(first.meanPct, second.meanPct) : -Infinity;
-  return { entry, exit, all: summarize(trades), first, second, score, trades };
+  return { entry, exit, all: summarize(ins), first, second, oos: summarize(trades.filter(t => t.entryAt >= oosFrom)), score, trades };
 }
 const row = (r: Result) => `n ${String(r.all.trades).padStart(3)} · win ${r.all.winRatePct.toFixed(0).padStart(2)}% · mean ${r.all.meanPct.toFixed(1).padStart(6)}% · median ${r.all.medianPct.toFixed(1).padStart(6)}%` +
-  ` · PF ${Number.isFinite(r.all.profitFactor) ? r.all.profitFactor.toFixed(2) : '∞'} · total $${r.all.totalUsd.toFixed(2).padStart(6)} · halves ${r.first.meanPct.toFixed(1)}% (${r.first.trades}) / ${r.second.meanPct.toFixed(1)}% (${r.second.trades})`;
+  ` · PF ${Number.isFinite(r.all.profitFactor) ? r.all.profitFactor.toFixed(2) : '∞'} · total $${r.all.totalUsd.toFixed(2).padStart(6)} · halves ${r.first.meanPct.toFixed(1)}% (${r.first.trades}) / ${r.second.meanPct.toFixed(1)}% (${r.second.trades})` +
+  (r.oos.trades ? ` · OUT OF SAMPLE ${r.oos.meanPct.toFixed(1)}% (${r.oos.trades}, PF ${Number.isFinite(r.oos.profitFactor) ? r.oos.profitFactor.toFixed(2) : '∞'})` : '');
 
 async function main(): Promise<void> {
   const env = await deskEnvironment(path.resolve(arg('env-dir') ?? '.'));
@@ -86,7 +97,7 @@ async function main(): Promise<void> {
   const active = info.filter(p => p.volume24hUsd >= CRASH_ENTRY.minVolume5mUsd && p.createdAt >= Date.now() - (hours + 1) * 3_600_000)
     .sort((a, b) => hash(a.pool) - hash(b.pool)).slice(0, maxPools);
   console.log(`pools: ${info.length} graduated tokens with a pool, ${active.length} with ≥ $${CRASH_ENTRY.minVolume5mUsd / 1000}K 24h volume; loading candles…`);
-  const spanMin = 60 + 95;
+  const spanMin = spanArg;
   const series: PoolSeries[] = [];
   for (const [i, p] of active.entries()) {
     const k = await candles(p, spanMin);
@@ -94,8 +105,11 @@ async function main(): Promise<void> {
       liquidityRefUsd: p.liquidityUsd, priceRef: p.priceUsd, candles: k });
     if ((i + 1) % 50 === 0) console.log(`  candles ${i + 1}/${active.length}`);
   }
-  const split = [...series].sort((a, b) => a.createdAt - b.createdAt)[Math.floor(series.length / 2)]?.createdAt ?? 0;
-  const costs: Costs = { sizeUsd, venueFeePct: 0.3, fixedUsd, stopSlipPct: 3 };
+  const inSample = series.filter(s => s.createdAt < oosFrom);
+  const split = [...inSample].sort((a, b) => a.createdAt - b.createdAt)[Math.floor(inSample.length / 2)]?.createdAt ?? 0;
+  const costs: Costs = { sizeUsd, venueFeePct: 0.3, fixedUsd, stopSlipPct: 3, gapFill };
+  console.log(`stops: ${gapFill ? 'a stop gapped within a minute sells at that minute\'s close' : 'filled at their level (--level-fill)'}` +
+    `${Number.isFinite(oosFrom) ? ` · out of sample from ${new Date(oosFrom).toISOString()}: ${series.length - inSample.length} pools` : ''}`);
   console.log(`\n${series.length} pools with candles · ${new Date(Math.min(...series.map(s => s.createdAt))).toISOString()} → ${new Date(Math.max(...series.map(s => s.createdAt))).toISOString()}` +
     ` · split ${new Date(split).toISOString()} · $${sizeUsd} per trade, ${costs.venueFeePct}% venue fee per side, $${fixedUsd} fixed per trade, ${costs.stopSlipPct}% stop slippage`);
 
@@ -105,6 +119,9 @@ async function main(): Promise<void> {
   console.log(`  QUICK ${describeExit(quick)}\n    ${row(now.quick)}`);
   console.log(`  RIDE  ${describeExit(ride)}\n    ${row(now.ride)}`);
   console.log(`  QUICK with today's costs ($${currentFixedUsd} per trade: full exit priority fee, rent never reclaimed)\n    ${row(nowCosts)}`);
+  console.log(`  QUICK with stops filled at their level (the old model)\n    ${row(run(series, split, current, quick, { ...costs, gapFill: !gapFill }))}`);
+  for (const volumeFade of [{ afterMin: 2, dropPct: 50 }, { afterMin: 2, dropPct: 75 }])
+    console.log(`  QUICK + ${describeExit({ ...quick, volumeFade }).split(' · ').find(x => x.startsWith('out when'))}\n    ${row(run(series, split, current, { ...quick, volumeFade }, costs))}`);
 
   const stageA = entryGrid().flatMap(e => [run(series, split, e, quick, costs), run(series, split, e, ride, costs)]);
   const bestEntries = [...new Map(stageA.sort((a, b) => b.score - a.score).map(r => [describeEntry(r.entry), r.entry])).values()].slice(0, 8);

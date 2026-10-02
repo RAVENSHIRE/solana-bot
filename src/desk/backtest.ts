@@ -84,7 +84,7 @@ export function simulatePool(s: PoolSeries, e: EntryRule, exit: ExitRules, costs
     if (sig.at < free) continue;
     const entry = entryAfter(s, sig, e);
     if (!entry || entry.at < free) continue;
-    const x = replayExit(s.candles, entry.at, entry.price, exit, horizonMs);
+    const x = replayExit(s.candles, entry.at, entry.price, exit, horizonMs, { gapFill: costs.gapFill });
     if (x.reason === 'END_OF_DATA' && x.exitAt <= entry.at) continue;
     const exitPrice = STOPS.has(x.reason) ? x.exitPrice * (1 - costs.stopSlipPct / 100) : x.exitPrice;
     const gross = sizedReturn(costs.sizeUsd, entry.price, exitPrice, s.liquidityRefUsd / 2, s.priceRef);

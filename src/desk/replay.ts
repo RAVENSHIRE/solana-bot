@@ -1,7 +1,7 @@
 import type { ExitRules } from './config';
 
-/** One-minute OHLC candle (t = candle start, ms). */
-export interface Candle { t: number; o: number; h: number; l: number; c: number }
+/** One-minute OHLC candle (t = candle start, ms); volume when known. */
+export interface Candle { t: number; o: number; h: number; l: number; c: number; v?: number }
 export interface ReplayExit { exitAt: number; exitPrice: number; reason: string; peakPct: number }
 
 const MINUTE = 60_000;
@@ -18,7 +18,7 @@ const MINUTE = 60_000;
 export function replayExit(candles: Candle[], entryAt: number, entryPrice: number, r: ExitRules, horizonMs: number, o: { gapFill?: boolean } = {}): ReplayExit {
   const series = candles.filter(c => c.t + MINUTE > entryAt && c.t < entryAt + horizonMs).sort((a, b) => a.t - b.t);
   const pct = (p: number) => (p / entryPrice - 1) * 100, at = (p: number) => entryPrice * (1 + p / 100);
-  let peak = 0;
+  let peak = 0, peakVolume = 0;
   const stopFill = (level: number, open: number, close: number) => o.gapFill && close < level ? Math.min(close, open) : Math.min(level, open);
   for (const c of series) {
     const stopAt = entryAt + r.maxHoldMin * MINUTE;
@@ -37,6 +37,12 @@ export function replayExit(candles: Candle[], entryAt: number, entryPrice: numbe
     if (pct(high) >= r.takeProfitPct) return { exitAt: Math.max(c.t, entryAt), exitPrice: Math.max(at(r.takeProfitPct), open), reason: 'TAKE_PROFIT', peakPct: Math.max(peak, pct(high)) };
     peak = Math.max(peak, pct(high));
     if (c.t + MINUTE >= stopAt) return { exitAt: stopAt, exitPrice: c.c, reason: 'MAX_HOLD', peakPct: peak };
+    // The pulse: once the volume of a completed minute falls far below the busiest minute since entry, sell at its close.
+    if (r.volumeFade && !first && c.v !== undefined) {
+      if (c.t + MINUTE - entryAt >= r.volumeFade.afterMin * MINUTE && peakVolume > 0 && c.v < peakVolume * (1 - r.volumeFade.dropPct / 100))
+        return { exitAt: c.t + MINUTE, exitPrice: c.c, reason: 'VOLUME_FADE', peakPct: peak };
+      peakVolume = Math.max(peakVolume, c.v);
+    }
   }
   const last = series.at(-1);
   return { exitAt: last ? last.t + MINUTE : entryAt, exitPrice: last?.c ?? entryPrice, reason: 'END_OF_DATA', peakPct: peak };
