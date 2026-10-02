@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist-research"
+  },
+  "include": ["src/research/**/*.ts", "src/scripts/research.ts", "tests/research-*.test.ts"],
+  "exclude": ["node_modules", "dist", "dist-research"]
+}
