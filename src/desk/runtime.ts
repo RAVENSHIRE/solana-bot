@@ -29,6 +29,7 @@ import { OpeningTracker } from './opening';
 import { GoldenTracker } from './golden-pocket';
 import { GOLDEN_RULES, deskCapital, deskOperational, liveSignerSettings, strategyProfiles, type DeskCapital, type DeskOperational, type LiveSignerKind } from './config';
 import { localKeySigner } from './local-signer';
+import { DeskResearchRecorder } from '../research/integration/desk-recorder';
 import { PublicKey } from '@solana/web3.js';
 import type { DeskMode } from './types';
 
@@ -47,7 +48,8 @@ const ENV_KEYS = ['RPC_ENDPOINTS', 'RPC_MAX_RPS', 'RPC_TIMEOUT_MS', 'JUPITER_API
   'DESK_LIVE_SIGNER', 'DESK_LIVE_MAX_ENTRIES', 'DESK_DEPLOYMENT_MODE', 'DESK_PAPER_FAIR_ENABLED', 'DESK_PAPER_CRASH_ENABLED',
   'DESK_LIVE_FAIR_ENABLED', 'DESK_LIVE_CRASH_ENABLED', 'DESK_FAIR_LOSS_REENTRY_MIN', 'DESK_CRASH_LOSS_REENTRY_MIN',
   'DESK_FAIR_FRESH_SIGNAL', 'DESK_CRASH_FRESH_SIGNAL', 'DESK_NTFY_TOPIC', 'DESK_NTFY_SERVER', 'DESK_TELEGRAM_BOT_TOKEN', 'DESK_TELEGRAM_CHAT_ID', 'ANTHROPIC_API_KEY',
-  'DESK_X_QUERY', 'DESK_AI_REVIEW', 'DESK_AI_REVIEWS_PER_HOUR', 'OPEN_CAPITAL_USD', 'OPEN_ADD_AT', 'GOLDEN_CAPITAL_USD', 'GOLDEN_RETEST_ENTRIES', 'BIRDEYE_API_KEY', 'DESK_ALERTS'];
+  'DESK_X_QUERY', 'DESK_AI_REVIEW', 'DESK_AI_REVIEWS_PER_HOUR', 'OPEN_CAPITAL_USD', 'OPEN_ADD_AT', 'GOLDEN_CAPITAL_USD', 'GOLDEN_RETEST_ENTRIES', 'BIRDEYE_API_KEY', 'DESK_ALERTS',
+  'DESK_RESEARCH', 'DESK_ALERT_EVIDENCE'];
 /** DESK_ALERTS: a comma list of golden, rug, open, launch, radar (or "all"); unknown names are ignored, empty means the default. */
 export function alertKinds(raw: string | undefined): ReadonlySet<AlertKind> {
   const names = (raw ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
@@ -99,6 +101,7 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
   await fs.mkdir(o.dataDir, { recursive: true });
   const lockPath = path.join(o.dataDir, 'desk.lock');
   const lock = await acquireProcessLock(lockPath).catch(() => { throw new DeskReject('INSTANCE_LOCK'); });
+  let research: DeskResearchRecorder | null = null;
   try {
     const shared = { cfg, capital, logger, rpc, jupiter: new JupiterClient(cfg.jupiter, logger, data), dex: new DexScreenerClient(logger, data),
       gecko: new GeckoTerminalClient(logger, data), safety: new TokenSafetyChecker(rpc, logger), x: new XClient(env.X_BEARER_TOKEN ?? null),
@@ -122,18 +125,29 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
     const alerts = notifier(env), launches = new LaunchFeed(rpc, fetch, undefined, undefined,
       { rugs, review: reviewer ? (i, now) => reviewer.review(i, now) : null, reviewAvailable: reviewer ? now => reviewer.available(now) : undefined,
         onDecoded: (events, now) => opening.observe(events, now) });
+    // Research record (src/research): every alert as an immutable evidence snapshot, and the signal tape, as events in
+    // data-desk/research-store. DESK_RESEARCH=off turns it off; DESK_ALERT_EVIDENCE=off keeps the phone text as before.
+    // If the store cannot be opened, the desk runs without it.
+    research = env.DESK_RESEARCH?.trim().toLowerCase() === 'off' ? null
+      : await DeskResearchRecorder.open(path.join(o.dataDir, 'research-store'), { enrichMessages: env.DESK_ALERT_EVIDENCE?.trim().toLowerCase() !== 'off' })
+        .catch((error: unknown) => { logger.warn('Research recorder unavailable; the desk runs without it', { error: error instanceof Error ? error.message : String(error) }); return null; });
+    const recorder = research, researchDeps = { research: recorder, deliver: alerts.deliver, alertChannels: alerts.channels };
     // Which alerts reach the phone: DESK_ALERTS=rug (default), plus golden, open, launch, radar — or "all".
     const phoneAlerts = alertKinds(env.DESK_ALERTS);
     const sender = new TransactionSender(rpc, logger, { confirmTimeoutMs: cfg.execution.confirmTimeoutMs, pollIntervalMs: 1500, rebroadcastIntervalMs: 2000 });
     const engines = {
       // TEST needs only an address to build and simulate; without Phantom it uses the public key from .env, never a secret.
-      PAPER: await DeskEngine.create({ ...shared, launches, xfeed, opening, golden, aiReview: reviewer ? () => reviewer.status() : null, notify: alerts.notify, alerts: phoneAlerts, mode: 'PAPER', sender: null,
+      PAPER: await DeskEngine.create({ ...shared, ...researchDeps, launches, xfeed, opening, golden, aiReview: reviewer ? () => reviewer.status() : null, notify: alerts.notify, alerts: phoneAlerts, mode: 'PAPER', sender: null,
         wallet: () => context.wallet('PAPER') ?? (paperAddress ? { owner: paperAddress, signer: null } : null) }),
       // LOCAL_KEY: signed in this process and independent of the browser session; PHANTOM: the browser session signs.
-      LIVE: await DeskEngine.create({ ...shared, launches, xfeed, opening, golden, aiReview: reviewer ? () => reviewer.status() : null, notify: alerts.notify, alerts: phoneAlerts, mode: 'LIVE', sender, signerKind: live.signer, liveMaxEntries: live.maxEntries,
+      LIVE: await DeskEngine.create({ ...shared, ...researchDeps, launches, xfeed, opening, golden, aiReview: reviewer ? () => reviewer.status() : null, notify: alerts.notify, alerts: phoneAlerts, mode: 'LIVE', sender, signerKind: live.signer, liveMaxEntries: live.maxEntries,
         ...(localSigner ? { authorized: () => true, wallet: () => ({ owner: localSigner.publicKey, signer: localSigner }) }
           : { wallet: () => context.wallet('LIVE') }) }),
     };
+    // A desk health record every minute: "was it scanning at 03:12?" is answered from the research store.
+    const heartbeat = recorder ? setInterval(() => recorder.heartbeat({ modes: Object.fromEntries((['PAPER', 'LIVE'] as const).map(m => [m,
+      { scanner: engines[m].scanner, execution: engines[m].execution, lastScanAt: engines[m].lastScanAt, message: engines[m].message }])) }), 60_000) : null;
+    heartbeat?.unref?.();
     const watch = await HoldingsWatch.open({ file: path.join(o.dataDir, 'watch.json'), dex: shared.dex, notify: alerts.notify, channels: alerts.channels,
       balance: async (owner, mint) => {
         const accounts = await rpc.execute('watch:balance', c => c.getParsedTokenAccountsByOwner(new PublicKey(owner), { mint: new PublicKey(mint) }, 'confirmed'));
@@ -153,7 +167,9 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
       holdings: wallet => walletHoldings({ wallet, rpc, dex: shared.dex }), close: async () => {
       await watch.settled();
       for (const e of Object.values(engines)) { e.stop('shutdown'); await e.settled(); await e.persist(); }
+      if (heartbeat) clearInterval(heartbeat);
+      await recorder?.close().catch(() => undefined);
       await data.flush(); await lock.close(); await fs.unlink(lockPath);
     } };
-  } catch (error) { await lock.close(); await fs.unlink(lockPath); throw error; }
+  } catch (error) { await research?.close().catch(() => undefined); await lock.close(); await fs.unlink(lockPath); throw error; }
 }

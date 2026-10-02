@@ -6,6 +6,7 @@ import type { DexScreenerClient } from '../data/dexscreener';
 import { atomicWriteFile } from '../utils/fs';
 import { errorMessage } from '../utils/errors';
 import { pairMetrics, selectPair } from './discovery';
+import type { ChannelResult } from '../research/alerts/evidence';
 
 /**
  * Watch: exit rules for tokens you hold yourself (bought on FOMO, in Phantom, anywhere), independent of the desk's
@@ -199,7 +200,8 @@ function pick(r: WatchRule): WatchInput {
  * Phone notifications, opt-in through .env: DESK_NTFY_TOPIC (the ntfy app, no account; pick a long random topic) and/or
  * DESK_TELEGRAM_BOT_TOKEN with DESK_TELEGRAM_CHAT_ID. Failures are swallowed: an alert must never block a sale.
  */
-export function notifier(env: NodeJS.ProcessEnv, fetcher: typeof fetch = fetch): { notify: (title: string, body: string) => Promise<void>; channels: string[] } {
+export function notifier(env: NodeJS.ProcessEnv, fetcher: typeof fetch = fetch): { notify: (title: string, body: string) => Promise<void>; channels: string[];
+  deliver: (title: string, body: string) => Promise<ChannelResult[]> } {
   const send: Array<(title: string, body: string) => Promise<unknown>> = [], channels: string[] = [];
   const topic = env.DESK_NTFY_TOPIC?.trim();
   if (topic && /^[A-Za-z0-9_-]{8,64}$/.test(topic)) {
@@ -213,7 +215,13 @@ export function notifier(env: NodeJS.ProcessEnv, fetcher: typeof fetch = fetch):
       body: JSON.stringify({ chat_id: chat, text: `${title}\n${body}` }), signal: AbortSignal.timeout(10_000) }));
     channels.push('Telegram');
   }
-  return { channels, notify: async (title, body) => { await Promise.allSettled(send.map(f => f(title, body))); } };
+  // Each channel's outcome (HTTP status, error class; never a message, which could contain the bot token) for the alert record.
+  const deliver = async (title: string, body: string): Promise<ChannelResult[]> => (await Promise.allSettled(send.map(f => f(title, body)))).map((r, i) => {
+    if (r.status === 'rejected') return { channel: channels[i]!, ok: false, status: null, error: r.reason instanceof Error ? r.reason.name : 'error' };
+    const res = r.value as { ok?: unknown; status?: unknown } | undefined;
+    return { channel: channels[i]!, ok: res?.ok !== false, status: typeof res?.status === 'number' ? res.status : null, error: null };
+  });
+  return { channels, deliver, notify: async (title, body) => { await deliver(title, body); } };
 }
 
 export interface Holding { mint: string; symbol: string | null; balance: number; valueUsd: number | null; marketCapUsd: number | null; fomoUrl: string }

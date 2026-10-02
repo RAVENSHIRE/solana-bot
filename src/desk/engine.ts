@@ -39,6 +39,8 @@ import { GOLDEN, PUMP_QUOTE_MINT, WSOL_MINT, type GoldenSignal, type GoldenTrack
 import { curveState, insiderExit, insiderHolding, RISK } from './launch-risk';
 import { fomoUrl } from './watch';
 import { PRESETS, loadRuleSpecs, removeRuleSpec, ruleCheck, ruleMarketHint, ruleProfile, saveRuleSpec, type RuleSpec } from './custom';
+import type { DeskResearchHooks } from '../research/integration/desk-recorder';
+import type { ChannelResult } from '../research/alerts/evidence';
 
 /** An older same-name token counts as the original only within this gap, unless it is still the busier market. */
 const COPYCAT_MAX_GAP_MS = 3 * 24 * 60 * 60_000;
@@ -68,6 +70,15 @@ export interface DeskDeps {
   aiReview?: (() => string) | null;
   /** Phone/desktop alerts (ntfy, Telegram) for launch-radar finds and entry-ready signals. */
   notify?: (title: string, body: string) => Promise<void>;
+  /** The same send with each channel's outcome, so delivery is recorded (research evidence); `notify` is used without it. */
+  deliver?: (title: string, body: string) => Promise<ChannelResult[]>;
+  /** Configured phone channels (ntfy, Telegram), recorded with each alert. */
+  alertChannels?: readonly string[];
+  /**
+   * Research recorder (src/research): every alert as an immutable evidence snapshot, the signal tape as events. Its
+   * methods never throw and never wait, so it cannot delay or break a scan, an alert or an exit. Absent: nothing recorded.
+   */
+  research?: DeskResearchHooks | null;
   /**
    * Which alerts reach the phone (DESK_ALERTS). Default: rug sales of held positions only. On 1–2 Oct,
    * 175 alerts in 5 h were ~95 % dead launches — radar news 88, OPEN breakouts 65 (no exit made them pay at a realistic
@@ -511,7 +522,8 @@ export class DeskEngine {
     if (this.tape.length) {
       const rows = this.tape.splice(0), file = path.join(this.d.dir, `tape-${this.d.mode}.jsonl`);
       const size = await fs.stat(file).then(st => st.size, () => 0);
-      if (size > 20 * 1024 * 1024) await fs.rename(file, `${file}.1`).catch(() => undefined);
+      // A unique suffix: renaming to `.1` overwrote the previous rotation and destroyed the older tape.
+      if (size > 20 * 1024 * 1024) await fs.rename(file, `${file}.${new Date().toISOString().replace(/[:.]/g, '-')}`).catch(() => undefined);
       await fs.appendFile(file, rows.map(r => JSON.stringify(r)).join('\n') + '\n');
     }
     for (const b of this.books()) await b.ledger.save();
@@ -786,11 +798,13 @@ export class DeskEngine {
       const ratioMiss = !s.crashHint && crashRatioOnlyMiss(s.metrics);
       if (s.crashHint || ratioMiss) {
         const m = candidate.metrics;
-        this.tape.push({ at: now, mint, symbol: candidate.symbol, pool: candidate.pair.address, dex: candidate.pair.dex, priceUsd: m.priceUsd,
+        const row = { at: now, mint, symbol: candidate.symbol, pool: candidate.pair.address, dex: candidate.pair.dex, priceUsd: m.priceUsd,
           marketCapUsd: m.marketCapUsd, liquidityUsd: m.liquidityUsd, poolAgeMin: m.poolAgeMin, volume5mUsd: m.volume5mUsd, volume1hUsd: m.volume1hUsd,
           buys5m: m.buys5m, sells5m: m.sells5m, priceChange5mPct: m.priceChange5mPct, priceChange1hPct: m.priceChange1hPct, top10WalletPct: m.top10WalletPct,
           largestWalletPct: m.largestWalletPct, signal: candidate.crash?.signal ?? false, summary: candidate.crash?.summary ?? null, held: this.heldBy(mint),
-          ...(ratioMiss ? { blockedBy: 'buySellRatio' } : {}) });
+          ...(ratioMiss ? { blockedBy: 'buySellRatio' } : {}) };
+        this.tape.push(row);
+        this.d.research?.tape(row, this.d.mode);
       }
       if (candidate.status === 'QUALIFIED') counts.qualified++; else if (candidate.status === 'WAITING') counts.waiting++;
       else if (candidate.status === 'WATCHLIST') counts.watch++; else counts.filtered++;
@@ -1158,8 +1172,25 @@ export class DeskEngine {
     if (this.launchAlerts.has(key) || !this.d.notify) return;
     this.launchAlerts.add(key);
     if (this.launchAlerts.size > 5_000) this.launchAlerts.delete(this.launchAlerts.values().next().value!);
-    if (!(this.d.alerts ?? DEFAULT_ALERTS).has(kind)) return;
-    void this.d.notify(title, body).catch(() => undefined);
+    const selected = this.d.alerts ?? DEFAULT_ALERTS;
+    // Every first alert per key is recorded with what the desk knew at this moment, whether or not it reaches the phone.
+    const record = this.recordAlert(key, title, body, kind, selected);
+    if (!selected.has(kind)) return;
+    const text = record?.body ?? body, evidence = record?.evidence, research = this.d.research;
+    if (evidence && research && this.d.deliver) void this.d.deliver(title, text).then(r => research.delivered(evidence, r), () => undefined);
+    else void this.d.notify(title, text).catch(() => undefined);
+  }
+
+  /** The research record of an alert (evidence snapshot + the message to send); null without a recorder or on any error. */
+  private recordAlert(key: string, title: string, body: string, kind: AlertKind, selected: ReadonlySet<AlertKind>): ReturnType<DeskResearchHooks['alert']> | null {
+    if (!this.d.research) return null;
+    try {
+      const mint = key.slice(key.indexOf(':') + 1), token = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint) ? mint : null;
+      const candidate = token ? this.candidates.get(token) ?? null : null, channels = [...(this.d.alertChannels ?? [])];
+      return this.d.research.alert({ key, kind, title, body, at: Date.now(), mode: this.d.mode, token, symbol: candidate?.symbol ?? null, candidate,
+        heldBy: token ? this.heldBy(token) : null, solUsd: this.solUsd,
+        delivery: { decision: !selected.has(kind) ? 'SUPPRESSED_BY_CONFIG' : channels.length ? 'SENT' : 'NO_CHANNEL', channels, selectedKinds: [...selected] } });
+    } catch { return null; }
   }
 
   private rememberName(mint: string, pair: DexPair): void {
