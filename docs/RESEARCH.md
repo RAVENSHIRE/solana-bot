@@ -1,5 +1,8 @@
 # Research: launch, attention and demand
 
+> The observer's ledger imports into the research platform's event store (`research:platform import --observer`), where its facts
+> feed versioned features, point-in-time backtests and pre-registered experiments: [research/ARCHITECTURE.md](research/ARCHITECTURE.md).
+
 The desk's backtests (2 Oct) showed no edge from chart rules alone: runners and rugs look alike in the first minutes.
 The two runners we studied had signals outside the chart (AGENCY: the project's own X account posted the contract
 address 2 minutes after launch; 7cYaQc: an organic curve). Those are hypotheses, not edges. This part of the repo

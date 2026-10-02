@@ -41,6 +41,10 @@
     "desk:golden": "node --import tsx src/scripts/desk-golden.ts",
     "research:observe": "node --import tsx src/scripts/research-observe.ts",
     "research:report": "node --import tsx src/scripts/research-report.ts",
+    "research:platform": "node --import tsx src/scripts/research-platform.ts",
+    "research:build": "tsc -p tsconfig.research.json",
+    "test:research": "node --import tsx --test tests/research-*.test.ts",
+    "test:research:node": "tsc -p tsconfig.research.json && node --test dist-research/tests/*.test.js",
     "test:desk": "node --import tsx --test tests/desk.test.ts"
   },
   "dependencies": {

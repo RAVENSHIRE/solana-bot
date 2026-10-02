@@ -27,6 +27,9 @@ export interface ExperimentPlan {
    *  of the training run's signals (default 12 each). */
   leakageChecks?: number;
   baselineRepetitions?: number;
+  /** false: stop after training, validation and the leakage tests, leaving the experiment PENDING for whoever may open
+   *  the holdout (agents: the SUPERVISOR role). Running the same plan again continues from there. Default true. */
+  openHoldout?: boolean;
 }
 
 export interface ExperimentRun { record: ExperimentRecord; training: BacktestResult | null; validation: BacktestResult | null; test: BacktestResult | null; leakage: Violation[] }
@@ -76,7 +79,8 @@ export async function runExperiment(registry: ExperimentRegistry, p: ExperimentP
       leakage: { passed: false, violations: violations.length }, notes: violations.slice(0, 20).map(v => `${v.kind} ${v.subject}: ${v.detail}`) });
     return { record, training, validation, test: null, leakage: violations };
   }
-  if (validation) await registry.recordValidation(id, validation.run_id, validation.metrics, p.now());
+  if (validation && !reg.validation_metrics) await registry.recordValidation(id, validation.run_id, validation.metrics, p.now());
+  if (p.openHoldout === false) return { record: registry.get(id)!, training, validation, test: null, leakage: [] };
 
   // ---------------------------------------------------------------- the sealed test, once
   const holdout = await registry.openHoldout(id, p.actor, p.now());
