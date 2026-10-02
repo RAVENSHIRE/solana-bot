@@ -29,7 +29,7 @@ import { reclaimRent } from './rent';
 import { assessAuthenticity, checkWebsite, parseXLink, type WebsiteCheck, type XClient } from './social';
 import { analyze, type SocialEvidence, type WatchState } from './analysis';
 import { DeskGuard, DeskReject, PaperExecution, paperSigner } from './guard';
-import { crashCheck, crashMarketHint, goldenEntryCheck, launchEntryCheck, openEntryCheck, exitReason, exitRuleText, scaleAdvice, strategyStats } from './strategies';
+import { crashCheck, crashMarketHint, crashRatioOnlyMiss, goldenEntryCheck, launchEntryCheck, openEntryCheck, exitReason, exitRuleText, scaleAdvice, strategyStats } from './strategies';
 import type { Candidate, DeskEvent, DeskMode, DeskPosition, DeskStatus, Preflight, Stage, StrategyId, StrategyView, Tier } from './types';
 import type { Launch, LaunchSource } from './launches';
 import type { XFeed } from './xfeed';
@@ -780,12 +780,15 @@ export class DeskEngine {
       this.candidates.set(mint, candidate);
       if (candidate.crash?.signal) counts.crash++;
       for (const r of Object.values(candidate.rules ?? {})) if (r.signal) counts.custom++;
-      if (s.crashHint) {
+      // The tape also keeps pools blocked only by the buy/sell ratio, so that gate can be measured against what they did.
+      const ratioMiss = !s.crashHint && crashRatioOnlyMiss(s.metrics);
+      if (s.crashHint || ratioMiss) {
         const m = candidate.metrics;
         this.tape.push({ at: now, mint, symbol: candidate.symbol, pool: candidate.pair.address, dex: candidate.pair.dex, priceUsd: m.priceUsd,
           marketCapUsd: m.marketCapUsd, liquidityUsd: m.liquidityUsd, poolAgeMin: m.poolAgeMin, volume5mUsd: m.volume5mUsd, volume1hUsd: m.volume1hUsd,
           buys5m: m.buys5m, sells5m: m.sells5m, priceChange5mPct: m.priceChange5mPct, priceChange1hPct: m.priceChange1hPct, top10WalletPct: m.top10WalletPct,
-          largestWalletPct: m.largestWalletPct, signal: candidate.crash?.signal ?? false, summary: candidate.crash?.summary ?? null, held: this.heldBy(mint) });
+          largestWalletPct: m.largestWalletPct, signal: candidate.crash?.signal ?? false, summary: candidate.crash?.summary ?? null, held: this.heldBy(mint),
+          ...(ratioMiss ? { blockedBy: 'buySellRatio' } : {}) });
       }
       if (candidate.status === 'QUALIFIED') counts.qualified++; else if (candidate.status === 'WAITING') counts.waiting++;
       else if (candidate.status === 'WATCHLIST') counts.watch++; else counts.filtered++;

@@ -152,3 +152,13 @@ test('replay: a gapped stop sells at the minute close (gapFill); the volume-fade
   assert.equal(x.reason, 'VOLUME_FADE'); assert.equal(x.exitPrice, 124); assert.equal(x.exitAt, t0 + 4 * MIN);
   assert.equal(replayExit(pulse, t0, 100, rules, 60 * MIN).reason, 'END_OF_DATA', 'without the rule the position is held');
 });
+
+test('CRASH tape: a pool blocked only by the buy/sell ratio is a near miss (7cYaQc…, 2 Oct); any other miss is not', async () => {
+  const { crashMarketHint, crashRatioOnlyMiss } = await import('../src/desk/strategies');
+  const m = { firstPoolAgeMin: 5, poolAgeMin: 5, priceChange5mPct: 20, volume5mUsd: 80_000, buySellRatio5m: 1.1, buys5m: 120, liquidityUsd: 40_000,
+    marketCapUsd: 150_000, migration: 'PUMPSWAP' } as never;
+  assert.equal(crashMarketHint(m), false); assert.equal(crashRatioOnlyMiss(m), true);
+  assert.equal(crashRatioOnlyMiss({ ...(m as object), buySellRatio5m: 1.5 } as never), false, 'passes the ratio: a CRASH hint, not a miss');
+  assert.equal(crashMarketHint({ ...(m as object), buySellRatio5m: 1.5 } as never), true);
+  assert.equal(crashRatioOnlyMiss({ ...(m as object), volume5mUsd: 10_000 } as never), false, 'another rule fails too');
+});

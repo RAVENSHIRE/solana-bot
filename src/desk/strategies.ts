@@ -31,6 +31,14 @@ function marketChecks(m: CandidateMetrics): GateResult[] {
 }
 
 export function crashMarketHint(m: CandidateMetrics): boolean { return marketChecks(m).every(g => g.status === 'PASS'); }
+/**
+ * A pool that passes every CRASH market rule but the buy/sell ratio. Recorded on the tape to measure that gate: on 2 Oct
+ * 7cYaQc… ran from $50K to $932K while its 5-minute ratio sat at 0.96–1.27 (many small sells count in a fast pump).
+ */
+export function crashRatioOnlyMiss(m: CandidateMetrics): boolean {
+  const checks = marketChecks(m);
+  return checks.find(g => g.key === 'crashBuySell')?.status === 'FAIL' && checks.every(g => g.key === 'crashBuySell' || g.status === 'PASS');
+}
 
 /**
  * CRASH entry: a young pool pumping right now with real buy pressure, and every safety gate passed. Launch fairness is
