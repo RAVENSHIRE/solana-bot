@@ -24,3 +24,6 @@ solana-playbook-update/
 
 # Local Claude Code settings
 /.claude/settings.local.json
+
+/dist-research/
+/data-research/
