@@ -325,7 +325,7 @@ How it runs:
   - `DESK_NTFY_TOPIC=<long random name>`, then subscribe to that topic in the free ntfy app;
   - `DESK_TELEGRAM_BOT_TOKEN` and `DESK_TELEGRAM_CHAT_ID` for Telegram.
 
-Which desk alerts reach the phone: `DESK_ALERTS` in `.env`, a comma list of `golden` (GOLDEN POCKET fills), `rug` (a held position sold as a rug), `open` (OPEN breakouts), `launch` (LAUNCH entry-ready) and `radar` (a launch shortlisted, a radar rug, an impersonator), or `all`. The default is `rug` only (GOLDEN lost 57 % on its first 5 live TEST trades; add `golden` once its TEST ledger is positive). Everything still shows in the dashboard and the event log.
+Which desk alerts reach the phone: `DESK_ALERTS` in `.env`, a comma list of `golden` (GOLDEN POCKET fills), `rug` (a held position sold as a rug), `open` (OPEN breakouts), `launch` (LAUNCH entry-ready) and `radar` (a launch shortlisted, a radar rug, an impersonator), or `all`. The default is **none** (owner, 2 Oct: no rug confirmations on the phone, only qualified calls — and no strategy has a call rule that passed an out-of-sample test yet). Everything still shows in the dashboard and the event log.
 
 Why that default — the alert audit of 1–2 Oct (175 phone alerts in 5 h, what each token did in the hour after its alert, Birdeye minute candles):
 

@@ -130,11 +130,12 @@ test('GOLDEN strategy: only-up fills are bought by default; the pattern stop and
 });
 
 test('phone alerts (DESK_ALERTS): rug sales of held positions by default; golden, open, launch, radar or all on request', () => {
-  assert.deepEqual([...alertKinds(undefined)].sort(), ['rug']);
-  assert.deepEqual([...alertKinds('')].sort(), ['rug']);
+  assert.deepEqual([...alertKinds(undefined)].sort(), [], 'no phone alerts unless asked for');
+  assert.deepEqual([...alertKinds('')].sort(), []);
+  assert.deepEqual([...alertKinds('none')].sort(), []);
   assert.deepEqual([...alertKinds(' Golden, OPEN ,rug')].sort(), ['golden', 'open', 'rug']);
   assert.deepEqual([...alertKinds('all')].sort(), ['golden', 'launch', 'open', 'radar', 'rug']);
-  assert.deepEqual([...alertKinds('nonsense')].sort(), ['rug'], 'nothing valid named: the default');
+  assert.deepEqual([...alertKinds('nonsense')].sort(), [], 'nothing valid named: the default');
 });
 
 test('replay: a gapped stop sells at the minute close (gapFill); the volume-fade exit sells when the pulse is over', async () => {

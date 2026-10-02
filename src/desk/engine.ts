@@ -93,7 +93,11 @@ export interface DeskDeps {
 /** Phone alert kinds, for DESK_ALERTS. */
 export type AlertKind = 'golden' | 'rug' | 'open' | 'launch' | 'radar';
 export const ALERT_KINDS: readonly AlertKind[] = ['golden', 'rug', 'open', 'launch', 'radar'];
-export const DEFAULT_ALERTS: ReadonlySet<AlertKind> = new Set<AlertKind>(['rug']);
+/**
+ * Nothing reaches the phone unless DESK_ALERTS asks for it (owner, 2 Oct: no rug confirmations, only qualified calls).
+ * Every alert is still shown in the dashboard and recorded.
+ */
+export const DEFAULT_ALERTS: ReadonlySet<AlertKind> = new Set<AlertKind>();
 
 interface Deep { at: number; onchain: OnchainEvidence; social: SocialEvidence }
 interface Staged { found: Discovered; pair: DexPair; tier: Tier; metrics: ReturnType<typeof pairMetrics>; crashHint: boolean; ruleHints: StrategyId[]; launch: Launch | null;
@@ -1167,7 +1171,7 @@ export class DeskEngine {
     return `COPYCAT of ${original.baseToken.symbol ?? '?'} ${mint.slice(0, 4)}…${mint.slice(-4)} ($${Math.round(original.marketCap ?? original.fdv ?? 0).toLocaleString('en-US')}, ${Math.round((l.at - original.pairCreatedAt!) / 60_000)} min older)`;
   }
 
-  /** One phone alert per key, for the kinds DESK_ALERTS selects (default: rug sales of held positions). */
+  /** One phone alert per key, for the kinds DESK_ALERTS selects (default: none). */
   private alertOnce(key: string, title: string, body: string, kind: AlertKind): void {
     if (this.launchAlerts.has(key) || !this.d.notify) return;
     this.launchAlerts.add(key);

@@ -50,7 +50,7 @@ const ENV_KEYS = ['RPC_ENDPOINTS', 'RPC_MAX_RPS', 'RPC_TIMEOUT_MS', 'JUPITER_API
   'DESK_FAIR_FRESH_SIGNAL', 'DESK_CRASH_FRESH_SIGNAL', 'DESK_NTFY_TOPIC', 'DESK_NTFY_SERVER', 'DESK_TELEGRAM_BOT_TOKEN', 'DESK_TELEGRAM_CHAT_ID', 'ANTHROPIC_API_KEY',
   'DESK_X_QUERY', 'DESK_AI_REVIEW', 'DESK_AI_REVIEWS_PER_HOUR', 'OPEN_CAPITAL_USD', 'OPEN_ADD_AT', 'GOLDEN_CAPITAL_USD', 'GOLDEN_RETEST_ENTRIES', 'BIRDEYE_API_KEY', 'DESK_ALERTS',
   'DESK_RESEARCH', 'DESK_ALERT_EVIDENCE'];
-/** DESK_ALERTS: a comma list of golden, rug, open, launch, radar (or "all"); unknown names are ignored, empty means the default. */
+/** DESK_ALERTS: a comma list of golden, rug, open, launch, radar (or "all", or "none"); unknown names are ignored, empty means the default (none). */
 export function alertKinds(raw: string | undefined): ReadonlySet<AlertKind> {
   const names = (raw ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
   if (names.includes('all')) return new Set(ALERT_KINDS);
@@ -134,7 +134,7 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
         recordTape: env.DESK_RESEARCH?.trim().toLowerCase() === 'full' })
         .catch((error: unknown) => { logger.warn('Research recorder unavailable; the desk runs without it', { error: error instanceof Error ? error.message : String(error) }); return null; });
     const recorder = research, researchDeps = { research: recorder, deliver: alerts.deliver, alertChannels: alerts.channels };
-    // Which alerts reach the phone: DESK_ALERTS=rug (default), plus golden, open, launch, radar — or "all".
+    // Which alerts reach the phone: none by default; DESK_ALERTS=rug, golden, open, launch, radar — or "all".
     const phoneAlerts = alertKinds(env.DESK_ALERTS);
     const sender = new TransactionSender(rpc, logger, { confirmTimeoutMs: cfg.execution.confirmTimeoutMs, pollIntervalMs: 1500, rebroadcastIntervalMs: 2000 });
     const engines = {

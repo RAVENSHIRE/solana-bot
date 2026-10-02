@@ -225,3 +225,25 @@ test('dataset: point-in-time features and labels — nothing after the decision 
   assert.deepEqual(blindSpots({ runs: [{ start: 0, sources: 2 }, { start: 500_000, sources: 2 }], gaps: [{ obs: 100_000, source: 'logs0', detail: '' }, { obs: 105_000, source: 'logs1', detail: '' }] }),
     [100_000, 105_000, 500_000]);
 });
+
+test('direct entry look-back: conservative fill, take profit, a stop jumped over sells at the trade, costs', async () => {
+  const { simulate, DIRECT_DEFAULTS } = await import('../src/research/direct');
+  const t0 = Date.parse('2026-10-02T12:00:00Z');
+  const mc = (sol: number) => ({ vSol: sol * 1e9, vTok: 1e15 });
+  const tr = (sec: number, sol: number) => ({ obs: t0 + sec * 1000, ts: 0, slot: sec, w: 1, buy: true, lamports: 1, ...mc(sol), realTok: 7e14 });
+  const launch = (trades: ReturnType<typeof tr>[]) => ({ mint: 'M', createdObs: t0, createdTs: null, creator: null, creatorW: null, devBuySol: null, name: null, symbol: 'X', mayhem: false,
+    trades, candles: [], completeObs: null, migrateObs: null, meta: null, metaError: false, xReads: [], xPosts: [], sites: [] });
+  const o = { ...DIRECT_DEFAULTS, delayS: 5, fixedUsd: 0, feePct: 0 };
+  // Decision at 5 s: last price 30; a trade in flight at 6 s (31) sets the fill. +40 % of 31 = 43.4 reached at 20 s.
+  const win = simulate(launch([tr(1, 30), tr(6, 31), tr(20, 44), tr(30, 20)]), { tpPct: 40, slPct: 20, maxHoldMin: 15 }, o, t0 + 3_600_000)!;
+  assert.equal(win.entryMcap, 31); assert.equal(win.reason, 'TAKE_PROFIT'); assert.ok(Math.abs(win.netPct - 40) < 1e-9);
+  // A rug: the next trade after the fill is far below the −20 % stop; it sells at that trade, not at the stop.
+  const rug = simulate(launch([tr(1, 30), tr(10, 9)]), { tpPct: 40, slPct: 20, maxHoldMin: 15 }, o, t0 + 3_600_000)!;
+  assert.equal(rug.reason, 'STOP'); assert.ok(Math.abs(rug.netPct - (9 / 30 - 1) * 100) < 1e-9);
+  // Fees on both sides and the fixed cost.
+  const costly = simulate(launch([tr(1, 30), tr(20, 42)]), { tpPct: 40, slPct: 20, maxHoldMin: 15 }, { ...o, feePct: 1.25, fixedUsd: 0.1, sizeUsd: 2 }, t0 + 3_600_000)!;
+  assert.ok(Math.abs(costly.netPct - (1.4 * 0.9875 * 0.9875 - 1 - 0.05) * 100) < 1e-9);
+  // No trade before the decision and none in flight: not bought. Data ending inside the hold: not judged.
+  assert.equal(simulate(launch([tr(30, 30)]), { tpPct: 40, slPct: 20, maxHoldMin: 15 }, o, t0 + 3_600_000), null);
+  assert.equal(simulate(launch([tr(1, 30)]), { tpPct: 40, slPct: 20, maxHoldMin: 15 }, o, t0 + 5 * 60_000), null);
+});
