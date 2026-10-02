@@ -126,10 +126,12 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
       { rugs, review: reviewer ? (i, now) => reviewer.review(i, now) : null, reviewAvailable: reviewer ? now => reviewer.available(now) : undefined,
         onDecoded: (events, now) => opening.observe(events, now) });
     // Research record (src/research): every alert as an immutable evidence snapshot, and the signal tape, as events in
-    // data-desk/research-store. DESK_RESEARCH=off turns it off; DESK_ALERT_EVIDENCE=off keeps the phone text as before.
+    // data-desk/research-store. DESK_RESEARCH=off turns it off, =full also records the tape live (large; the tape file
+    // already holds it for import). DESK_ALERT_EVIDENCE=off keeps the phone text as before.
     // If the store cannot be opened, the desk runs without it.
     research = env.DESK_RESEARCH?.trim().toLowerCase() === 'off' ? null
-      : await DeskResearchRecorder.open(path.join(o.dataDir, 'research-store'), { enrichMessages: env.DESK_ALERT_EVIDENCE?.trim().toLowerCase() !== 'off' })
+      : await DeskResearchRecorder.open(path.join(o.dataDir, 'research-store'), { enrichMessages: env.DESK_ALERT_EVIDENCE?.trim().toLowerCase() !== 'off',
+        recordTape: env.DESK_RESEARCH?.trim().toLowerCase() === 'full' })
         .catch((error: unknown) => { logger.warn('Research recorder unavailable; the desk runs without it', { error: error instanceof Error ? error.message : String(error) }); return null; });
     const recorder = research, researchDeps = { research: recorder, deliver: alerts.deliver, alertChannels: alerts.channels };
     // Which alerts reach the phone: DESK_ALERTS=rug (default), plus golden, open, launch, radar — or "all".

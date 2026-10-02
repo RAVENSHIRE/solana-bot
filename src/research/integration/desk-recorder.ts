@@ -32,13 +32,17 @@ export class DeskResearchRecorder implements DeskResearchHooks {
   private timer: NodeJS.Timeout | null = null;
   private readonly s: RecorderStatus;
 
-  private constructor(private readonly store: FileEventStore, private readonly o: { enrichMessages: boolean; clock: () => number; maxQueue: number }) {
+  private constructor(private readonly store: FileEventStore, private readonly o: { enrichMessages: boolean; recordTape: boolean; clock: () => number; maxQueue: number }) {
     this.s = { dir: store.dir, queued: 0, written: 0, duplicates: 0, dropped: 0, failures: 0, lastError: null };
   }
 
-  static async open(dir: string, o: { enrichMessages?: boolean; clock?: () => number; flushMs?: number; maxQueue?: number } = {}): Promise<DeskResearchRecorder> {
+  /**
+   * `recordTape`: also record every tape row live (≈ 140 MB a day). Off by default: the desk already writes the same rows
+   * to tape-<MODE>.jsonl, and importing that file later yields identical events (same ids).
+   */
+  static async open(dir: string, o: { enrichMessages?: boolean; recordTape?: boolean; clock?: () => number; flushMs?: number; maxQueue?: number } = {}): Promise<DeskResearchRecorder> {
     const store = await FileEventStore.open(dir);
-    const r = new DeskResearchRecorder(store, { enrichMessages: o.enrichMessages ?? true, clock: o.clock ?? Date.now, maxQueue: o.maxQueue ?? 50_000 });
+    const r = new DeskResearchRecorder(store, { enrichMessages: o.enrichMessages ?? true, recordTape: o.recordTape ?? false, clock: o.clock ?? Date.now, maxQueue: o.maxQueue ?? 50_000 });
     r.timer = setInterval(() => void r.flush(), o.flushMs ?? 2_000);
     r.timer.unref?.();
     return r;
@@ -70,6 +74,7 @@ export class DeskResearchRecorder implements DeskResearchHooks {
   }
 
   tape(row: Record<string, unknown>, mode: string): void {
+    if (!this.o.recordTape) return;
     try { this.enqueue(tapeToInputs(row as unknown as TapeRow, mode)); }
     catch (error) { this.s.failures++; this.s.lastError = error instanceof Error ? error.name : 'error'; }
   }

@@ -85,7 +85,7 @@ test('the evidence is stored as an immutable event and reads back identical', as
 
 test('desk recorder: alerts, deliveries, tape and health are recorded without ever throwing', async () => {
   const dir = await tmp();
-  const rec = await DeskResearchRecorder.open(dir, { clock: () => T0 + 5, flushMs: 60_000 });
+  const rec = await DeskResearchRecorder.open(dir, { clock: () => T0 + 5, flushMs: 60_000, recordTape: true });
   const { evidence, body } = rec.alert(input());
   assert.ok(evidence && body.includes(evidence.alert_id));
   rec.delivered(evidence!, [{ channel: 'ntfy', ok: false, status: 500, error: null }]);
