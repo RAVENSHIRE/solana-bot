@@ -162,6 +162,17 @@ async function main(): Promise<void> {
     }
   }
 
+  // Sensitivity of the only-up variant: is the result one lucky setting, or does it hold across its neighbours?
+  console.log('\nONLY_UP sensitivity (mean % per trade · PF · trades · weaker half):');
+  for (const bars of [2, 3]) for (const minVolumeUsd of [0, 10_000, 30_000, 60_000]) for (const stopBelowPct of [5, 10]) {
+    const e = { rules: onlyUp({ bars, ref: bars, chasePct: 12, windowMin: 10, stopBelowPct }), minVolumeUsd };
+    const cells = [[30, 20], [50, 25], [100, 35]].flatMap(([activationPct, stopPct]) => [30, 60, 120, 240].map(maxHoldMin => {
+      const r = run(e, { mode: 'TRAIL', trailing: { activationPct: activationPct!, stopPct: stopPct! }, belowResistancePct: 0, maxHoldMin });
+      return `${r.all.meanPct.toFixed(1).padStart(5)}/${r.all.profitFactor.toFixed(1)}/${Math.min(r.first.meanPct, r.second.meanPct).toFixed(0).padStart(3)}`;
+    }));
+    console.log(`  ${bars} green · vol≥$${minVolumeUsd / 1000}K · stop −${stopBelowPct}% · n ${String(entriesOf(e).length).padStart(3)} | trail 20%/+30%, 25%/+50%, 35%/+100% × hold 30/60/120/240m: ${cells.join(' ')}`);
+  }
+
   // Tokens named on the command line: the pattern each rule set saw and the trade it made.
   const bestOf = (kind: boolean) => results.find(r => !!r.entry.rules.onlyUp === kind && r.score > -Infinity);
   for (const mint of watch) {
