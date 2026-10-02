@@ -280,10 +280,10 @@ export function strategyProfiles(env: NodeJS.ProcessEnv, capital: DeskCapital,
       scaleIn: openAdds.map(atMultiple => ({ atMultiple, addUsd: capital.baseEntryUsd })),
       exits: { takeProfitPct: Number.POSITIVE_INFINITY, stopLossPct: 85, maxHoldMin: 1_440, trailing: { activationPct: 0, stopPct: 30 }, giveback: null, graceMs: 60_000,
         holdUntilMultiple: 6, marketCap: { floorUsd: OPENING_RULES.floorUsd, targetUsd: null } } },
-    GOLDEN: { id: 'GOLDEN', label: 'GOLDEN POCKET', enabled: true,
+    GOLDEN: { id: 'GOLDEN', label: 'GOLDEN POCKET', enabled: false,
       summary: `Fresh pump.fun graduations whose first ${GOLDEN_RULES.onlyUp!.bars} one-minute candles on the pool are only up: bought up to ${
         GOLDEN_RULES.onlyUp!.chasePct}% above candle ${GOLDEN_RULES.onlyUp!.ref}, the stop ${GOLDEN_RULES.onlyUp!.stopBelowPct}% under it, a ${GOLDEN_EXIT.trailing.stopPct}% trailing stop after +${
-        GOLDEN_EXIT.trailing.activationPct}%, out after ${GOLDEN_EXIT.maxHoldMin} min (backtest: +7.9% per trade, both halves positive). Break and retest of the old high (66hK2) is ${
+        GOLDEN_EXIT.trailing.activationPct}%, out after ${GOLDEN_EXIT.maxHoldMin} min. OFF: −33% per trade in the backtest once a stop gapped by a rug sells at the minute's close (+7.9% only with stops filled at their level), −57% on its first 5 live TEST trades. Break and retest of the old high (66hK2) is ${
         e.GOLDEN_RETEST_ENTRIES === 'true' ? `bought too, sold ${GOLDEN_EXIT.belowResistancePct}% under the breakout high` : 'shown, not bought (break-even in the backtest)'}; TEST first`,
       capitalUsd: e.GOLDEN_CAPITAL_USD, entryUsd: capital.baseEntryUsd, slippageBps: 600, exitSlippageBps: 1_500, maxDragBps: 1_200n,
       maxOpenPositions: 2, positionCheckMs: 3_000, exitMode: 'rules', reentryCooldownMs: 4 * 60 * 60_000, preGraduationExit: false,
@@ -295,8 +295,9 @@ export function strategyProfiles(env: NodeJS.ProcessEnv, capital: DeskCapital,
 /**
  * GOLDEN POCKET pattern rules (golden-pocket.ts) on graduated pools, from `npm run desk:golden` over 12 h of pump.fun
  * graduations on 1 Oct (533 pools, Birdeye minute candles, judged by the weaker time half; see docs/DESK.md):
- *   only up (2 rising green minutes, bought within 12 % of candle 2, stop 5 % under it, 60 min): +7.9 % per trade, PF 2.0,
- *     weaker half +7 % (310 trades); it holds for 3 candles, any volume filter, 30–60 min holds, and fails past 2 hours.
+ *   only up (2 rising green minutes, bought within 12 % of candle 2, stop 5 % under it, 60 min): +7.9 % per trade with
+ *     stops filled at their level, but −33 % (PF 0.31, both halves) once a stop gapped within a minute sells at that
+ *     minute's close — and −57 % on the first 5 live TEST trades (rugs fall through the stop in seconds). Off by default.
  *   break and retest (the owner's 66hK2 pattern): break-even at best (PF 1.0), −5…−11 % with the owner's exact levels.
  */
 export const GOLDEN_RULES: Readonly<PocketRules> = Object.freeze({

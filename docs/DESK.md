@@ -166,6 +166,8 @@ These rules come from one example. The alert audit of 1–2 Oct (65 breakouts, s
 
 ### GOLDEN POCKET: graduated pools, only up and break and retest
 
+> **Off by default (2 Oct).** The first 5 live TEST trades lost 57 % on average: the coins (SpaceX, Mr Beast, SIGF at $300–470K, 25–30× above their launch) rugged straight through the 5 % stop. The backtest below filled every stop at its level; with a stop that a rug gaps within a minute selling at that minute's close (`gapFill`), the deployed only-up rule makes **−33 % per trade** (PF 0.31, both halves), at every entry level. The numbers below are kept as the record of that mistake.
+
 From 66hK2 (BULLISHCAT) on 1 Oct: graduated → **$163K** (the first high) → **$108K** (the dip) → **$225K** (breakout) → back to **$160K** (the old high, the "golden pocket") → **$642K**. The shape counts, not the level: the same ratios on a $20K curve or a $200K pool. Two variants, both read from every fresh graduation's PumpSwap pool:
 
 1. **Only up (bought):** the pool's first **2 one-minute candles both close green, each above the previous close**. Bought from the third minute on, up to **12 % above candle 2's close**; the stop is **5 % under candle 2's close**; a **25 % trailing stop after +50 %**; sold after **60 minutes** at the latest.

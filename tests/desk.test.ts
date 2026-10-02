@@ -1084,6 +1084,7 @@ test('GOLDEN POCKET: an only-up fill on a fresh pool is alerted, bought in TEST 
     const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }), golden: tracker as never,
       notify: async title => { alerts.push(title); }, alerts: new Set(['golden']) });
     for (const id of ['FAIR', 'CRASH', 'LAUNCH', 'OPEN']) engine.setStrategy(id, false);
+    engine.setStrategy('GOLDEN', true);
     engine.start(); await engine.pulse();
     const fresh = await engine.goldenPass();
     assert.deepEqual(fresh.map(f => f.symbol), ['ABC'], 'the retest is not a GOLDEN entry by default');
