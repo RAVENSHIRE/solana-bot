@@ -43,8 +43,10 @@ export function backtestData(o: BacktestDataOptions) {
     const to = Math.floor((latest ? now : Math.min(p.createdAt + spanMin * MINUTE, now)) / 1000), from = Math.max(Math.floor(p.createdAt / 1000) - 60, to - 999 * 60);
     // A pool younger than the rounded "now" has no range to ask for yet.
     if (to - from < 120) return [];
-    const file = path.join(o.cacheDir, 'birdeye', `${p.mint}-${from}-${to}.json`);
-    let list = await readJson<Array<{ unixTime: number; o: number; h: number; l: number; c: number; v: number }>>(file);
+    const dir = path.join(o.cacheDir, 'birdeye'), file = path.join(dir, `${p.mint}-${from}-${to}.json`);
+    // Credits are scarce (the free plan's month): any earlier download of this token's range is reused, the latest first.
+    const earlier = (await fs.readdir(dir).catch(() => [] as string[])).filter(n => n.startsWith(`${p.mint}-${from}-`)).sort((a, b) => parseInt(b.split('-')[2]!) - parseInt(a.split('-')[2]!));
+    let list = await readJson<Array<{ unixTime: number; o: number; h: number; l: number; c: number; v: number }>>(earlier[0] ? path.join(dir, earlier[0]) : file);
     if (!list && o.cachedOnly) return [];
     for (let attempt = 0; !list; attempt++) {
       await sleep(Math.max(0, lastBirdeye + 1_100 - Date.now())); lastBirdeye = Date.now(); birdeyeCalls++;
