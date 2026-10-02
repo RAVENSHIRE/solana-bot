@@ -412,6 +412,23 @@ npm run desk:golden -- --hours 12 [--source birdeye|gecko] [--min-volume 5000] [
 
 It runs the break and retest and the only-up variant over a grid of pattern rules × exits (stop, trailing stop, take profit under the resistance, hold time), next to your exact rules and a baseline (every pool bought 10 minutes after graduation), ranks by the weaker time half, prints an only-up sensitivity table, and for `--mints` the pattern each rule set saw and the trade it made. Candles come from Birdeye by default (`BIRDEYE_API_KEY`, token prices in USD, one request per second, about 35 credits per token — the free plan has 30,000 a month, so a 12 h run uses most of what is left); `--source gecko` uses GeckoTerminal instead (free, but about one pool per 20 s while the desk runs on the same connection). Every download is cached and reused (`--cached-only` never downloads).
 
+### Trade audit (2 Oct): what each TEST trade's coin did
+
+`node logs\trade-audit.mjs` on the PC pairs every buy and sell in the TEST ledgers (current and completed sleeve cycles) and reads each coin's 1-minute chart from 4 h before the entry to 2 h after (Birdeye, cached in `logs\trade-candles`). On 72 trades (medians):
+
+| Strategy | Trades | Bought at (× launch) | High in 60 min after entry | Low in 60 min after entry | Result |
+|---|---|---|---|---|---|
+| CRASH | 25 | 19× | +170 % | −96 % | +$5.73 |
+| LAUNCH | 19 | 2.5× | +51 % | −49 % | −$5.14 |
+| OPEN | 7 | 4.4× | +21 % | −78 % | −$11.77 |
+| GOLDEN | 5 | 28× | +25 % | −99 % | −$5.69 |
+
+Almost every coin is gone within the hour. CRASH works because its coins still run after the entry and the +100 % take profit catches some of it. GOLDEN bought sniped launches (graduated and pushed to $300K+ within seconds, 25–30× their launch) that rugged through its stop.
+
+**Backtests now fill gapped stops realistically.** A stop crossed within a minute that closes under it sells at that minute's close (`gapFill`, the default in `desk:golden` and `desk:backtest`; `--level-fill` for the old model). Under the old model GOLDEN's only-up rule showed +7.9 % per trade; realistically it is −33 %.
+
+**Missed: 7cYaQc… (2 Oct).** A pump.fun coin (Token-2022, no "pump" suffix) that graduated at about $45K, dipped to $32K, broke out to $81K and ran to $932K: the break and retest of the old high. The desk saw it every scan from 01:51 and filtered it for a 5-minute buy/sell ratio of 0.96–1.27 (FAIR needs 1.4, CRASH 1.3); GOLDEN was not deployed yet. The CRASH tape now also records pools that fail only the buy/sell ratio (`blockedBy: "buySellRatio"`), so that gate can be measured.
+
 ### Costs per trade (and what the desk does about them)
 
 - **Token-account rent** (~0.0015–0.002 SOL, about 9 % of a $2 position) leaves the wallet with every first buy of a token. With the local key the desk closes the emptied account right after the exit and the rent comes back; a LIVE session also closes empty accounts left by earlier desk trades once, after its first scan. With Phantom the accounts stay open (closing them would need another approval per exit). The ledger charges the rent to the trade until it is reclaimed, so net PnL matches the wallet. TEST closes accounts on paper.
