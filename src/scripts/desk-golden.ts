@@ -173,6 +173,15 @@ async function main(): Promise<void> {
     console.log(`  ${bars} green · vol≥$${minVolumeUsd / 1000}K · stop −${stopBelowPct}% · n ${String(entriesOf(e).length).padStart(3)} | trail 20%/+30%, 25%/+50%, 35%/+100% × hold 30/60/120/240m: ${cells.join(' ')}`);
   }
 
+  // Stop slippage: a fast pool falls through the stop between two checks (live, 1 Oct: $358K sold under a $392.5K stop).
+  const deployed = { rules: onlyUp({ bars: 2, ref: 2, chasePct: 12, windowMin: 10, stopBelowPct: 5 }), minVolumeUsd: 0 };
+  console.log('\nONLY_UP as deployed (2 green, stop −5%, trail 25% after +50%, 60m) by stop slippage:');
+  for (const stopSlipPct of [3, 6, 10, 15]) {
+    const trades = entriesOf(deployed).map(({ s, e }) => pocketTrade(s, e, { mode: 'TRAIL', trailing: { activationPct: 50, stopPct: 25 }, belowResistancePct: 0, maxHoldMin: 60 }, { ...costs, stopSlipPct }));
+    const all = summarize(trades), a = summarize(trades.filter(t => t.entryAt < split)), b = summarize(trades.filter(t => t.entryAt >= split));
+    console.log(`  ${String(stopSlipPct).padStart(2)}% · n ${all.trades} · mean ${all.meanPct.toFixed(1)}% · PF ${all.profitFactor.toFixed(2)} · halves ${a.meanPct.toFixed(1)}% / ${b.meanPct.toFixed(1)}%`);
+  }
+
   // Tokens named on the command line: the pattern each rule set saw and the trade it made.
   const bestOf = (kind: boolean) => results.find(r => !!r.entry.rules.onlyUp === kind && r.score > -Infinity);
   for (const mint of watch) {
