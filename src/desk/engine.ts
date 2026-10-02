@@ -68,6 +68,11 @@ export interface DeskDeps {
   aiReview?: (() => string) | null;
   /** Phone/desktop alerts (ntfy, Telegram) for launch-radar finds and entry-ready signals. */
   notify?: (title: string, body: string) => Promise<void>;
+  /**
+   * Radar news on the phone too (a launch shortlisted, a radar rug, an impersonator). Off by default: on 1–2 Oct, 63 of
+   * 68 shortlist alerts were dead launches the desk never bought. Buy signals and held-position rugs are always sent.
+   */
+  alertRadar?: boolean;
   /** LIVE: who signs (default PHANTOM) and how many new entries one LIVE session may open. */
   signerKind?: LiveSignerKind;
   liveMaxEntries?: number;
@@ -1084,7 +1089,7 @@ export class DeskEngine {
         if (l.rug && !this.launchAlerts.has(`rugseen:${l.mint}`)) {
           this.launchAlerts.add(`rugseen:${l.mint}`);
           this.event('FILTERED', `LAUNCH radar: ${l.symbol} ${l.rug}${this.heldBy(l.mint) ? ' — selling' : ' — never bought'}`, ctx);
-          this.alertOnce(`rugradar:${l.mint}`, `LAUNCH radar: ${l.symbol} RUG`, `${l.rug}\n${fomoUrl(l.mint)}`);
+          this.alertOnce(`rugradar:${l.mint}`, `LAUNCH radar: ${l.symbol} RUG`, `${l.rug}\n${fomoUrl(l.mint)}`, true);
           continue;
         }
         // Re-reads of the X page and website after the shortlist: a confirmed CA or an exposed impersonator is news.
@@ -1093,7 +1098,7 @@ export class DeskEngine {
         this.launchCa.set(l.mint, l.ca.status);
         if (l.ca.status === 'IMPERSONATOR') {
           this.event('FILTERED', `LAUNCH radar: ${l.symbol} ${l.ca.detail} — never bought`, ctx);
-          this.alertOnce(`fake:${l.mint}`, `LAUNCH radar: ${l.symbol} is an IMPERSONATOR`, `${l.ca.detail}\n${fomoUrl(l.mint)}`);
+          this.alertOnce(`fake:${l.mint}`, `LAUNCH radar: ${l.symbol} is an IMPERSONATOR`, `${l.ca.detail}\n${fomoUrl(l.mint)}`, true);
         } else this.event('WATCHLIST', `LAUNCH radar: ${l.symbol} ${l.ca.detail} (${age} min old) · score ${l.score}`, ctx);
         continue;
       }
@@ -1108,7 +1113,7 @@ export class DeskEngine {
       }
       l.shortlistedAt = Date.now(); this.launchList.set(l.mint, l); this.launchCa.set(l.mint, l.ca.status);
       this.event('WATCHLIST', `LAUNCH radar: ${l.symbol} "${l.name}" ${age} min old · score ${l.score} · ${l.reasons.join(' · ')}`, ctx);
-      this.alertOnce(`radar:${l.mint}`, `LAUNCH radar: ${l.symbol} (${age} min old)`, `${l.name} · ${l.reasons.join(' · ')}\n${fomoUrl(l.mint)}`);
+      this.alertOnce(`radar:${l.mint}`, `LAUNCH radar: ${l.symbol} (${age} min old)`, `${l.name} · ${l.reasons.join(' · ')}\n${fomoUrl(l.mint)}`, true);
     }
     for (const [mint, l] of this.launchList) if (Date.now() - l.at > 2 * 60 * 60_000) { this.launchList.delete(mint); this.launchCa.delete(mint); }
     if (this.launchCopycats.size > 2_000) this.launchCopycats.delete(this.launchCopycats.keys().next().value!);
@@ -1137,10 +1142,12 @@ export class DeskEngine {
     return `COPYCAT of ${original.baseToken.symbol ?? '?'} ${mint.slice(0, 4)}…${mint.slice(-4)} ($${Math.round(original.marketCap ?? original.fdv ?? 0).toLocaleString('en-US')}, ${Math.round((l.at - original.pairCreatedAt!) / 60_000)} min older)`;
   }
 
-  private alertOnce(key: string, title: string, body: string): void {
+  /** One phone alert per key. Radar news (not a buy signal, nothing held) goes out only with DESK_ALERT_RADAR=true. */
+  private alertOnce(key: string, title: string, body: string, radar = false): void {
     if (this.launchAlerts.has(key) || !this.d.notify) return;
     this.launchAlerts.add(key);
     if (this.launchAlerts.size > 5_000) this.launchAlerts.delete(this.launchAlerts.values().next().value!);
+    if (radar && !this.d.alertRadar) return;
     void this.d.notify(title, body).catch(() => undefined);
   }
 

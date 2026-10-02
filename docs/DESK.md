@@ -323,6 +323,8 @@ How it runs:
   - `DESK_NTFY_TOPIC=<long random name>`, then subscribe to that topic in the free ntfy app;
   - `DESK_TELEGRAM_BOT_TOKEN` and `DESK_TELEGRAM_CHAT_ID` for Telegram.
 
+Which desk alerts reach the phone: buy signals (OPEN breakout, GOLDEN POCKET fill, LAUNCH entry-ready) and a rug sale of a position you hold. Radar news — a launch shortlisted, a radar rug, an impersonator, none of them bought — stays in the dashboard unless `DESK_ALERT_RADAR=true`: on 1–2 Oct, 63 of 68 shortlist alerts were launches that died without the desk buying them.
+
 **Sell automatically** is available only for the local-key wallet (`DESK_LIVE_SIGNER=local-key`).
 
 - It sells the wallet's whole balance through the same guarded path as a desk exit: Jupiter quote, route, pre-flight checks, signature persisted before broadcast, confirmation, then the empty account's rent is reclaimed.

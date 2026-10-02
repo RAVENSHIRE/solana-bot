@@ -908,8 +908,8 @@ test('LAUNCH: a fresh pump.fun launch with its own X account and website is boug
     assert.equal(view.positions.length, 1); assert.equal(view.positions[0]!.strategy, 'LAUNCH');
     assert.ok(engine.events.list().some(e => /^LAUNCH radar: ABC "Alpha" 5 min old · score 8 · own X account @alphaproj/.test(e.message)));
     assert.ok(engine.events.list().some(e => /^LAUNCH entry selected: score 8 · 5\.\d min old · \$20,000 cap/.test(e.message)));
-    assert.deepEqual(alerts.map(a => a.title), ['LAUNCH radar: ABC (5 min old)', 'LAUNCH entry-ready: ABC']);
-    assert.match(alerts[1]!.body, new RegExp(`https://fomo.family/tokens/solana/${MINT}$`));
+    assert.deepEqual(alerts.map(a => a.title), ['LAUNCH entry-ready: ABC'], 'the shortlist itself is radar news: not on the phone by default');
+    assert.match(alerts[0]!.body, new RegExp(`https://fomo.family/tokens/solana/${MINT}$`));
     assert.equal(view.launches![0]!.status, 'held by LAUNCH'); assert.equal(view.launches![0]!.marketCapUsd, 20_000);
     const live = await DeskEngine.create({ ...shared, mode: 'LIVE', dir, sender: null, wallet: () => null });
     assert.equal(live.strategies.LAUNCH.enabled, false, 'LIVE starts LAUNCH off');
@@ -944,7 +944,7 @@ test('LAUNCH: the project posting the CA on X allows an entry from 1 min; unconf
     const dir2 = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-launch-fake-'));
     const fake = { ...launch, at: Date.now() - 2 * 60_000, score: 8, ca: { status: 'UNCONFIRMED' as const, detail: 'CA not posted by @alphaproj yet' } };
     const other = await DeskEngine.create({ ...shared, mode: 'PAPER', dir: dir2, sender: null, wallet: () => ({ owner, signer: null }),
-      launches: { poll: async () => [], recent: () => [fake] }, notify: async title => { alerts.push(title); } });
+      launches: { poll: async () => [], recent: () => [fake] }, notify: async title => { alerts.push(title); }, alertRadar: true });
     other.setStrategy('CRASH', false);
     Object.assign(fake, { score: 0, ca: { status: 'IMPERSONATOR', detail: 'IMPERSONATOR: @alphaproj shows CA 3Bdw…pump, not this token' } });
     other.start(); await other.pulse();
