@@ -900,7 +900,7 @@ test('LAUNCH: a fresh pump.fun launch with its own X account and website is boug
       insiders: { wallets: [owner.toBase58()], creatorPct: 2, insiderPct: 9, slot: 1, detail: 'insiders hold 9.0%: dev 2.0% + 1 wallet in the creation slot' } };
     const alerts: Array<{ title: string; body: string }> = [];
     const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }),
-      launches: { poll: async () => [launch], recent: () => [launch] }, notify: async (title, body) => { alerts.push({ title, body }); } });
+      launches: { poll: async () => [launch], recent: () => [launch] }, notify: async (title, body) => { alerts.push({ title, body }); }, alerts: new Set(['launch']) });
     engine.setStrategy('CRASH', false); engine.start(); await engine.pulse();
     const view = engine.status({ connected: false, address: null });
     const c = view.candidates.find(x => x.mint === MINT)!;
@@ -908,7 +908,7 @@ test('LAUNCH: a fresh pump.fun launch with its own X account and website is boug
     assert.equal(view.positions.length, 1); assert.equal(view.positions[0]!.strategy, 'LAUNCH');
     assert.ok(engine.events.list().some(e => /^LAUNCH radar: ABC "Alpha" 5 min old · score 8 · own X account @alphaproj/.test(e.message)));
     assert.ok(engine.events.list().some(e => /^LAUNCH entry selected: score 8 · 5\.\d min old · \$20,000 cap/.test(e.message)));
-    assert.deepEqual(alerts.map(a => a.title), ['LAUNCH entry-ready: ABC'], 'the shortlist itself is radar news: not on the phone by default');
+    assert.deepEqual(alerts.map(a => a.title), ['LAUNCH entry-ready: ABC'], 'the shortlist itself is radar news: not on the phone unless asked for');
     assert.match(alerts[0]!.body, new RegExp(`https://fomo.family/tokens/solana/${MINT}$`));
     assert.equal(view.launches![0]!.status, 'held by LAUNCH'); assert.equal(view.launches![0]!.marketCapUsd, 20_000);
     const live = await DeskEngine.create({ ...shared, mode: 'LIVE', dir, sender: null, wallet: () => null });
@@ -944,7 +944,7 @@ test('LAUNCH: the project posting the CA on X allows an entry from 1 min; unconf
     const dir2 = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-launch-fake-'));
     const fake = { ...launch, at: Date.now() - 2 * 60_000, score: 8, ca: { status: 'UNCONFIRMED' as const, detail: 'CA not posted by @alphaproj yet' } };
     const other = await DeskEngine.create({ ...shared, mode: 'PAPER', dir: dir2, sender: null, wallet: () => ({ owner, signer: null }),
-      launches: { poll: async () => [], recent: () => [fake] }, notify: async title => { alerts.push(title); }, alertRadar: true });
+      launches: { poll: async () => [], recent: () => [fake] }, notify: async title => { alerts.push(title); }, alerts: new Set(['radar', 'launch']) });
     other.setStrategy('CRASH', false);
     Object.assign(fake, { score: 0, ca: { status: 'IMPERSONATOR', detail: 'IMPERSONATOR: @alphaproj shows CA 3Bdw…pump, not this token' } });
     other.start(); await other.pulse();
@@ -1015,7 +1015,7 @@ test('OPEN: a breakout above a strong opening candle is alerted at once, bought,
     const profiles = strategyProfiles({}, shared.capital, shared.cfg.rs);
     profiles.OPEN = { ...profiles.OPEN, exits: { ...profiles.OPEN.exits, graceMs: 0 } };
     const engine = await DeskEngine.create({ ...shared, strategies: profiles, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }), opening: tracker as never,
-      notify: async (title, body) => { alerts.push({ title, body }); } });
+      notify: async (title, body) => { alerts.push({ title, body }); }, alerts: new Set(['open']) });
     engine.setStrategy('CRASH', false); engine.setStrategy('LAUNCH', false); engine.start();
     await engine.pulse();
     const fresh = await engine.openingPass();

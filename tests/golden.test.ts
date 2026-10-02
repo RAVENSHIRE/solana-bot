@@ -4,6 +4,7 @@ import { PublicKey } from '@solana/web3.js';
 import { GoldenTracker, PUMP_AMM_PROGRAM, PUMP_QUOTE_MINT, WSOL_MINT, decodePumpSwapPool, pocketState, pocketStep, pumpSwapPool, type PocketRules } from '../src/desk/golden-pocket';
 import { GOLDEN_RULES, deskCapital, strategyProfiles } from '../src/desk/config';
 import { exitReason, goldenEntryCheck } from '../src/desk/strategies';
+import { alertKinds } from '../src/desk/runtime';
 import { capSeries, pocketTrade } from '../src/desk/backtest';
 
 const K = 1000, MIN = 60_000;
@@ -126,4 +127,12 @@ test('GOLDEN strategy: only-up fills are bought by default; the pattern stop and
   assert.match(goldenEntryCheck(c, fill, ['ONLY_UP'], null, { ...live, lastUsd: 104 * K }, now).summary, /^Above the pattern stop/);
   assert.match(goldenEntryCheck(c, fill, ['ONLY_UP'], null, live, now + 4 * MIN).summary, /^Minutes since the fill/);
   assert.match(goldenEntryCheck(c, fill, ['ONLY_UP'], { rug: 'RUG insiders dumped' }, live, now).summary, /^Rug checks/);
+});
+
+test('phone alerts (DESK_ALERTS): GOLDEN fills and rug sales by default; open, launch, radar or all on request', () => {
+  assert.deepEqual([...alertKinds(undefined)].sort(), ['golden', 'rug']);
+  assert.deepEqual([...alertKinds('')].sort(), ['golden', 'rug']);
+  assert.deepEqual([...alertKinds(' Golden, OPEN ,rug')].sort(), ['golden', 'open', 'rug']);
+  assert.deepEqual([...alertKinds('all')].sort(), ['golden', 'launch', 'open', 'radar', 'rug']);
+  assert.deepEqual([...alertKinds('nonsense')].sort(), ['golden', 'rug'], 'nothing valid named: the default');
 });

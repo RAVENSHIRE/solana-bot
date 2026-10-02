@@ -69,14 +69,20 @@ export interface DeskDeps {
   /** Phone/desktop alerts (ntfy, Telegram) for launch-radar finds and entry-ready signals. */
   notify?: (title: string, body: string) => Promise<void>;
   /**
-   * Radar news on the phone too (a launch shortlisted, a radar rug, an impersonator). Off by default: on 1–2 Oct, 63 of
-   * 68 shortlist alerts were dead launches the desk never bought. Buy signals and held-position rugs are always sent.
+   * Which alerts reach the phone (DESK_ALERTS). Default GOLDEN fills and rug sales of held positions only: on 1–2 Oct,
+   * 175 alerts in 5 h were ~95 % dead launches — radar news 88, OPEN breakouts 65 (no exit made them pay at a realistic
+   * fill), LAUNCH entry-ready 23. Everything stays in the dashboard and the event log.
    */
-  alertRadar?: boolean;
+  alerts?: ReadonlySet<AlertKind>;
   /** LIVE: who signs (default PHANTOM) and how many new entries one LIVE session may open. */
   signerKind?: LiveSignerKind;
   liveMaxEntries?: number;
 }
+
+/** Phone alert kinds, for DESK_ALERTS. */
+export type AlertKind = 'golden' | 'rug' | 'open' | 'launch' | 'radar';
+export const ALERT_KINDS: readonly AlertKind[] = ['golden', 'rug', 'open', 'launch', 'radar'];
+export const DEFAULT_ALERTS: ReadonlySet<AlertKind> = new Set<AlertKind>(['golden', 'rug']);
 
 interface Deep { at: number; onchain: OnchainEvidence; social: SocialEvidence }
 interface Staged { found: Discovered; pair: DexPair; tier: Tier; metrics: ReturnType<typeof pairMetrics>; crashHint: boolean; ruleHints: StrategyId[]; launch: Launch | null;
@@ -574,7 +580,7 @@ export class DeskEngine {
     }
     if (this.strategies.LAUNCH.enabled && !stopped()) {
       const signals = staged.list.filter(s => s.launch).map(s => this.assess(s, started)).filter(c => c.launch?.signal.signal);
-      for (const c of signals) this.alertOnce(`entry:${c.mint}`, `LAUNCH entry-ready: ${c.symbol ?? c.mint.slice(0, 6)}`, `${c.launch!.signal.summary}\n${fomoUrl(c.mint)}`);
+      for (const c of signals) this.alertOnce(`entry:${c.mint}`, `LAUNCH entry-ready: ${c.symbol ?? c.mint.slice(0, 6)}`, `${c.launch!.signal.summary}\n${fomoUrl(c.mint)}`, 'launch');
       const ledger = this.ledgerOf('LAUNCH');
       if (ledger && signals.length) await this.maybeEnter('LAUNCH', ledger, signals, stopped);
     }
@@ -953,7 +959,7 @@ export class DeskEngine {
       this.event('EXIT', `${id} · exit signal: ${reason}`, ctx);
       if (reason.startsWith('RUG')) {
         void this.d.launches?.markRug?.(p.mint, reason).catch(() => undefined);
-        this.alertOnce(`rug:${p.mint}`, `${p.symbol ?? p.mint.slice(0, 6)}: RUG — selling`, `${reason}\n${fomoUrl(p.mint)}`);
+        this.alertOnce(`rug:${p.mint}`, `${p.symbol ?? p.mint.slice(0, 6)}: RUG — selling`, `${reason}\n${fomoUrl(p.mint)}`, 'rug');
       }
       await this.execute('SELL', { strategy: id, mint: p.mint, symbol: p.symbol, decimals: p.decimals, pairAddress: p.pairAddress, heldRaw: BigInt(p.qtyRaw) }, ledger, stopped);
     }
@@ -1014,7 +1020,7 @@ export class DeskEngine {
       const age = Math.max(1, Math.round((now - state.at) / 60_000));
       this.event('QUALIFIED', `OPEN screen: ${state.symbol} "${state.name}" ${age} min old · ${state.detail}`, ctx);
       this.alertOnce(`open:${state.mint}`, `OPEN: ${state.symbol} broke out at $${((state.signalUsd ?? 0) / 1000).toFixed(1)}K`,
-        `${state.name} · ${state.detail}${launch?.insiders ? ` · ${launch.insiders.detail}` : ''}\n${fomoUrl(state.mint)}`);
+        `${state.name} · ${state.detail}${launch?.insiders ? ` · ${launch.insiders.detail}` : ''}\n${fomoUrl(state.mint)}`, 'open');
     }
     // A breakout is traded fresh: start a scan now instead of waiting for the next one.
     if (fresh.length && this.strategies.OPEN.enabled && !this.work) this.nextScanAt = Date.now();
@@ -1062,7 +1068,7 @@ export class DeskEngine {
       this.goldenSignals.set(s.mint, { s, launch, at: now }); fresh.push(s);
       this.event('QUALIFIED', `GOLDEN POCKET: ${label} · ${s.entry.detail}`, ctx);
       this.alertOnce(`golden:${s.mint}`, `GOLDEN POCKET: ${label} at $${(s.entry.price / 1000).toFixed(1)}K`,
-        `${s.entry.kind === 'RETEST' ? 'Break and retest' : 'Only up'} · ${s.entry.detail}\n${fomoUrl(s.mint)}`);
+        `${s.entry.kind === 'RETEST' ? 'Break and retest' : 'Only up'} · ${s.entry.detail}\n${fomoUrl(s.mint)}`, 'golden');
     }
     if (fresh.length && this.strategies.GOLDEN.enabled && !this.work) this.nextScanAt = Date.now();
     for (const [mint, g] of this.goldenSignals) if (now - g.at > 30 * 60_000 && !this.heldBy(mint)) this.goldenSignals.delete(mint);
@@ -1089,7 +1095,7 @@ export class DeskEngine {
         if (l.rug && !this.launchAlerts.has(`rugseen:${l.mint}`)) {
           this.launchAlerts.add(`rugseen:${l.mint}`);
           this.event('FILTERED', `LAUNCH radar: ${l.symbol} ${l.rug}${this.heldBy(l.mint) ? ' — selling' : ' — never bought'}`, ctx);
-          this.alertOnce(`rugradar:${l.mint}`, `LAUNCH radar: ${l.symbol} RUG`, `${l.rug}\n${fomoUrl(l.mint)}`, true);
+          this.alertOnce(`rugradar:${l.mint}`, `LAUNCH radar: ${l.symbol} RUG`, `${l.rug}\n${fomoUrl(l.mint)}`, 'radar');
           continue;
         }
         // Re-reads of the X page and website after the shortlist: a confirmed CA or an exposed impersonator is news.
@@ -1098,7 +1104,7 @@ export class DeskEngine {
         this.launchCa.set(l.mint, l.ca.status);
         if (l.ca.status === 'IMPERSONATOR') {
           this.event('FILTERED', `LAUNCH radar: ${l.symbol} ${l.ca.detail} — never bought`, ctx);
-          this.alertOnce(`fake:${l.mint}`, `LAUNCH radar: ${l.symbol} is an IMPERSONATOR`, `${l.ca.detail}\n${fomoUrl(l.mint)}`, true);
+          this.alertOnce(`fake:${l.mint}`, `LAUNCH radar: ${l.symbol} is an IMPERSONATOR`, `${l.ca.detail}\n${fomoUrl(l.mint)}`, 'radar');
         } else this.event('WATCHLIST', `LAUNCH radar: ${l.symbol} ${l.ca.detail} (${age} min old) · score ${l.score}`, ctx);
         continue;
       }
@@ -1113,7 +1119,7 @@ export class DeskEngine {
       }
       l.shortlistedAt = Date.now(); this.launchList.set(l.mint, l); this.launchCa.set(l.mint, l.ca.status);
       this.event('WATCHLIST', `LAUNCH radar: ${l.symbol} "${l.name}" ${age} min old · score ${l.score} · ${l.reasons.join(' · ')}`, ctx);
-      this.alertOnce(`radar:${l.mint}`, `LAUNCH radar: ${l.symbol} (${age} min old)`, `${l.name} · ${l.reasons.join(' · ')}\n${fomoUrl(l.mint)}`, true);
+      this.alertOnce(`radar:${l.mint}`, `LAUNCH radar: ${l.symbol} (${age} min old)`, `${l.name} · ${l.reasons.join(' · ')}\n${fomoUrl(l.mint)}`, 'radar');
     }
     for (const [mint, l] of this.launchList) if (Date.now() - l.at > 2 * 60 * 60_000) { this.launchList.delete(mint); this.launchCa.delete(mint); }
     if (this.launchCopycats.size > 2_000) this.launchCopycats.delete(this.launchCopycats.keys().next().value!);
@@ -1142,12 +1148,12 @@ export class DeskEngine {
     return `COPYCAT of ${original.baseToken.symbol ?? '?'} ${mint.slice(0, 4)}…${mint.slice(-4)} ($${Math.round(original.marketCap ?? original.fdv ?? 0).toLocaleString('en-US')}, ${Math.round((l.at - original.pairCreatedAt!) / 60_000)} min older)`;
   }
 
-  /** One phone alert per key. Radar news (not a buy signal, nothing held) goes out only with DESK_ALERT_RADAR=true. */
-  private alertOnce(key: string, title: string, body: string, radar = false): void {
+  /** One phone alert per key, for the kinds DESK_ALERTS selects (default: GOLDEN fills and rug sales of held positions). */
+  private alertOnce(key: string, title: string, body: string, kind: AlertKind): void {
     if (this.launchAlerts.has(key) || !this.d.notify) return;
     this.launchAlerts.add(key);
     if (this.launchAlerts.size > 5_000) this.launchAlerts.delete(this.launchAlerts.values().next().value!);
-    if (radar && !this.d.alertRadar) return;
+    if (!(this.d.alerts ?? DEFAULT_ALERTS).has(kind)) return;
     void this.d.notify(title, body).catch(() => undefined);
   }
 

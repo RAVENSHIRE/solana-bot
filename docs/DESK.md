@@ -162,7 +162,7 @@ How it works:
 - OPEN holds through graduation (no pre-graduation exit). Sizing: base entry ($2), TEST sleeve `OPEN_CAPITAL_USD` (default $15, enough for two positions with their adds), at most 2 positions, no re-entry for 4 h. ON in TEST, OFF in LIVE until you switch it on.
 - The *Opening screen* panel shows every strong open: opening candle, low, now, peak, status (watching, BREAKOUT, rug, graduated first, no breakout) and whether OPEN bought it. The sources line counts launches in their first minute, strong opens, breakouts and rugs.
 
-These rules come from one example and have not been backtested: watch the OPEN ledger in TEST first.
+These rules come from one example. The alert audit of 1–2 Oct (65 breakouts, see *Which desk alerts reach the phone*) found no exit that makes them pay reliably at a realistic fill, and OPEN lost on all 7 TEST trades (−$11.77): its breakout alerts are off the phone by default (`DESK_ALERTS`), and it should stay in TEST.
 
 ### GOLDEN POCKET: graduated pools, only up and break and retest
 
@@ -323,7 +323,17 @@ How it runs:
   - `DESK_NTFY_TOPIC=<long random name>`, then subscribe to that topic in the free ntfy app;
   - `DESK_TELEGRAM_BOT_TOKEN` and `DESK_TELEGRAM_CHAT_ID` for Telegram.
 
-Which desk alerts reach the phone: buy signals (OPEN breakout, GOLDEN POCKET fill, LAUNCH entry-ready) and a rug sale of a position you hold. Radar news — a launch shortlisted, a radar rug, an impersonator, none of them bought — stays in the dashboard unless `DESK_ALERT_RADAR=true`: on 1–2 Oct, 63 of 68 shortlist alerts were launches that died without the desk buying them.
+Which desk alerts reach the phone: `DESK_ALERTS` in `.env`, a comma list of `golden` (GOLDEN POCKET fills), `rug` (a held position sold as a rug), `open` (OPEN breakouts), `launch` (LAUNCH entry-ready) and `radar` (a launch shortlisted, a radar rug, an impersonator), or `all`. The default is `golden,rug`. Everything still shows in the dashboard and the event log.
+
+Why that default — the alert audit of 1–2 Oct (175 phone alerts in 5 h, what each token did in the hour after its alert, Birdeye minute candles):
+
+| Alert | Alerts | Dead or −70 % now | Best exit at a realistic fill (alert price +2 %) |
+|---|---|---|---|
+| Radar news | 88 | 63 of 68 shortlists | — (never bought) |
+| OPEN breakout | 65 | 59 | −47.6 % per trade with OPEN's exits; +1.6 % at best (take profit +100 %, stop −30 %), one half −11 %, the other +14 % |
+| LAUNCH entry-ready | 23 | 23 | −22 % with OPEN-style exits; +8–9 % with a trailing stop, carried by two outliers |
+
+Most of the spike happens inside the minute the alert goes out: bought at that minute's high, every exit loses (OPEN −8 … −19 % per trade).
 
 **Sell automatically** is available only for the local-key wallet (`DESK_LIVE_SIGNER=local-key`).
 
