@@ -87,6 +87,7 @@ const SECTIONS = [
   { id: 'desk-overview', label: 'Overview', icon: 'grid' },
   { id: 'desk-strategies', label: 'Strategies', icon: 'target' },
   { id: 'desk-opening', label: 'Opening screen', icon: 'chart' },
+  { id: 'desk-golden', label: 'Golden pocket', icon: 'target' },
   { id: 'desk-launches', label: 'Launches', icon: 'chart' },
   { id: 'desk-candidates', label: 'Candidates', icon: 'list' },
   { id: 'desk-positions', label: 'Positions', icon: 'wallet' },

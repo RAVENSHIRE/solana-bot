@@ -71,6 +71,7 @@ export function DeskPanel({ t }: { t: TradingSession }) {
         <PreflightCard p={d.preflights[0] ?? null} live={live} />
       </div>
       <div id="desk-opening" className="desk-anchor"><OpeningScreen d={d} /></div>
+      <div id="desk-golden" className="desk-anchor"><GoldenPocket d={d} /></div>
       <div id="desk-launches" className="desk-anchor"><LaunchRadar d={d} /></div>
       <div id="desk-candidates" className="desk-anchor"><Candidates list={d.candidates} probe={live ? null : mint => void t.desk('probe', { mint })} busy={!!t.busy} /></div>
       <div id="desk-positions" className="desk-anchor"><Positions d={d} busy={!!t.busy || !t.online} exit={p => {
@@ -636,6 +637,31 @@ function Watch({ t, d }: { t: TradingSession; d: DeskStatus }) {
         {!w.rules.length && <tr><td colSpan={8}>Nothing watched yet. Add a token you hold, e.g. with a market-cap floor at your exit level.</td></tr>}</tbody></table></div>
     {w.alerts.length > 0 && <details open><summary>Alerts ({w.alerts.length})</summary><ul className="watch-alerts">{w.alerts.slice(0, 10).map(a =>
       <li key={`${a.ruleId}-${a.at}`}><strong>{ago(a.at)} · {a.title}</strong> — {a.body}</li>)}</ul></details>}
+  </section>;
+}
+
+/**
+ * GOLDEN POCKET: every fresh graduation's PumpSwap pool, read on chain every 4 s. The only-up start (two rising green
+ * minutes, bought within 12% of candle 2) is alerted and bought; the break and retest of the old high (66hK2) is shown,
+ * and bought only when switched on (it was break-even in the backtest).
+ */
+function GoldenPocket({ d }: { d: DeskStatus }) {
+  const g = d.golden, list = g?.list ?? [], k = (v: number | null | undefined) => v == null ? '--' : v >= 1e6 ? `$${(v / 1e6).toFixed(2)}M` : `$${(v / 1000).toFixed(1)}K`;
+  const mins = (at: number) => `${Math.max(0, Math.round((Date.now() - at) / 60_000))} min`;
+  const phase: Record<string, string> = { IMPULSE: 'first impulse', DIP: 'dipped', BROKEN_OUT: 'broke out, waiting for the retest', EXPIRED: 'no entry in time', FAILED: 'failed' };
+  const kinds = g?.entryKinds ?? ['ONLY_UP'];
+  return <section className="panel desk-card" aria-label="Golden pocket">
+    <div className="card-head"><h3>Golden pocket · graduated pools: only up, and break and retest</h3>
+      <small>{g ? `${g.counts.watched ?? 0} pools watched · ${g.counts.DIP ?? 0} dipped · ${g.counts.BROKEN_OUT ?? 0} broke out · ${g.counts.ENTRY ?? 0} filled`
+        : 'Runs while TEST or LIVE scans.'} Market caps from each pool's reserves every 4 s. Bought: {kinds.map(x => x === 'RETEST' ? 'break and retest' : 'only up').join(' and ')}.</small></div>
+    <div className="wallet-table"><table><thead><tr><th>Token</th><th>Since graduation</th><th>High → dip → breakout</th><th>Now</th><th>Peak</th><th>Pattern</th><th>Fill / stop</th><th>GOLDEN</th></tr></thead>
+      <tbody>{list.map(x => <tr key={x.mint} className={x.entry && kinds.includes(x.entry.kind) ? 'launch-ready' : x.phase === 'FAILED' ? 'launch-fake' : ''}>
+        <td title={x.mint}><strong>{x.symbol ?? `${x.mint.slice(0, 4)}…${x.mint.slice(-4)}`}</strong> <Fomo mint={x.mint} /></td>
+        <td>{mins(x.startAt)}</td><td><small>{k(x.highUsd)} → {k(x.lowUsd)} → {k(x.topUsd)}</small></td><td>{k(x.lastUsd)}</td><td>{k(x.peakUsd)}</td>
+        <td title={x.detail}><small>{x.entry ? (x.entry.kind === 'RETEST' ? 'BREAK AND RETEST' : 'ONLY UP') : phase[x.phase] ?? x.phase}</small></td>
+        <td><small>{x.entry ? `${k(x.entry.fillUsd)} / ${k(x.entry.stopUsd)}` : '--'}</small></td>
+        <td><small>{x.held ? `held by ${x.held}` : x.entry && !kinds.includes(x.entry.kind) ? 'shown only' : x.verdict ?? (x.entry ? 'waiting for market data' : '--')}</small></td></tr>)}
+        {!list.length && <tr><td colSpan={8}>No graduation watched yet.</td></tr>}</tbody></table></div>
   </section>;
 }
 

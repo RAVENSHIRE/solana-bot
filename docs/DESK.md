@@ -164,6 +164,36 @@ How it works:
 
 These rules come from one example and have not been backtested: watch the OPEN ledger in TEST first.
 
+### GOLDEN POCKET: graduated pools, only up and break and retest
+
+From 66hK2 (BULLISHCAT) on 1 Oct: graduated → **$163K** (the first high) → **$108K** (the dip) → **$225K** (breakout) → back to **$160K** (the old high, the "golden pocket") → **$642K**. The shape counts, not the level: the same ratios on a $20K curve or a $200K pool. Two variants, both read from every fresh graduation's PumpSwap pool:
+
+1. **Only up (bought):** the pool's first **2 one-minute candles both close green, each above the previous close**. Bought from the third minute on, up to **12 % above candle 2's close**; the stop is **5 % under candle 2's close**; a **25 % trailing stop after +50 %**; sold after **60 minutes** at the latest.
+2. **Break and retest (shown, not bought by default):** a first high, a dip of 15–50 % (deeper is a failed pattern), a breakout to ≥ 1.1× the first high, then a return into the pocket — from the old high +3 % down to 12 % under it, or the 0.5–0.65 retracement of the dip → breakout swing, whichever comes first — within 20 minutes. The stop is 5 % under the pocket; the take profit 5 % under the breakout high. `GOLDEN_RETEST_ENTRIES=true` in `.env` buys it too.
+
+Backtest (`npm run desk:golden`, 12 h of graduations on 1 Oct, 533 pools, Birdeye minute candles, $2 per trade with fees, impact and 3 % stop slippage, judged by the weaker time half):
+
+| Variant | Trades | Win | Mean / trade | Profit factor | Halves |
+|---|---|---|---|---|---|
+| **Only up as deployed:** 2 green, stop −5 %, trail 25 % after +50 %, 60 min | 310 | 17 % | **+7.9 %** | 2.0 | weaker half +7 % |
+| Only up, same, only with ≥ $30K traded in the first minutes | 262 | 17 % | +9.8 % | 2.3 | +9 % / +10 % |
+| Only up, same, 30 min hold | 310 | — | +13.7 % | 2.9 | weaker half +4 % |
+| Only up, same, 120–240 min hold | 310 | — | −1 … −2 % | 0.8 | — |
+| Break and retest, your levels (old high −12 %, stop 5–10 % under, sell 5–10 % under the resistance) | 84 | 24–31 % | −5 … −11 % | 0.4–0.7 | both negative |
+| Break and retest, best of 768 rule sets | 120 | 51 % | +0.1 % | 1.0 | 0 % / 0 % |
+| Baseline: every pool bought 10 min after graduation | 529 | 20–39 % | −3 … −6 % | 0.7 | — |
+
+- The only-up result holds across its neighbours: 3 green candles, any volume filter ($0–60K in the first minutes; the pool reserves give no volume, so none is applied), 30–60 min holds. It does **not** hold past 2 hours, and a 10 % stop is worse than 5 %. Most trades lose about 9 % (the stop); a few runners (+100 … +700 %) carry it.
+- The retest caught 66hK2 (+37 %) and FIX6900 (+48 %), but over all pools about half the retests fall straight through the stop.
+- One day of data: watch the GOLDEN ledger in TEST before switching it on in LIVE.
+
+How it works:
+- Every graduation is read from the chain (the migration authority, as for CRASH); its PumpSwap pool address is derived (the canonical pool of the mint, SOL- or PUMP-quoted) and both reserves are read **every 4 s** (one RPC call per 50 pools). Market cap = quote reserve ÷ token reserve × 1B supply × SOL (or PUMP) price.
+- A fill is alerted at once ("GOLDEN POCKET: ABC at $112.0K") and starts a scan; GOLDEN buys while the fill is under 3 minutes old, the pool is above the pattern stop and not more than 8 % above the zone's top, no rug sign is known, the largest wallet holds at most 20 % when known, and the safety gates pass. A retest that is not bought is listed in the panel and the event log, never alerted.
+- The pattern's stop (and a retest's take profit) are stored on the position as market caps and checked against the pool's reserves every 3 s: `POCKET_STOP` / `RESISTANCE_TARGET`. A 40 % stop loss stays as a backstop.
+- Sizing: base entry ($2), TEST sleeve `GOLDEN_CAPITAL_USD` (default $15), at most 2 positions, no re-entry for 4 h. ON in TEST, OFF in LIVE until you switch it on.
+- The *Golden pocket* panel shows every watched pool: minutes since graduation, high → dip → breakout, now, peak, pattern state, fill and stop, and GOLDEN's verdict.
+
 ### LAUNCH: the launch radar (the @glabuz pattern)
 
 On 1 Oct @glabuz turned $500 into ~$15K on Meme Industries (`FFrRBPP9…pump`) by entering at ~$20K:
@@ -358,6 +388,14 @@ npm run desk:backtest -- --hours 12 [--size 2] [--fixed-usd 0.02] [--mints A,B] 
 ```
 
 Reads every pump.fun graduation of the last hours from the chain (the whole universe, not only tokens that pumped), each pool's depth and 24 h volume (DexScreener) and its minute candles (GeckoTerminal), then applies the CRASH entry rule minute by minute and replays each entry. Every trade pays sized impact, 0.3 % venue fee per side, fixed network costs and a 3 % slippage on stop-type exits. It searches entry rules (pool age, 5-minute move, volume, market cap, pullback entry) and exit rules (stop, take profit, trailing, profit lock, hold time) and ranks them by the weaker of two time halves, so a rule that only worked in one stretch does not win. `--mints` prints, for named tokens, what the pool did and when the current and best rules would have traded. Buy/sell ratio and holder concentration are not in candles and are not modelled. Only `RPC_ENDPOINTS` is read from `.env` (through the desk allowlist); everything downloaded is cached in `data-desk/backtest-cache`.
+
+GOLDEN POCKET has its own backtest on the same graduations:
+
+```
+npm run desk:golden -- --hours 12 [--source birdeye|gecko] [--min-volume 5000] [--mints A,B] [--cached-only] [--out golden.json]
+```
+
+It runs the break and retest and the only-up variant over a grid of pattern rules × exits (stop, trailing stop, take profit under the resistance, hold time), next to your exact rules and a baseline (every pool bought 10 minutes after graduation), ranks by the weaker time half, prints an only-up sensitivity table, and for `--mints` the pattern each rule set saw and the trade it made. Candles come from Birdeye by default (`BIRDEYE_API_KEY`, token prices in USD, one request per second, about 35 credits per token — the free plan has 30,000 a month, so a 12 h run uses most of what is left); `--source gecko` uses GeckoTerminal instead (free, but about one pool per 20 s while the desk runs on the same connection). Every download is cached and reused (`--cached-only` never downloads).
 
 ### Costs per trade (and what the desk does about them)
 

@@ -811,7 +811,7 @@ test('custom strategy specs are validated: built-in ids, inverted bands, slippag
   const ok = parseRuleSpec(RUNNER_PRESET);
   assert.equal(ok.entry.minHolders, 1_000); assert.equal(ok.exits.takeProfitPct, null); assert.equal(ok.entry.requireXAccount, false);
   const bad = (patch: (s: RuleSpecInput) => void, re: RegExp) => { const s = structuredClone(RUNNER_PRESET); patch(s); assert.throws(() => parseRuleSpec(s), re); };
-  bad(s => { s.id = 'CRASH'; }, /^Error: INVALID_STRATEGY_SPEC: id: FAIR, CRASH, LAUNCH and OPEN are built in/);
+  bad(s => { s.id = 'CRASH'; }, /^Error: INVALID_STRATEGY_SPEC: id: FAIR, CRASH, LAUNCH, OPEN and GOLDEN are built in/);
   bad(s => { s.id = 'x y'; }, /INVALID_STRATEGY_SPEC: id/);
   bad(s => { s.entry.minMarketCapUsd = 30_000_000; }, /market cap: minimum above maximum/);
   bad(s => { s.sizing.slippageBps = 900; s.sizing.exitSlippageBps = 900; }, /must stay below/);
@@ -1062,6 +1062,47 @@ test('OPEN screen: a copycat breakout (bigger, older namesake) is never alerted 
     assert.deepEqual(await engine.openingPass(), []);
     assert.deepEqual(alerts, []);
     assert.ok(engine.events.list().some(e => /^OPEN screen: ABC broke out \(x\) but COPYCAT of ABC .+ \(\$520,000, \d+ min older\) — no alert, never bought$/.test(e.message)));
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('GOLDEN POCKET: an only-up fill on a fresh pool is alerted, bought in TEST with the pattern stop, and sold when the pool trades under it; a retest is shown only', async () => {
+  const pool = { pairCreatedAt: Date.now() - 3 * 60_000, priceChange: { m5: 30, h1: 30 }, volume: { m5: 60_000, h1: 60_000 }, marketCap: 113_000, fdv: 113_000 };
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-golden-')), { shared } = world(pool);
+  try {
+    const at = Date.now();
+    const entry = { kind: 'ONLY_UP' as const, at, price: 112_000, stop: 104_500, resistance: 112_000, zone: [110_000, 123_200] as [number, number],
+      detail: 'first 2 candles only up to $112.0K → back to $112.0K, within 12% of candle 2 ($110.0K), stop $104.5K' };
+    const retest = { ...entry, kind: 'RETEST' as const, detail: '$162.8K → $107.7K → $225.0K → retest at $167.7K' };
+    const watch = { mint: MINT, symbol: 'ABC', startAt: at - 3 * 60_000, state: { phase: 'ENTRY', high: null, low: null, top: null, detail: entry.detail, entry },
+      pool: 'P', vaults: null, resolveTries: 0, lastUsd: 113_000, lastSampleAt: Date.now(), peakUsd: 113_000 };
+    const other = key(81).toBase58();
+    let pending = [{ mint: MINT, symbol: 'ABC', entry, at, pool: 'P' }, { mint: other, symbol: 'RET', entry: retest, at, pool: 'Q' }];
+    const held: string[][] = [];
+    const tracker = { watchGraduations: () => undefined, hold: (m: string[]) => { held.push(m); }, poll: async () => { const out = pending; pending = []; return out; },
+      get: (m: string) => m === MINT ? { ...watch, lastSampleAt: Date.now() } : null, list: () => [watch], counts: () => ({ IMPULSE: 4, DIP: 2, BROKEN_OUT: 1, ENTRY: 1, FAILED: 9, EXPIRED: 0, watched: 17 }) };
+    const alerts: string[] = [];
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }), golden: tracker as never,
+      notify: async title => { alerts.push(title); } });
+    for (const id of ['FAIR', 'CRASH', 'LAUNCH', 'OPEN']) engine.setStrategy(id, false);
+    engine.start(); await engine.pulse();
+    const fresh = await engine.goldenPass();
+    assert.deepEqual(fresh.map(f => f.symbol), ['ABC'], 'the retest is not a GOLDEN entry by default');
+    assert.deepEqual(alerts, ['GOLDEN POCKET: ABC at $112.0K']);
+    assert.ok(engine.events.list().some(e => /^GOLDEN POCKET \(shown only\): RET · \$162\.8K/.test(e.message)));
+    await engine.pulse();
+    let view = engine.status({ connected: false, address: null });
+    assert.equal(view.positions.length, 1, view.candidates.find(c => c.mint === MINT)?.golden?.signal.summary); assert.equal(view.positions[0]!.strategy, 'GOLDEN');
+    assert.ok(engine.events.list().some(e => /^GOLDEN POCKET entry selected: first 2 candles only up/.test(e.message)));
+    assert.match(await fs.readFile(path.join(dir, 'ledger-PAPER-GOLDEN.json'), 'utf8'), /"stopUsd": 104500/);
+    assert.equal(view.golden!.counts.watched, 17); assert.equal(view.golden!.list[0]!.entry!.stopUsd, 104_500); assert.deepEqual(view.golden!.entryKinds, ['ONLY_UP']);
+    await engine.goldenPass();
+    assert.ok(held.at(-1)!.includes(MINT), 'a held token stays sampled for its exits');
+    // The pool trades under the pattern stop: sold at once, whatever the percentage loss.
+    watch.lastUsd = 104_000;
+    await engine.pulse();
+    view = engine.status({ connected: false, address: null });
+    assert.equal(view.positions.length, 0);
+    assert.ok(engine.events.list().some(e => /^GOLDEN · exit signal: POCKET_STOP \$104,000 ≤ \$104,500/.test(e.message)));
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 

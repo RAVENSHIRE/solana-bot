@@ -193,7 +193,7 @@ const tokenAmount = (data: Buffer | null | undefined) => data && data.length >= 
 
 export const GOLDEN = Object.freeze({
   pollMs: 4_000,
-  /** Pools and curves watched at once; the oldest finished ones go first. */
+  /** Pools watched at once; the oldest finished ones go first. */
   maxTracked: 400,
   /** A pool whose address cannot be read is given up after this many polls. */
   maxResolveTries: 5,
@@ -201,59 +201,46 @@ export const GOLDEN = Object.freeze({
   keepMs: 30 * 60_000,
 });
 
-export type GoldenStage = 'CURVE' | 'AMM';
 export interface GoldenWatch {
-  mint: string; symbol: string | null; stage: GoldenStage; startAt: number; state: PocketState;
+  mint: string; symbol: string | null; startAt: number; state: PocketState;
   pool: string | null; vaults: { base: string; quote: string; quoteMint: string } | null; resolveTries: number;
   lastUsd: number | null; lastSampleAt: number | null; peakUsd: number | null;
 }
-export interface GoldenSignal { mint: string; symbol: string | null; stage: GoldenStage; entry: PocketEntry; at: number; pool: string | null }
+export interface GoldenSignal { mint: string; symbol: string | null; entry: PocketEntry; at: number; pool: string | null }
 type Rpc = { execute<T>(label: string, fn: (c: Connection) => Promise<T>): Promise<T> };
 
 /**
- * Watches every fresh graduation's PumpSwap pool (both reserves read in one call per 50 pools every few seconds)
- * and the opening screen's strong curves (their samples are passed in), runs each through the pattern, and reports
- * each fill once. Held tokens stay sampled for the exits. Never throws.
+ * Watches every fresh graduation's PumpSwap pool from its graduation on (both reserves of up to 50 pools in one
+ * call every few seconds), runs each through the pattern, and reports each fill once. Held tokens stay sampled for
+ * the exits. Never throws.
  */
 export class GoldenTracker {
   private readonly watches = new Map<string, GoldenWatch>();
   private readonly held = new Set<string>();
-  private pending: GoldenSignal[] = [];
-  constructor(private readonly rpc: Rpc, private readonly rules: Record<GoldenStage, PocketRules>) {}
+  constructor(private readonly rpc: Rpc, private readonly rules: PocketRules) {}
 
   /** Fresh graduations start being watched from their graduation time. */
   watchGraduations(list: Array<{ mint: string; at: number; symbol?: string | null }>, now: number): void {
     for (const g of list) {
       const known = this.watches.get(g.mint);
-      if (known?.stage === 'AMM' || now - g.at > this.rules.AMM.maxPatternMin * 60_000) continue;
-      this.watches.set(g.mint, { mint: g.mint, symbol: g.symbol ?? known?.symbol ?? null, stage: 'AMM', startAt: g.at, state: pocketState(g.at), pool: null, vaults: null,
+      if (known) { known.symbol ??= g.symbol ?? null; continue; }
+      if (now - g.at > this.rules.maxPatternMin * 60_000) continue;
+      this.watches.set(g.mint, { mint: g.mint, symbol: g.symbol ?? null, startAt: g.at, state: pocketState(g.at), pool: null, vaults: null,
         resolveTries: 0, lastUsd: null, lastSampleAt: null, peakUsd: null });
     }
     this.prune(now);
   }
-  /** A curve market-cap sample from the opening screen (strong opens only). */
-  curveSample(c: { mint: string; symbol: string; at: number }, sampleAt: number, usd: number): void {
-    let w = this.watches.get(c.mint);
-    if (w?.stage === 'AMM') return;
-    if (!w) { w = { mint: c.mint, symbol: c.symbol, stage: 'CURVE', startAt: c.at, state: pocketState(c.at), pool: null, vaults: null, resolveTries: 0, lastUsd: null, lastSampleAt: null, peakUsd: null }; this.watches.set(c.mint, w); }
-    this.sample(w, sampleAt, usd);
-  }
   /** Mints the desk holds: sampled until sold, whatever their pattern did. */
   hold(mints: string[]): void { this.held.clear(); for (const m of mints) this.held.add(m); }
 
-  private sample(w: GoldenWatch, at: number, usd: number): void {
-    w.lastUsd = usd; w.lastSampleAt = at; w.peakUsd = Math.max(w.peakUsd ?? 0, usd);
-    const entry = pocketStep(w.state, this.rules[w.stage], { t: at, o: usd, h: usd, l: usd, c: usd });
-    if (entry) this.pending.push({ mint: w.mint, symbol: w.symbol, stage: w.stage, entry, at, pool: w.pool });
-  }
   private active(w: GoldenWatch): boolean {
     return this.held.has(w.mint) || w.state.phase === 'IMPULSE' || w.state.phase === 'DIP' || w.state.phase === 'BROKEN_OUT';
   }
   private prune(now: number): void {
     for (const [mint, w] of this.watches) {
-      const end = w.startAt + this.rules[w.stage].maxPatternMin * 60_000;
-      if (!this.held.has(mint) && !this.active(w) && now - Math.min(end, w.lastSampleAt ?? end) > GOLDEN.keepMs) this.watches.delete(mint);
-      else if (!this.held.has(mint) && now > end + GOLDEN.keepMs) this.watches.delete(mint);
+      if (this.held.has(mint)) continue;
+      const end = w.startAt + this.rules.maxPatternMin * 60_000;
+      if (now > end + GOLDEN.keepMs || (!this.active(w) && now - (w.lastSampleAt ?? w.startAt) > GOLDEN.keepMs)) this.watches.delete(mint);
     }
     if (this.watches.size > GOLDEN.maxTracked) {
       const drop = [...this.watches.values()].filter(w => !this.held.has(w.mint)).sort((a, b) => Number(this.active(a)) - Number(this.active(b)) || a.startAt - b.startAt)
@@ -262,11 +249,11 @@ export class GoldenTracker {
     }
   }
 
-  /** Reads every watched pool; returns the fills since the last poll (curve fills included). */
+  /** Reads every watched pool; returns the fills of this read. `quoteUsd` prices the pool's quote token (SOL, PUMP). */
   async poll(now: number, quoteUsd: (quoteMint: string) => number | null): Promise<GoldenSignal[]> {
-    const amm = [...this.watches.values()].filter(w => w.stage === 'AMM' && this.active(w));
+    const live = [...this.watches.values()].filter(w => this.active(w));
     // New pools: the canonical SOL- and PUMP-quoted addresses, whichever exists.
-    const unresolved = amm.filter(w => !w.vaults).slice(0, 50);
+    const unresolved = live.filter(w => !w.vaults).slice(0, 50);
     if (unresolved.length) {
       const keys = unresolved.flatMap(w => [pumpSwapPool(w.mint, WSOL_MINT), pumpSwapPool(w.mint, PUMP_QUOTE_MINT)]);
       try {
@@ -282,7 +269,8 @@ export class GoldenTracker {
         });
       } catch { /* RPC outage: retried next poll */ }
     }
-    const ready = amm.filter(w => w.vaults && QUOTE_DECIMALS[w.vaults.quoteMint] !== undefined && quoteUsd(w.vaults.quoteMint));
+    const ready = live.filter(w => w.vaults && QUOTE_DECIMALS[w.vaults.quoteMint] !== undefined && quoteUsd(w.vaults.quoteMint));
+    const out: GoldenSignal[] = [];
     for (let i = 0; i < ready.length; i += 50) {
       const batch = ready.slice(i, i + 50);
       let infos: Array<{ data: Buffer } | null>;
@@ -293,11 +281,13 @@ export class GoldenTracker {
         const base = tokenAmount(infos[2 * j]?.data ? Buffer.from(infos[2 * j]!.data) : null), quote = tokenAmount(infos[2 * j + 1]?.data ? Buffer.from(infos[2 * j + 1]!.data) : null);
         const q = w.vaults!.quoteMint, usd = quoteUsd(q);
         if (!base || !quote || !usd) return;
-        this.sample(w, now, (quote / 10 ** QUOTE_DECIMALS[q]!) / (base / 10 ** BASE_DECIMALS) * PUMP_SUPPLY * usd);
+        const cap = (quote / 10 ** QUOTE_DECIMALS[q]!) / (base / 10 ** BASE_DECIMALS) * PUMP_SUPPLY * usd;
+        w.lastUsd = cap; w.lastSampleAt = now; w.peakUsd = Math.max(w.peakUsd ?? 0, cap);
+        const entry = pocketStep(w.state, this.rules, { t: now, o: cap, h: cap, l: cap, c: cap });
+        if (entry) out.push({ mint: w.mint, symbol: w.symbol, entry, at: now, pool: w.pool });
       });
     }
     this.prune(now);
-    const out = this.pending; this.pending = [];
     return out;
   }
 

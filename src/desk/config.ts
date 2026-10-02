@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { MICRO } from '../micro/policy';
 import type { StrategyId } from './types';
 import type { RuleSpec } from './custom';
+import type { PocketRules } from './golden-pocket';
 
 /**
  * Single source of the desk's capital plan and discovery thresholds.
@@ -166,10 +167,12 @@ export interface StrategyProfile {
   scaleIn?: Array<{ atMultiple: number; addUsd: number }>;
   /** Sell a curve position before graduation while its insiders still hold a bag (default true). */
   preGraduationExit?: boolean;
+  /** GOLDEN POCKET: which pattern fills are bought (the others are shown only). */
+  entryKinds?: Array<'ONLY_UP' | 'RETEST'>;
 }
 /** The built-in strategies; custom rule strategies are added at runtime (see custom.ts). */
-export type BuiltinStrategyId = 'FAIR' | 'CRASH' | 'LAUNCH' | 'OPEN';
-export const STRATEGY_IDS: readonly BuiltinStrategyId[] = ['FAIR', 'CRASH', 'LAUNCH', 'OPEN'];
+export type BuiltinStrategyId = 'FAIR' | 'CRASH' | 'LAUNCH' | 'OPEN' | 'GOLDEN';
+export const STRATEGY_IDS: readonly BuiltinStrategyId[] = ['FAIR', 'CRASH', 'LAUNCH', 'OPEN', 'GOLDEN'];
 
 export interface DeskOperational {
   version: 1;
@@ -241,6 +244,8 @@ export function strategyProfiles(env: NodeJS.ProcessEnv, capital: DeskCapital,
     CRASH_REENTRY_MIN: z.coerce.number().finite().min(0).max(1_440).default(c.reentryMin),
     OPEN_CAPITAL_USD: money(Math.max(capital.plannedStartingCapitalUsd, 15)),
     OPEN_ADD_AT: z.string().regex(/^\s*(\d+(\.\d+)?\s*(,\s*\d+(\.\d+)?\s*)*)?$/).default('2,4'),
+    GOLDEN_CAPITAL_USD: money(Math.max(capital.plannedStartingCapitalUsd, 15)),
+    GOLDEN_RETEST_ENTRIES: z.enum(['true', 'false']).default('false'),
   }).parse(env);
   const openAdds = e.OPEN_ADD_AT.split(',').map(v => Number(v.trim())).filter(v => Number.isFinite(v) && v > 1).sort((a, b) => a - b).slice(0, 5);
   const ride = e.CRASH_EXIT_MODE === 'ride';
@@ -275,8 +280,30 @@ export function strategyProfiles(env: NodeJS.ProcessEnv, capital: DeskCapital,
       scaleIn: openAdds.map(atMultiple => ({ atMultiple, addUsd: capital.baseEntryUsd })),
       exits: { takeProfitPct: Number.POSITIVE_INFINITY, stopLossPct: 85, maxHoldMin: 1_440, trailing: { activationPct: 0, stopPct: 30 }, giveback: null, graceMs: 60_000,
         holdUntilMultiple: 6, marketCap: { floorUsd: OPENING_RULES.floorUsd, targetUsd: null } } },
+    GOLDEN: { id: 'GOLDEN', label: 'GOLDEN POCKET', enabled: true,
+      summary: `Fresh pump.fun graduations whose first ${GOLDEN_RULES.onlyUp!.bars} one-minute candles on the pool are only up: bought up to ${
+        GOLDEN_RULES.onlyUp!.chasePct}% above candle ${GOLDEN_RULES.onlyUp!.ref}, the stop ${GOLDEN_RULES.onlyUp!.stopBelowPct}% under it, a ${GOLDEN_EXIT.trailing.stopPct}% trailing stop after +${
+        GOLDEN_EXIT.trailing.activationPct}%, out after ${GOLDEN_EXIT.maxHoldMin} min (backtest: +7.9% per trade, both halves positive). Break and retest of the old high (66hK2) is ${
+        e.GOLDEN_RETEST_ENTRIES === 'true' ? `bought too, sold ${GOLDEN_EXIT.belowResistancePct}% under the breakout high` : 'shown, not bought (break-even in the backtest)'}; TEST first`,
+      capitalUsd: e.GOLDEN_CAPITAL_USD, entryUsd: capital.baseEntryUsd, slippageBps: 600, exitSlippageBps: 1_500, maxDragBps: 1_200n,
+      maxOpenPositions: 2, positionCheckMs: 3_000, exitMode: 'rules', reentryCooldownMs: 4 * 60 * 60_000, preGraduationExit: false,
+      entryKinds: e.GOLDEN_RETEST_ENTRIES === 'true' ? ['ONLY_UP', 'RETEST'] : ['ONLY_UP'],
+      exits: { takeProfitPct: Number.POSITIVE_INFINITY, stopLossPct: 40, maxHoldMin: GOLDEN_EXIT.maxHoldMin, trailing: { ...GOLDEN_EXIT.trailing }, giveback: null } },
   };
 }
+
+/**
+ * GOLDEN POCKET pattern rules (golden-pocket.ts) on graduated pools, from `npm run desk:golden` over 12 h of pump.fun
+ * graduations on 1 Oct (533 pools, Birdeye minute candles, judged by the weaker time half; see docs/DESK.md):
+ *   only up (2 rising green minutes, bought within 12 % of candle 2, stop 5 % under it, 60 min): +7.9 % per trade, PF 2.0,
+ *     weaker half +7 % (310 trades); it holds for 3 candles, any volume filter, 30–60 min holds, and fails past 2 hours.
+ *   break and retest (the owner's 66hK2 pattern): break-even at best (PF 1.0), −5…−11 % with the owner's exact levels.
+ */
+export const GOLDEN_RULES: Readonly<PocketRules> = Object.freeze({
+  retest: true, dipMinPct: 15, dipMaxPct: 50, breakoutOverHigh: 1.1, zone: 'EITHER', resistanceBelowPct: 12, resistanceAbovePct: 3, fibTop: 0.5, fibBottom: 0.65,
+  stopBelowPct: 5, retestWindowMin: 20, maxPatternMin: 60, onlyUp: { bars: 2, ref: 2, chasePct: 12, windowMin: 10, stopBelowPct: 5 }, floorUsd: 0 });
+/** GOLDEN POCKET exits: the pattern's stop (per position), a trailing stop, out after an hour; a retest sells just under the breakout high. */
+export const GOLDEN_EXIT = Object.freeze({ trailing: { activationPct: 50, stopPct: 25 }, maxHoldMin: 60, belowResistancePct: 5 });
 
 /** The opening screen's price rules (see opening.ts), shared with the OPEN strategy's floor. */
 export const OPENING_RULES = Object.freeze({ minOpenUsd: 10_000, floorUsd: 6_700, breakoutOverOpen: 1.3 });

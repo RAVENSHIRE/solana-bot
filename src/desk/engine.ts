@@ -18,22 +18,23 @@ import { BASE_FEE_LAMPORTS, SOL_MINT, TOKEN_ACCOUNT_RENT_LAMPORTS } from '../cor
 import type { Logger } from '../utils/logger';
 import { errorMessage } from '../utils/errors';
 import { atomicWriteFile } from '../utils/fs';
-import { DESK, LAUNCH_ENTRY, STRATEGY_IDS, strategyProfiles, type BuiltinStrategyId, type DeskCapital, type DeskOperational, type LiveSignerKind, type StrategyProfile } from './config';
+import { DESK, GOLDEN_EXIT, LAUNCH_ENTRY, STRATEGY_IDS, strategyProfiles, type BuiltinStrategyId, type DeskCapital, type DeskOperational, type LiveSignerKind, type StrategyProfile } from './config';
 import { EventLog } from './events';
 import { DeskLedger, uiAmount, type LedgerState } from './ledger';
 import { discover, pairMetrics, selectPair, tierFor, tokenTimes, type Discovered } from './discovery';
 import { creatorHolding, gatherOnchain, holderCount, holders as readHolders, type Holders, type OnchainEvidence } from './onchain';
 import { launchCheck, type LaunchCheck } from './launch';
-import { GraduationFeed } from './migrations';
+import { GraduationFeed, type Graduation } from './migrations';
 import { reclaimRent } from './rent';
 import { assessAuthenticity, checkWebsite, parseXLink, type WebsiteCheck, type XClient } from './social';
 import { analyze, type SocialEvidence, type WatchState } from './analysis';
 import { DeskGuard, DeskReject, PaperExecution, paperSigner } from './guard';
-import { crashCheck, crashMarketHint, launchEntryCheck, openEntryCheck, exitReason, exitRuleText, scaleAdvice, strategyStats } from './strategies';
+import { crashCheck, crashMarketHint, goldenEntryCheck, launchEntryCheck, openEntryCheck, exitReason, exitRuleText, scaleAdvice, strategyStats } from './strategies';
 import type { Candidate, DeskEvent, DeskMode, DeskPosition, DeskStatus, Preflight, Stage, StrategyId, StrategyView, Tier } from './types';
 import type { Launch, LaunchSource } from './launches';
 import type { XFeed } from './xfeed';
 import { OPENING, type OpeningState, type OpeningTracker } from './opening';
+import { GOLDEN, PUMP_QUOTE_MINT, WSOL_MINT, type GoldenSignal, type GoldenTracker } from './golden-pocket';
 
 import { curveState, insiderExit, insiderHolding, RISK } from './launch-risk';
 import { fomoUrl } from './watch';
@@ -61,6 +62,8 @@ export interface DeskDeps {
   xfeed?: XFeed | null;
   /** Opening screen: every launch's curve market cap from its first seconds; absent: no OPEN entries or alerts. */
   opening?: OpeningTracker | null;
+  /** GOLDEN POCKET: every fresh graduation's PumpSwap pool (reserves read on chain), run through the pattern. */
+  golden?: GoldenTracker | null;
   /** Claude review of shortlisted launches: its status line; absent when off. */
   aiReview?: (() => string) | null;
   /** Phone/desktop alerts (ntfy, Telegram) for launch-radar finds and entry-ready signals. */
@@ -72,14 +75,17 @@ export interface DeskDeps {
 
 interface Deep { at: number; onchain: OnchainEvidence; social: SocialEvidence }
 interface Staged { found: Discovered; pair: DexPair; tier: Tier; metrics: ReturnType<typeof pairMetrics>; crashHint: boolean; ruleHints: StrategyId[]; launch: Launch | null;
-  open?: OpeningSignal | null }
+  open?: OpeningSignal | null; golden?: GoldenEntrySignal | null }
+/** A GOLDEN POCKET fill, with the radar's view of the launch when it has one. */
+interface GoldenEntrySignal { s: GoldenSignal; launch: Launch | null; at: number }
 /** An opening-screen breakout, with the radar's view of the launch (rug signs, insiders) when it has one. */
 interface OpeningSignal { state: OpeningState; launch: Launch | null; at: number }
 interface ExecTarget {
   strategy: StrategyId; mint: string; symbol: string | null; decimals: number; pairAddress: string; heldRaw: bigint; token2022?: boolean; drill?: boolean;
   /** A scale-in to the open position, of this size. */
   add?: boolean; addUsd?: number;
-  entry?: { liquidityUsd: number | null; creator: string | null; creatorPct: number | null; insiders?: string[] | null; insiderPct?: number | null; onCurve?: boolean | null };
+  entry?: { liquidityUsd: number | null; creator: string | null; creatorPct: number | null; insiders?: string[] | null; insiderPct?: number | null; onCurve?: boolean | null;
+    stopUsd?: number | null; targetUsd?: number | null };
 }
 const LABEL: Record<DeskMode, string> = { PAPER: 'TEST / PAPER — NO REAL TRANSACTIONS', LIVE: 'LIVE — REAL FUNDS' };
 const sol = (l: bigint) => exactNumber(l < 0n ? -l : l) / 1e9 * (l < 0n ? -1 : 1);
@@ -107,6 +113,13 @@ export class DeskEngine {
   private openSignals = new Map<string, OpeningSignal>();
   private openingWork: Promise<void> | null = null;
   private lastOpeningAt = 0;
+  /** GOLDEN POCKET fills (alerted, entered by GOLDEN when it is on), the fast loop, and the PUMP price for PUMP-quoted pools. */
+  private goldenSignals = new Map<string, GoldenEntrySignal>();
+  private goldenWork: Promise<void> | null = null;
+  private lastGoldenAt = 0;
+  private lastGraduationsAt = 0;
+  private graduationPoll: Promise<Graduation[]> | null = null;
+  private pumpUsd: { value: number; at: number } | null = null;
   private copycatSearches = new Map<string, { at: number; pairs: DexPair[] }>();
   private launchAlerts = new Set<string>();
   private launchPoll: Promise<void> | null = null;
@@ -170,7 +183,7 @@ export class DeskEngine {
     this.graduations = new GraduationFeed(d.rpc);
     const base = d.strategies ?? strategyProfiles({}, d.capital, d.cfg.rs);
     const copy = (p: StrategyProfile): StrategyProfile => ({ ...p, exits: { ...p.exits } });
-    this.strategies = { FAIR: copy(base.FAIR), CRASH: copy(base.CRASH), LAUNCH: copy(base.LAUNCH), OPEN: copy(base.OPEN) };
+    this.strategies = { FAIR: copy(base.FAIR), CRASH: copy(base.CRASH), LAUNCH: copy(base.LAUNCH), OPEN: copy(base.OPEN), GOLDEN: copy(base.GOLDEN) };
     // LIVE starts the fast strategies OFF: the owner switches them on after TEST has shown how they trade.
     for (const id of STRATEGY_IDS) this.strategies[id].enabled = d.operational?.strategyEnabled[d.mode][id] ?? (d.mode === 'LIVE' && id !== 'FAIR' ? false : this.strategies[id].enabled);
   }
@@ -453,6 +466,10 @@ export class DeskEngine {
       this.lastOpeningAt = Date.now();
       this.openingWork = this.openingPass().then(() => undefined).catch(error => this.note('opening', 'FAILED', `Opening screen: ${errorMessage(error)}`)).finally(() => { this.openingWork = null; });
     }
+    if (this.d.golden && !this.goldenWork && Date.now() - this.lastGoldenAt >= GOLDEN.pollMs) {
+      this.lastGoldenAt = Date.now();
+      this.goldenWork = this.goldenPass().then(() => undefined).catch(error => this.note('golden', 'FAILED', `Golden pocket: ${errorMessage(error)}`)).finally(() => { this.goldenWork = null; });
+    }
     if (this.positionWork) return;
     const now = Date.now();
     const due = this.ids().filter(id => (this.ledgerOf(id)?.state.positions.length ?? 0) > 0 && now - (this.lastPositionCheckAt[id] ?? 0) >= this.profile(id).positionCheckMs);
@@ -508,7 +525,7 @@ export class DeskEngine {
     for (const [k, v] of this.entrySkips) if (Date.now() - v.at > DESK.entrySkipMs) this.entrySkips.delete(k);
     await this.pollLaunches(started);
     const found = await requestScope.run({ category: 'discovery', signal: AbortSignal.timeout(DESK.discoveryBudgetMs) },
-      () => discover(d.dex, d.gecko, this.watchlist(), () => this.graduations.poll()));
+      () => discover(d.dex, d.gecko, this.watchlist(), () => this.pollGraduations()));
     this.sources = found.sources;
     for (const l of this.launchList.values()) {
       if (started - l.at > LAUNCH_ENTRY.migrated.maxAgeMin * 60_000 + 10 * 60_000) continue;
@@ -520,6 +537,11 @@ export class DeskEngine {
       if (!row.sources.includes('open-screen')) row.sources.push('open-screen');
       found.tokens.set(mint, row);
     }
+    for (const [mint] of this.goldenSignals) {
+      const row = found.tokens.get(mint) ?? { mint, sources: [], boostAmount: null, description: null, links: [], geckoPool: null };
+      if (!row.sources.includes('golden-pocket')) row.sources.push('golden-pocket');
+      found.tokens.set(mint, row);
+    }
     // Tokens posted on X (X feed) that the radar did not see launch: scanned like any candidate.
     for (const x of d.launches?.xOnly?.(started) ?? []) {
       const row = found.tokens.get(x.mint) ?? { mint: x.mint, sources: [], boostAmount: null, description: null, links: [], geckoPool: null };
@@ -528,16 +550,22 @@ export class DeskEngine {
     }
     if (d.launches) this.sources['Launch radar (pump.fun, on-chain)'] = `${this.launchList.size} shortlisted · X pages read without a key · ${d.aiReview ? d.aiReview() : 'Claude review off'}`;
     if (d.opening) { const o = d.opening.counts(); this.sources['Opening screen (curves, every 4 s)'] = `${o.OPENING} in their first minute · ${o.STRONG} strong opens watched · ${o.SIGNAL} breakouts · ${o.RUG} fell below the floor`; }
+    if (d.golden) { const g = d.golden.counts(); this.sources['Golden pocket (graduated pools, every 4 s)'] = `${g.watched} pools watched · ${g.DIP} dipped · ${g.BROKEN_OUT} broke out, waiting for the retest · ${g.ENTRY} filled`; }
     if (d.xfeed) { const x = d.xfeed.status(); this.sources['X feed (X API search)'] = x.configured ? (x.lastError ?? `${x.signals} token posts from ${x.posts} posts`) : 'off — set X_BEARER_TOKEN in .env'; }
     const staged = await this.stage(found.tokens);
     // CRASH is time-critical: safety evidence for pumping young pools first, entries right after, and only then
     // the remaining evidence and the rate-limited launch-history checks that FAIR needs.
     const due = this.deepDue(staged.list, started);
-    await this.deepAnalyses(due.filter(s => s.crashHint || s.launch || s.open));
+    await this.deepAnalyses(due.filter(s => s.crashHint || s.launch || s.open || s.golden));
     if (this.strategies.OPEN.enabled && !stopped()) {
       const signals = staged.list.filter(s => s.open).map(s => this.assess(s, started)).filter(c => c.open?.signal.signal);
       const ledger = this.ledgerOf('OPEN');
       if (ledger && signals.length) await this.maybeEnter('OPEN', ledger, signals, stopped);
+    }
+    if (this.strategies.GOLDEN.enabled && !stopped()) {
+      const signals = staged.list.filter(s => s.golden).map(s => this.assess(s, started)).filter(c => c.golden?.signal.signal);
+      const ledger = this.ledgerOf('GOLDEN');
+      if (ledger && signals.length) await this.maybeEnter('GOLDEN', ledger, signals, stopped);
     }
     if (this.strategies.LAUNCH.enabled && !stopped()) {
       const signals = staged.list.filter(s => s.launch).map(s => this.assess(s, started)).filter(c => c.launch?.signal.signal);
@@ -597,7 +625,7 @@ export class DeskEngine {
   private async stage(tokens: Map<string, Discovered>): Promise<{ list: Staged[]; filtered: number }> {
     // Held tokens and the watchlist first: they are appended last by discovery and must never be cut by the cap.
     const d = this.d, held = new Set(this.books().flatMap(b => b.ledger.state.positions.map(p => p.mint))), watched = new Set(this.watchlist());
-    const order = (m: string) => held.has(m) ? 0 : this.openSignals.has(m) || this.launchList.has(m) || tokens.get(m)!.sources.includes('graduated') ? 1 : watched.has(m) ? 2 : 3;
+    const order = (m: string) => held.has(m) ? 0 : this.openSignals.has(m) || this.goldenSignals.has(m) || this.launchList.has(m) || tokens.get(m)!.sources.includes('graduated') ? 1 : watched.has(m) ? 2 : 3;
     const mints = [...tokens.keys()].sort((a, b) => order(a) - order(b)).slice(0, DESK.maxStagedPerScan);
     const pairs = mints.length ? await d.dex.getPairsForTokens(mints) : [];
     const list: Staged[] = [];
@@ -610,9 +638,9 @@ export class DeskEngine {
       this.rememberName(mint, pair);
       // Custom strategies see every priced token: a $5M runner is outside FAIR's bands but may be exactly what one wants.
       const ruleHints = this.customIds().filter(id => this.profile(id).enabled && ruleMarketHint(this.profile(id).rule!, metrics));
-      if ('filtered' in tier && !ruleHints.length && !held.has(mint) && !this.openSignals.has(mint)) { filtered++; this.candidates.delete(mint); this.transition(mint, pair.baseToken.symbol ?? null, 'FILTERED', tier.filtered); continue; }
+      if ('filtered' in tier && !ruleHints.length && !held.has(mint) && !this.openSignals.has(mint) && !this.goldenSignals.has(mint)) { filtered++; this.candidates.delete(mint); this.transition(mint, pair.baseToken.symbol ?? null, 'FILTERED', tier.filtered); continue; }
       list.push({ found, pair, tier: 'filtered' in tier ? 'CUSTOM' : tier.tier, metrics, crashHint: crashMarketHint(metrics), ruleHints, launch: this.launchList.get(mint) ?? null,
-        open: this.openSignals.get(mint) ?? null });
+        open: this.openSignals.get(mint) ?? null, golden: this.goldenSignals.get(mint) ?? null });
     }
     return { list, filtered };
   }
@@ -624,7 +652,7 @@ export class DeskEngine {
   /** Deep evidence (RPC, website, X, trade flow) for the most tradeable-looking tokens first; CRASH signals lead. */
   private deepDue(list: Staged[], now: number): Staged[] {
     const crash = this.strategies.CRASH.enabled;
-    const priority = (s: Staged) => (s.launch || s.open ? 3e9 : 0) + (crash && s.crashHint ? 2e9 : 0) + (s.ruleHints.length ? 1.5e9 : 0) + (s.tier === 'TRENDING' ? 1e9 : 0) +
+    const priority = (s: Staged) => (s.launch || s.open || s.golden ? 3e9 : 0) + (crash && s.crashHint ? 2e9 : 0) + (s.ruleHints.length ? 1.5e9 : 0) + (s.tier === 'TRENDING' ? 1e9 : 0) +
       ((s.metrics.volume5mUsd ?? 0) > DESK.gates.minVolume5mUsd ? 1e8 : 0) + ((s.metrics.liquidityUsd ?? 0) > DESK.gates.minLiquidityUsd ? 1e7 : 0) + (s.metrics.volume5mUsd ?? 0);
     return list.filter(s => !this.deep.has(s.found.mint) || now - this.deep.get(s.found.mint)!.at > DESK.deepAnalysisTtlMs)
       .sort((a, b) => priority(b) - priority(a)).slice(0, DESK.maxDeepAnalysesPerScan);
@@ -722,6 +750,12 @@ export class DeskEngine {
       launchedAt: s.launch.at, ca: s.launch.ca, signal: launchEntryCheck(c, s.launch, now) };
     if (s.open) c.open = { openHighUsd: s.open.state.openHighUsd, lowUsd: s.open.state.lowUsd, signalUsd: s.open.state.signalUsd, signalAt: s.open.at,
       detail: s.open.state.detail, signal: openEntryCheck(c, s.open.state, s.open.launch, this.d.opening?.get(mint) ?? null, now) };
+    if (s.golden) {
+      const e = s.golden.s.entry;
+      const view = { kind: e.kind, fillUsd: e.price, stopUsd: e.stop, resistanceUsd: e.resistance, zone: e.zone, signalAt: s.golden.at, detail: e.detail };
+      c.golden = { ...view, signal: goldenEntryCheck(c, view, this.strategies.GOLDEN.entryKinds ?? ['ONLY_UP'], s.golden.launch ?? this.launchList.get(mint) ?? null,
+        this.d.golden?.get(mint) ?? null, now) };
+    }
     const rules = this.customIds().filter(id => this.profile(id).enabled).map(id => [id, ruleCheck(this.profile(id).rule!, c)] as const);
     if (rules.length) c.rules = Object.fromEntries(rules);
     return c;
@@ -769,6 +803,7 @@ export class DeskEngine {
       if (id === 'CRASH') return c.crash ? [{ id, signal: c.crash.signal, summary: c.crash.summary }] : [];
       if (id === 'LAUNCH') return c.launch ? [{ id, signal: c.launch.signal.signal, summary: c.launch.signal.summary }] : [];
       if (id === 'OPEN') return c.open ? [{ id, signal: c.open.signal.signal, summary: c.open.signal.summary }] : [];
+      if (id === 'GOLDEN') return c.golden ? [{ id, signal: c.golden.signal.signal, summary: c.golden.signal.summary }] : [];
       const r = c.rules?.[id];
       return r ? [{ id, signal: r.signal, summary: r.summary }] : [];
     });
@@ -896,7 +931,8 @@ export class DeskEngine {
       // Price multiple of the FIRST entry (scale-ins and "hold until 6×" are measured from it).
       const first = p.firstEntryPriceUsd ?? p.entryPriceUsd, multiple = first && p.lastPriceUsd ? p.lastPriceUsd / first : null;
       if (multiple !== null) p.peakMultiple = Math.max(p.peakMultiple ?? 0, multiple);
-      const reason = warning ?? exitReason(profile.exits, { pnlPct, peakPct, fromPeakPct, heldMs: Date.now() - p.openedAt, marketCapUsd: this.marketCapNow(p), peakMultiple: p.peakMultiple ?? null });
+      const reason = warning ?? exitReason(profile.exits, { pnlPct, peakPct, fromPeakPct, heldMs: Date.now() - p.openedAt, marketCapUsd: this.marketCapNow(p), peakMultiple: p.peakMultiple ?? null,
+        levels: p.stopUsd != null || p.targetUsd != null ? { stopUsd: p.stopUsd ?? null, targetUsd: p.targetUsd ?? null } : null });
       if (!reason) {
         // Checked every few seconds; logged only when the result moves or once a minute, so telemetry stays readable.
         const prev = this.holdLog.get(p.mint);
@@ -978,6 +1014,53 @@ export class DeskEngine {
     // A breakout is traded fresh: start a scan now instead of waiting for the next one.
     if (fresh.length && this.strategies.OPEN.enabled && !this.work) this.nextScanAt = Date.now();
     for (const [mint, s] of this.openSignals) if (now - s.at > 30 * 60_000 && !this.heldBy(mint)) this.openSignals.delete(mint);
+    return fresh;
+  }
+
+  /** Graduations from the chain, one poll at a time (the scan's discovery and the GOLDEN POCKET loop share it). */
+  private pollGraduations(): Promise<Graduation[]> {
+    this.graduationPoll ??= this.graduations.poll().finally(() => { this.graduationPoll = null; });
+    return this.graduationPoll;
+  }
+
+  /**
+   * GOLDEN POCKET, every few seconds: fresh graduations start being watched (their PumpSwap reserves read on chain),
+   * and a fill of a pattern GOLDEN buys is alerted at once and queued for the GOLDEN strategy (a scan is started right
+   * away). Rugs, impersonators and copycats are never alerted.
+   */
+  async goldenPass(now = Date.now()): Promise<GoldenSignal[]> {
+    const d = this.d, tracker = d.golden;
+    if (!tracker) return [];
+    if (now - this.lastGraduationsAt >= 8_000) {
+      this.lastGraduationsAt = now;
+      try { tracker.watchGraduations((await this.pollGraduations()).map(g => ({ mint: g.mint, at: g.at, symbol: this.candidates.get(g.mint)?.symbol ?? null })), now); }
+      catch { /* RPC outage: the next pass retries */ }
+    }
+    tracker.hold([...new Set(this.books().flatMap(b => b.ledger.state.positions.map(p => p.mint)))]);
+    // PUMP-quoted pools (pump.fun's own token as the quote) need the PUMP price; refreshed every two minutes.
+    if (!this.pumpUsd || now - this.pumpUsd.at > 120_000) {
+      try {
+        const pair = (await d.dex.getPairsForTokens([PUMP_QUOTE_MINT])).filter(p => p.baseToken.address === PUMP_QUOTE_MINT && p.priceUsd)
+          .sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+        this.pumpUsd = pair?.priceUsd ? { value: pair.priceUsd, at: now } : this.pumpUsd;
+      } catch { /* the SOL-quoted pools still work */ }
+    }
+    const quoteUsd = (q: string) => q === WSOL_MINT ? this.solUsd : q === PUMP_QUOTE_MINT ? this.pumpUsd?.value ?? null : null;
+    const fresh: GoldenSignal[] = [];
+    for (const s of await tracker.poll(now, quoteUsd)) {
+      const launch = this.launchList.get(s.mint) ?? d.launches?.recent(now).find(l => l.mint === s.mint) ?? null, ctx = { mint: s.mint, symbol: s.symbol };
+      const label = s.symbol ?? `${s.mint.slice(0, 4)}…${s.mint.slice(-4)}`;
+      const block = launch?.rug ?? (launch?.ca.status === 'IMPERSONATOR' ? launch.ca.detail : null) ?? this.launchCopycats.get(s.mint) ?? null;
+      if (block) { this.event('FILTERED', `GOLDEN POCKET: ${label} filled (${s.entry.detail}) but ${block} — no alert, never bought`, ctx); continue; }
+      // Fills of a pattern GOLDEN does not buy (the retest, unless switched on) are shown, never alerted.
+      if (!(this.strategies.GOLDEN.entryKinds ?? ['ONLY_UP']).includes(s.entry.kind)) { this.event('WATCHLIST', `GOLDEN POCKET (shown only): ${label} · ${s.entry.detail}`, ctx); continue; }
+      this.goldenSignals.set(s.mint, { s, launch, at: now }); fresh.push(s);
+      this.event('QUALIFIED', `GOLDEN POCKET: ${label} · ${s.entry.detail}`, ctx);
+      this.alertOnce(`golden:${s.mint}`, `GOLDEN POCKET: ${label} at $${(s.entry.price / 1000).toFixed(1)}K`,
+        `${s.entry.kind === 'RETEST' ? 'Break and retest' : 'Only up'} · ${s.entry.detail}\n${fomoUrl(s.mint)}`);
+    }
+    if (fresh.length && this.strategies.GOLDEN.enabled && !this.work) this.nextScanAt = Date.now();
+    for (const [mint, g] of this.goldenSignals) if (now - g.at > 30 * 60_000 && !this.heldBy(mint)) this.goldenSignals.delete(mint);
     return fresh;
   }
 
@@ -1113,6 +1196,9 @@ export class DeskEngine {
     // A curve token watched by the opening screen: its market cap read from the curve seconds ago.
     const o = this.d.opening?.get(p.mint);
     if (o?.lastUsd != null && o.lastSampleAt != null && Date.now() - o.lastSampleAt <= 15_000 && (o.status === 'SIGNAL' || o.status === 'STRONG')) return o.lastUsd;
+    // A graduated pool watched by GOLDEN POCKET: its market cap from the pool's reserves seconds ago.
+    const g = this.d.golden?.get(p.mint);
+    if (g?.lastUsd != null && g.lastSampleAt != null && Date.now() - g.lastSampleAt <= 15_000) return g.lastUsd;
     const m = this.candidates.get(p.mint)?.metrics;
     if (!m?.marketCapUsd) return null;
     return m.priceUsd && p.lastPriceUsd ? m.marketCapUsd * p.lastPriceUsd / m.priceUsd : m.marketCapUsd;
@@ -1168,6 +1254,7 @@ export class DeskEngine {
     pool.sort((a, b) => id === 'CRASH' ? crashRank(b) - crashRank(a) : id === 'FAIR' ? composite(b) - composite(a)
       : id === 'LAUNCH' ? (b.launch?.score ?? 0) - (a.launch?.score ?? 0) || (b.launch?.launchedAt ?? 0) - (a.launch?.launchedAt ?? 0)
       : id === 'OPEN' ? (b.open?.signalAt ?? 0) - (a.open?.signalAt ?? 0)
+      : id === 'GOLDEN' ? (b.golden?.signalAt ?? 0) - (a.golden?.signalAt ?? 0)
       : (b.metrics.volume1hUsd ?? 0) - (a.metrics.volume1hUsd ?? 0));
     if (!pool.length) {
       if (id === 'FAIR' && this.drill && this.d.mode === 'PAPER') return this.drillEnter(ledger, stopped, recentExit);
@@ -1196,11 +1283,12 @@ export class DeskEngine {
       attempts++; this.notes.delete(id);
       this.event('QUALIFIED', id === 'CRASH' ? `CRASH entry selected: ${c.crash?.summary ?? ''}` : id === 'LAUNCH' ? `LAUNCH entry selected: ${c.launch?.signal.summary ?? ''}`
         : id === 'OPEN' ? `OPEN entry selected: ${c.open?.signal.summary ?? ''}`
+        : id === 'GOLDEN' ? `GOLDEN POCKET entry selected: ${c.golden?.signal.summary ?? ''}`
         : id === 'FAIR' ? `FAIR entry candidate selected (composite ${composite(c).toFixed(0)})`
         : `${id} entry selected: ${c.rules?.[id]?.summary ?? ''}`,
         { mint: c.mint, symbol: c.symbol, detail: { strategy: id } });
       const code = await this.execute('BUY', { strategy: id, mint: c.mint, symbol: c.symbol, decimals: c.onchain.decimals, pairAddress: c.pair.address, heldRaw: 0n,
-        token2022: c.onchain.token2022 === true, entry: this.entryContext(c) }, ledger, stopped);
+        token2022: c.onchain.token2022 === true, entry: this.entryContext(c, id) }, ledger, stopped);
       if (ledger.position(c.mint)) {
         slots--;
         if (this.entryAllowance !== null) { this.entryAllowance--; if (this.entryAllowance === 0) this.event('SYSTEM', 'Entry allowance used up: no new entries this session; exits continue'); }
@@ -1257,17 +1345,20 @@ export class DeskEngine {
       if (stopped()) return;
       this.event('QUALIFIED', `DRILL entry (strategy gates bypassed; status ${c.status}: ${c.reasons[0] ?? ''})`, { mint: c.mint, symbol: c.symbol });
       await this.execute('BUY', { strategy: 'FAIR', mint: c.mint, symbol: c.symbol, decimals: c.onchain.decimals!, pairAddress: c.pair.address, heldRaw: 0n,
-        token2022: c.onchain.token2022 === true, drill: true, entry: this.entryContext(c) }, ledger, stopped);
+        token2022: c.onchain.token2022 === true, drill: true, entry: this.entryContext(c, 'FAIR') }, ledger, stopped);
       if (ledger.position(c.mint)) return;
       // Blocked by the guard (e.g. max drag): skip it for a while and try the next one.
       this.drillSkips.set(c.mint, Date.now());
     }
   }
 
-  private entryContext(c: Candidate): NonNullable<ExecTarget['entry']> {
+  private entryContext(c: Candidate, id: StrategyId): NonNullable<ExecTarget['entry']> {
     const dev = this.deep.get(c.mint)?.onchain.developer ?? null, launch = this.launchList.get(c.mint) ?? this.openSignals.get(c.mint)?.launch ?? null;
+    // GOLDEN POCKET: the pattern's stop and (for a retest) the take-profit just under the breakout high, as market caps.
+    const g = id === 'GOLDEN' ? c.golden : null;
     return { liquidityUsd: c.metrics.liquidityUsd, creator: dev?.creator ?? launch?.creator ?? null, creatorPct: dev?.heldPct ?? launch?.insiders?.creatorPct ?? null,
-      ...(launch?.insiders?.wallets.length ? { insiders: launch.insiders.wallets, insiderPct: launch.insiders.insiderPct, onCurve: c.metrics.migration === 'BONDING_CURVE' } : {}) };
+      ...(launch?.insiders?.wallets.length ? { insiders: launch.insiders.wallets, insiderPct: launch.insiders.insiderPct, onCurve: c.metrics.migration === 'BONDING_CURVE' } : {}),
+      ...(g ? { stopUsd: g.stopUsd, targetUsd: g.kind === 'RETEST' ? g.resistanceUsd * (1 - GOLDEN_EXIT.belowResistancePct / 100) : null } : {}) };
   }
 
   // ------------------------------------------------------------------ one order through the production path
@@ -1564,6 +1655,10 @@ export class DeskEngine {
       ...(d.opening ? { opening: { counts: d.opening.counts(), list: d.opening.list().slice(0, 20).map(o => ({ mint: o.mint, symbol: o.symbol, name: o.name, at: o.at, status: o.status,
         openHighUsd: o.openHighUsd, lowUsd: o.lowUsd, lastUsd: o.lastUsd, peakUsd: o.peakUsd, signalAt: o.signalAt, signalUsd: o.signalUsd, detail: o.detail,
         held: this.heldBy(o.mint) ?? null, entry: this.candidates.get(o.mint)?.open?.signal.summary ?? null })) } } : {}),
+      ...(d.golden ? { golden: { counts: d.golden.counts(), entryKinds: this.strategies.GOLDEN.entryKinds ?? ['ONLY_UP'], list: d.golden.list().slice(0, 25).map(w => ({ mint: w.mint,
+        symbol: w.symbol ?? this.candidates.get(w.mint)?.symbol ?? null, pool: w.pool, startAt: w.startAt, phase: w.state.phase, highUsd: w.state.high, lowUsd: w.state.low, topUsd: w.state.top, lastUsd: w.lastUsd, peakUsd: w.peakUsd, detail: w.state.detail,
+        entry: w.state.entry ? { kind: w.state.entry.kind, at: w.state.entry.at, fillUsd: w.state.entry.price, stopUsd: w.state.entry.stop, resistanceUsd: w.state.entry.resistance, zone: w.state.entry.zone } : null,
+        held: this.heldBy(w.mint) ?? null, verdict: this.candidates.get(w.mint)?.golden?.signal.summary ?? null })) } } : {}),
       ...(d.xfeed ? { xFeed: (({ configured, lastPollAt, lastError, posts, signals }) => ({ configured, lastPollAt, lastError, posts, signals }))(d.xfeed.status()) } : {}),
       preflights: [...this.preflights].reverse(), positions, ledger: rows,
       sources: this.sources, path: this.pathView(),

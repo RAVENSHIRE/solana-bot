@@ -12,7 +12,8 @@ const position = z.object({ id: z.string(), mint: z.string(), symbol: z.string()
   rentLamports: raw, pairAddress: z.string(), entryLiquidityUsd: finite.nullable().optional(), creator: z.string().nullable().optional(),
   creatorPctAtEntry: finite.nullable().optional(), noRouteSince: z.number().int().nonnegative().nullable().optional(),
   insiders: z.array(z.string()).max(16).nullable().optional(), insiderPctAtEntry: finite.nullable().optional(), onCurve: z.boolean().nullable().optional(),
-  adds: z.number().int().min(0).max(20).optional(), firstEntryPriceUsd: finite.nullable().optional(), peakMultiple: finite.optional() }).strict();
+  adds: z.number().int().min(0).max(20).optional(), firstEntryPriceUsd: finite.nullable().optional(), peakMultiple: finite.optional(),
+  stopUsd: finite.nullable().optional(), targetUsd: finite.nullable().optional() }).strict();
 const entry = z.object({ id: z.string(), at: z.number().int(), mode: z.enum(['PAPER', 'LIVE']), txSignature: z.string().nullable(), mint: z.string(),
   symbol: z.string().nullable(), router: z.string(), route: z.string(), side: z.enum(['BUY', 'SELL']), quantity: z.string(), qtyRaw: raw,
   entryPriceUsd: finite.nullable(), exitPriceUsd: finite.nullable(), grossPnlUsd: finite.nullable(), networkFeeLamports: raw,
@@ -29,7 +30,8 @@ export interface Fill {
   side: 'BUY' | 'SELL'; mint: string; symbol: string | null; decimals: number; pairAddress: string;
   inAmountRaw: bigint; outAmountRaw: bigint; solDeltaLamports: bigint; feeLamports: bigint; rentLamports: bigint;
   router: string; route: string; routerFeeUsd: number | null; txSignature: string | null; solUsd: number; at: number; note: string | null;
-  entry?: { liquidityUsd: number | null; creator: string | null; creatorPct: number | null; insiders?: string[] | null; insiderPct?: number | null; onCurve?: boolean | null };
+  entry?: { liquidityUsd: number | null; creator: string | null; creatorPct: number | null; insiders?: string[] | null; insiderPct?: number | null; onCurve?: boolean | null;
+    stopUsd?: number | null; targetUsd?: number | null };
   /** A scale-in: added to the open position (average price), not a new one. */
   add?: boolean;
 }
@@ -104,7 +106,8 @@ export class DeskLedger {
         peakValueLamports: String(f.inAmountRaw), lastValueLamports: null, lastPriceUsd: null, router: f.router, route: f.route,
         entrySignature: f.txSignature, rentLamports: String(f.rentLamports), pairAddress: f.pairAddress,
         entryLiquidityUsd: f.entry?.liquidityUsd ?? null, creator: f.entry?.creator ?? null, creatorPctAtEntry: f.entry?.creatorPct ?? null,
-        ...(f.entry?.insiders?.length ? { insiders: f.entry.insiders, insiderPctAtEntry: f.entry.insiderPct ?? null, onCurve: f.entry.onCurve ?? null } : {}) });
+        ...(f.entry?.insiders?.length ? { insiders: f.entry.insiders, insiderPctAtEntry: f.entry.insiderPct ?? null, onCurve: f.entry.onCurve ?? null } : {}),
+        ...(f.entry?.stopUsd != null || f.entry?.targetUsd != null ? { stopUsd: f.entry.stopUsd ?? null, targetUsd: f.entry.targetUsd ?? null } : {}) });
       entryRow = this.row(f, status, { quantity: uiAmount(f.outAmountRaw, f.decimals), qtyRaw: f.outAmountRaw, entryPriceUsd: qty > 0 ? inputUsd / qty : null,
         exitPriceUsd: null, grossPnlUsd: null, netPnlUsd: null, feeUsd });
       if (s.mode === 'PAPER') s.paperCashLamports = String(BigInt(s.paperCashLamports ?? '0') - f.inAmountRaw - fee - f.rentLamports);

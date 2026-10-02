@@ -79,6 +79,9 @@ export interface Candidate {
     ca?: { status: 'X' | 'WEBSITE' | 'IMPERSONATOR' | 'UNCONFIRMED'; detail: string } };
   /** Opening screen: the breakout this candidate made (strong open, floor held), and the OPEN entry checks. */
   open?: { openHighUsd: number | null; lowUsd: number | null; signalUsd: number | null; signalAt: number; detail: string; signal: CrashSignal };
+  /** GOLDEN POCKET: the pattern's fill (break and retest, or only up), its levels as market caps, and the entry checks. */
+  golden?: { kind: 'RETEST' | 'ONLY_UP'; fillUsd: number; stopUsd: number; resistanceUsd: number; zone: [number, number]; signalAt: number;
+    detail: string; signal: CrashSignal };
   /** Custom strategies' entry checks, by strategy id (enabled strategies only). */
   rules?: Record<string, CrashSignal>;
   /** Largest holders and holder count; null until first read. */
@@ -123,6 +126,8 @@ export interface DeskPosition {
   insiders?: string[] | null; insiderPctAtEntry?: number | null; onCurve?: boolean | null;
   /** Scale-ins so far, and the first entry's price (multiples are measured from it). */
   adds?: number; firstEntryPriceUsd?: number | null; peakMultiple?: number;
+  /** GOLDEN POCKET: the pattern's stop and take-profit as market caps (per position, not per strategy). */
+  stopUsd?: number | null; targetUsd?: number | null;
   /** Status view only: the strategy whose ledger holds the position. */
   strategy?: StrategyId;
   /** Status view only: EXIT NOW was requested and the sell is being attempted. */
@@ -188,6 +193,10 @@ export interface DeskStatus {
   /** Opening screen: launches with a strong opening candle, their breakouts and rugs. */
   opening?: { counts: Record<string, number>; list: Array<{ mint: string; symbol: string; name: string; at: number; status: string; openHighUsd: number | null;
     lowUsd: number | null; lastUsd: number | null; peakUsd: number | null; signalAt: number | null; signalUsd: number | null; detail: string; held: string | null; entry: string | null }> };
+  /** GOLDEN POCKET: fresh graduations' pools watched for the pattern, most advanced first. */
+  golden?: { counts: Record<string, number>; entryKinds: string[]; list: Array<{ mint: string; symbol: string | null; pool: string | null; startAt: number; phase: string;
+    highUsd: number | null; lowUsd: number | null; topUsd: number | null; lastUsd: number | null; peakUsd: number | null; detail: string;
+    entry: { kind: string; at: number; fillUsd: number; stopUsd: number; resistanceUsd: number; zone: [number, number] } | null; held: string | null; verdict: string | null }> };
   /** X feed (X API search) state; absent when the desk has none. */
   xFeed?: { configured: boolean; lastPollAt: number | null; lastError: string | null; posts: number; signals: number };
   /** Templates for a new custom strategy (RUNNER: the owner's own style). */

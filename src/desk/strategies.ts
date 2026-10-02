@@ -143,11 +143,47 @@ export function openEntryCheck(c: Candidate, s: { signalAt: number | null; signa
   return { signal, checks, summary };
 }
 
+/** GOLDEN POCKET entry: how fresh the fill must be, and how far above the zone (pocket, or the 12 % over candle 2) the desk still buys. */
+export const GOLDEN_ENTRY = Object.freeze({ maxSignalAgeMin: 3, maxOverZonePct: 8, maxLargestWalletPct: 20 });
+
+/**
+ * GOLDEN POCKET entry: the tracker saw the pattern fill (break and retest into the pocket, or a return to the first
+ * candles of an only-up start). Bought while that is fresh, still above the pattern's stop and not already run away
+ * from the pocket; never a rug, an impersonator or a curve whose insiders own it; safety gates pass.
+ */
+export function goldenEntryCheck(c: Candidate, g: Omit<NonNullable<Candidate['golden']>, 'signal'>, kinds: string[], launch: { rug?: string | null; ca?: { status: string; detail: string } } | null,
+  live: { lastUsd: number | null; lastSampleAt: number | null } | null, now: number): CrashSignal {
+  const r = GOLDEN_ENTRY, m = c.metrics;
+  const nowUsd = live?.lastUsd != null && live.lastSampleAt != null && now - live.lastSampleAt <= 30_000 ? live.lastUsd : m.marketCapUsd;
+  const age = (now - g.signalAt) / 60_000, limit = g.zone[1] * (1 + r.maxOverZonePct / 100);
+  const safety = (key: string): GateResult => { const x = c.gates.find(y => y.key === key); return x ? { ...x, blocking: true } : { key, label: key, status: 'UNKNOWN', actual: 'not evaluated', required: 'PASS', blocking: true }; };
+  const rug = launch?.rug ?? (launch?.ca?.status === 'IMPERSONATOR' ? launch.ca.detail : null);
+  const k = (v: number | null) => v === null ? 'UNKNOWN' : v >= 1e6 ? `$${(v / 1e6).toFixed(2)}M` : `$${(v / 1000).toFixed(1)}K`;
+  const checks: GateResult[] = [
+    check('goldenKind', 'Pattern bought', kinds.includes(g.kind) ? 1 : 0, v => v === 1, g.kind === 'RETEST' ? 'break and retest' : 'only up',
+      kinds.map(x => x === 'RETEST' ? 'break and retest' : 'only up').join(' or ')),
+    check('goldenFresh', 'Minutes since the fill', age, v => v <= r.maxSignalAgeMin, `${age.toFixed(1)} min`, `≤ ${r.maxSignalAgeMin} min`),
+    check('goldenStop', 'Above the pattern stop', nowUsd, v => v > g.stopUsd, k(nowUsd), `> ${k(g.stopUsd)}`),
+    check('goldenChase', 'Still at the pocket', nowUsd, v => v <= limit, k(nowUsd), `≤ ${k(limit)} (pocket top +${r.maxOverZonePct}%)`),
+    check('goldenRug', 'Rug checks (radar)', rug ? 0 : 1, v => v === 1, rug ?? 'clean', 'no rug sign'),
+    check('goldenLargest', 'Largest single wallet', m.largestWalletPct, v => v <= r.maxLargestWalletPct, pct(m.largestWalletPct), `≤ ${r.maxLargestWalletPct}%`, m.largestWalletPct !== null),
+    safety('mintAuthority'), safety('freezeAuthority'), safety('contract'),
+  ];
+  const signal = checks.every(x => !x.blocking || x.status === 'PASS'), miss = checks.find(x => x.blocking && x.status !== 'PASS');
+  const summary = signal ? `${g.detail} · now ${k(nowUsd)}` : `${miss!.label}: ${miss!.actual} (${miss!.required})`;
+  return { signal, checks, summary };
+}
+
 /** One rule set for both strategies; percentages are net of the entry fee (value vs cost). */
-export function exitReason(r: ExitRules, x: { pnlPct: number; peakPct: number; fromPeakPct: number; heldMs: number; marketCapUsd?: number | null; peakMultiple?: number | null }): string | null {
+export function exitReason(r: ExitRules, x: { pnlPct: number; peakPct: number; fromPeakPct: number; heldMs: number; marketCapUsd?: number | null; peakMultiple?: number | null;
+  levels?: { stopUsd?: number | null; targetUsd?: number | null } | null }): string | null {
   const settling = x.heldMs < (r.graceMs ?? 0);
   if (x.pnlPct <= -r.stopLossPct && !settling) return `STOP_LOSS ${x.pnlPct.toFixed(2)}% ≤ -${r.stopLossPct}%`;
   const cap = x.marketCapUsd ?? null, mc = r.marketCap;
+  // GOLDEN POCKET: the pattern's own levels, set at entry for this position.
+  const lv = x.levels;
+  if (lv?.stopUsd != null && cap !== null && cap <= lv.stopUsd) return `POCKET_STOP ${usd(cap)} ≤ ${usd(lv.stopUsd)} (under the pocket)`;
+  if (lv?.targetUsd != null && cap !== null && cap >= lv.targetUsd) return `RESISTANCE_TARGET ${usd(cap)} ≥ ${usd(lv.targetUsd)} (just under the breakout high)`;
   if (mc && cap !== null && mc.floorUsd !== null && cap <= mc.floorUsd) return `MCAP_FLOOR ${usd(cap)} ≤ ${usd(mc.floorUsd)}`;
   if (mc && cap !== null && mc.targetUsd !== null && cap >= mc.targetUsd) return `MCAP_TARGET ${usd(cap)} ≥ ${usd(mc.targetUsd)}`;
   if (x.pnlPct >= r.takeProfitPct) return `TAKE_PROFIT ${x.pnlPct.toFixed(2)}% ≥ ${r.takeProfitPct}%`;
