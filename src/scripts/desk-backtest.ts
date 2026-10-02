@@ -123,9 +123,18 @@ async function main(): Promise<void> {
   for (const volumeFade of [{ afterMin: 2, dropPct: 50 }, { afterMin: 2, dropPct: 75 }])
     console.log(`  QUICK + ${describeExit({ ...quick, volumeFade }).split(' · ').find(x => x.startsWith('out when'))}\n    ${row(run(series, split, current, { ...quick, volumeFade }, costs))}`);
 
-  const stageA = entryGrid().flatMap(e => [run(series, split, e, quick, costs), run(series, split, e, ride, costs)]);
-  const bestEntries = [...new Map(stageA.sort((a, b) => b.score - a.score).map(r => [describeEntry(r.entry), r.entry])).values()].slice(0, 8);
-  const stageB = bestEntries.flatMap(e => exitGrid().map(x => run(series, split, e, x, costs))).sort((a, b) => b.score - a.score);
+  const bestEntries = (() => {
+    const stageA = entryGrid().flatMap(e => [run(series, split, e, quick, costs), run(series, split, e, ride, costs)]);
+    return [...new Map(stageA.sort((a, b) => b.score - a.score).map(r => [describeEntry(r.entry), r.entry])).values()].slice(0, 8);
+  })();
+  for (const key of [...signalCache.keys()]) if (!bestEntries.some(e => JSON.stringify(e) === key)) signalCache.delete(key);
+  // Only the best runs are kept: the whole grid (8 entries × 4,500 exits, every trade) does not fit in a 2 GB heap.
+  let stageB: Result[] = [];
+  for (const e of bestEntries) for (const x of exitGrid()) {
+    stageB.push(run(series, split, e, x, costs));
+    if (stageB.length >= 500) stageB = stageB.sort((a, b) => b.score - a.score).slice(0, 50);
+  }
+  stageB.sort((a, b) => b.score - a.score);
   console.log('\nTOP rules by the weaker time half (entry grid × exit grid; b/s ratio and holder gates not modelled):');
   for (const r of stageB.slice(0, 15)) console.log(`  ${describeEntry(r.entry)} | ${describeExit(r.exit)}\n    ${row(r)}`);
   const best = stageB[0];
