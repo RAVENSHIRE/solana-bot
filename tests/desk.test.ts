@@ -1082,7 +1082,7 @@ test('GOLDEN POCKET: an only-up fill on a fresh pool is alerted, bought in TEST 
       get: (m: string) => m === MINT ? { ...watch, lastSampleAt: Date.now() } : null, list: () => [watch], counts: () => ({ IMPULSE: 4, DIP: 2, BROKEN_OUT: 1, ENTRY: 1, FAILED: 9, EXPIRED: 0, watched: 17 }) };
     const alerts: string[] = [];
     const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }), golden: tracker as never,
-      notify: async title => { alerts.push(title); } });
+      notify: async title => { alerts.push(title); }, alerts: new Set(['golden']) });
     for (const id of ['FAIR', 'CRASH', 'LAUNCH', 'OPEN']) engine.setStrategy(id, false);
     engine.start(); await engine.pulse();
     const fresh = await engine.goldenPass();

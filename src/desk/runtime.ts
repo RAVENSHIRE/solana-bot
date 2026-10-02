@@ -122,7 +122,7 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
     const alerts = notifier(env), launches = new LaunchFeed(rpc, fetch, undefined, undefined,
       { rugs, review: reviewer ? (i, now) => reviewer.review(i, now) : null, reviewAvailable: reviewer ? now => reviewer.available(now) : undefined,
         onDecoded: (events, now) => opening.observe(events, now) });
-    // Which alerts reach the phone: DESK_ALERTS=golden,rug (default), plus open, launch, radar — or "all".
+    // Which alerts reach the phone: DESK_ALERTS=rug (default), plus golden, open, launch, radar — or "all".
     const phoneAlerts = alertKinds(env.DESK_ALERTS);
     const sender = new TransactionSender(rpc, logger, { confirmTimeoutMs: cfg.execution.confirmTimeoutMs, pollIntervalMs: 1500, rebroadcastIntervalMs: 2000 });
     const engines = {

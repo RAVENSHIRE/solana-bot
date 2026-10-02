@@ -129,10 +129,10 @@ test('GOLDEN strategy: only-up fills are bought by default; the pattern stop and
   assert.match(goldenEntryCheck(c, fill, ['ONLY_UP'], { rug: 'RUG insiders dumped' }, live, now).summary, /^Rug checks/);
 });
 
-test('phone alerts (DESK_ALERTS): GOLDEN fills and rug sales by default; open, launch, radar or all on request', () => {
-  assert.deepEqual([...alertKinds(undefined)].sort(), ['golden', 'rug']);
-  assert.deepEqual([...alertKinds('')].sort(), ['golden', 'rug']);
+test('phone alerts (DESK_ALERTS): rug sales of held positions by default; golden, open, launch, radar or all on request', () => {
+  assert.deepEqual([...alertKinds(undefined)].sort(), ['rug']);
+  assert.deepEqual([...alertKinds('')].sort(), ['rug']);
   assert.deepEqual([...alertKinds(' Golden, OPEN ,rug')].sort(), ['golden', 'open', 'rug']);
   assert.deepEqual([...alertKinds('all')].sort(), ['golden', 'launch', 'open', 'radar', 'rug']);
-  assert.deepEqual([...alertKinds('nonsense')].sort(), ['golden', 'rug'], 'nothing valid named: the default');
+  assert.deepEqual([...alertKinds('nonsense')].sort(), ['rug'], 'nothing valid named: the default');
 });
