@@ -214,6 +214,7 @@ test('dataset: point-in-time features and labels — nothing after the decision 
   a.trades.splice(2, 1);
   assert.equal(features(a, 60, { creatorLaunches: 0, creatorGraduations: 0 }, blindSpots(ds)).chainBreaks, 1);
   assert.equal(rows(ds, 60).some(r => r.mint === 'MINTB'), false, 'a launch at the very end of the data has no decision time yet');
+  assert.equal(a.mayhem, false, 'a standard curve is not mistaken for a mayhem one');
   // Labels wait for their whole window: with the data ending 40 min after the decision, the 1 h outcomes are unknown.
   const short = { ...ds, last: a.createdObs + 120_000 + 40 * 60_000 };
   const early = rows(short, 120).find(r => r.mint === 'MINTA')!;

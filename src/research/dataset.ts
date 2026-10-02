@@ -19,6 +19,8 @@ import { curveMcapSol, curveProgress } from './pump-events';
 export const DECISION_S = [60, 120, 300, 600] as const;
 export const HORIZONS_MIN = [5, 15, 60, 360] as const;
 export const X_POST_LATENCY_MS = 30_000;
+/** A standard pump.fun curve starts at 30 SOL / 1,073,000,000 tokens (≈ 27.96 SOL market cap) and never trades below it. */
+export const NORMAL_CURVE_FLOOR_SOL = 27.5;
 const MULTIPLES = [2, 5, 10] as const;
 
 interface Trade { obs: number; ts: number; slot: number; w: number; buy: boolean; lamports: number; vSol: number; vTok: number; realTok: number }
@@ -134,6 +136,9 @@ export function readDataset(files: string[], o: { from?: number; to?: number } =
   for (const l of launches.values()) {
     l.trades.sort((a, b) => a.slot - b.slot || a.obs - b.obs);
     l.candles.sort((a, b) => a.m - b.m);
+    // A normal curve never trades below its starting market cap (~27.96 SOL); one that does is a mayhem-mode or other
+    // non-standard curve even when PumpPortal's creation message (with the flag) was missed.
+    if (!l.mayhem && l.trades.some(t => curveMcapSol(t.vSol, t.vTok) < NORMAL_CURVE_FLOOR_SOL)) l.mayhem = true;
   }
   return { launches, gaps, runs, first: Number.isFinite(first) ? first : 0, last, files: files.length, wallets: walletIds.size };
 }
@@ -154,7 +159,10 @@ export interface Features {
   gapInWindow: boolean;
   /** Trades whose reported curve state does not follow from the previous one (missing trades), up to t. */
   chainBreaks: number;
-  /** pump.fun "mayhem mode" (PumpPortal flag): its curve does not follow the trades alone, so chain breaks are expected. */
+  /**
+   * pump.fun "mayhem mode" (PumpPortal flag) or any curve that traded below a standard curve's start: its price does
+   * not follow the trades alone, so chain breaks are expected and its multiples are not comparable.
+   */
   mayhem: boolean;
 }
 
