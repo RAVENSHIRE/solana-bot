@@ -188,7 +188,7 @@ Backtest (`npm run desk:golden`, 12 h of graduations on 1 Oct, 533 pools, Birdey
 - One day of data: watch the GOLDEN ledger in TEST before switching it on in LIVE.
 
 How it works:
-- Every graduation is read from the chain (the migration authority, as for CRASH); its PumpSwap pool address is derived (the canonical pool of the mint, SOL- or PUMP-quoted) and both reserves are read **every 4 s** (one RPC call per 50 pools). Market cap = quote reserve ÷ token reserve × 1B supply × SOL (or PUMP) price.
+- Every graduation is read from the chain (the migration authority, as for CRASH) within seconds; one first seen more than 45 s after graduating (after a restart, say) is not watched, since its first candles are unknown. Its PumpSwap pool address is derived (the canonical pool of the mint, SOL- or PUMP-quoted) and both reserves are read **every 4 s** (one RPC call per 50 pools). Market cap = quote reserve ÷ token reserve × 1B supply × SOL (or PUMP) price.
 - A fill is alerted at once ("GOLDEN POCKET: ABC at $112.0K") and starts a scan; GOLDEN buys while the fill is under 3 minutes old, the pool is above the pattern stop and not more than 8 % above the zone's top, no rug sign is known, the largest wallet holds at most 20 % when known, and the safety gates pass. A retest that is not bought is listed in the panel and the event log, never alerted.
 - The pattern's stop (and a retest's take profit) are stored on the position as market caps and checked against the pool's reserves every 3 s: `POCKET_STOP` / `RESISTANCE_TARGET`. A 40 % stop loss stays as a backstop.
 - Sizing: base entry ($2), TEST sleeve `GOLDEN_CAPITAL_USD` (default $15), at most 2 positions, no re-entry for 4 h. ON in TEST, OFF in LIVE until you switch it on.

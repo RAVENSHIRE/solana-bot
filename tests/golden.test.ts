@@ -46,6 +46,10 @@ test('GOLDEN POCKET only up: two rising green minutes, bought within 12% of cand
   assert.equal(run(GOLDEN_RULES, [bars[0]!, { ...bars[1]!, c: 90 * K }, bars[2]!]).e, null);
   const away = [bars[0]!, bars[1]!, ...Array.from({ length: 12 }, (_, i) => ({ t: t + (2 + i) * MIN, o: 130 * K, h: 140 * K, l: 125 * K, c: 135 * K }))];
   assert.equal(run(GOLDEN_RULES, away).e, null);
+  // First seen 5 minutes after graduation (a restart): minutes 5 and 6 are not "the first candles".
+  assert.equal(run(GOLDEN_RULES, bars.map(b => ({ ...b, t: b.t + 5 * MIN })), t).e?.kind ?? null, null);
+  // A minute without trades between the two candles breaks the run.
+  assert.equal(run(GOLDEN_RULES, [bars[0]!, { ...bars[1]!, t: t + 2 * MIN }, { ...bars[2]!, t: t + 3 * MIN }], t).e?.kind ?? null, null);
 });
 
 test('GOLDEN POCKET trade: the stop is checked inside the fill candle first; a trailing stop rides the move', () => {
@@ -87,7 +91,8 @@ test('the tracker watches a graduation from its pool reserves and reports an onl
       : k.toBase58() === baseVault ? vault(200_000_000n * 1_000_000n) : k.toBase58() === quoteVault ? vault(BigInt(Math.round(cap / solUsd / 1e9 * 200e6 * 1e9))) : null);
   } };
   const tracker = new GoldenTracker({ execute: async (_l: string, fn: (c: never) => unknown) => fn(conn as never) } as never, GOLDEN_RULES);
-  tracker.watchGraduations([{ mint: BULLISHCAT, at: t, symbol: 'BULLISHCAT' }], t + 2_000);
+  tracker.watchGraduations([{ mint: BULLISHCAT, at: t, symbol: 'BULLISHCAT' }, { mint: '6bQ4MCnJ5rab9pDGR43hbTCf1GabYEVmCP2oLyexSmvC', at: t - 60_000 }], t + 2_000);
+  assert.equal(tracker.get('6bQ4MCnJ5rab9pDGR43hbTCf1GabYEVmCP2oLyexSmvC'), null, 'graduated a minute before it was seen: its first candles are unknown');
   const quote = (q: string) => q === WSOL_MINT ? solUsd : null;
   const path: Array<[number, number]> = [[4, 80], [30, 88], [56, 95], [64, 97], [90, 104], [116, 110], [124, 112]];
   const fills = [];

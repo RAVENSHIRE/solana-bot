@@ -131,11 +131,14 @@ function onlyUpStep(s: PocketState, u: OnlyUpRules, bar: Candle): PocketEntry | 
   if (s.upBroken) return null;
   if (s.upRef === null) {
     const index = Math.max(0, Math.floor((bar.t - s.startAt) / MINUTE));
+    // The first candles are the first minutes after the start: a pattern first seen later (a restart, a slow feed) is
+    // never judged on whichever minutes came first.
+    if (!s.minute && index !== s.upBars) { s.upBroken = true; return null; }
     // A minute is judged once the next one starts: it must close above its open and above the previous close.
     if (s.minute && index > s.minute.index) {
       const m = s.minute;
       s.minute = null;
-      if (!(m.c > m.o && (s.upLastClose === null || m.c > s.upLastClose))) { s.upBroken = true; return null; }
+      if (!(m.c > m.o && (s.upLastClose === null || m.c > s.upLastClose)) || index > m.index + 1) { s.upBroken = true; return null; }
       s.upBars++; s.upLastClose = m.c;
       if (s.upBars === u.ref) s.upRefClose = m.c;
       if (s.upBars >= u.bars) { s.upRef = s.upRefClose; s.upReadyAt = bar.t; }
@@ -199,6 +202,8 @@ export const GOLDEN = Object.freeze({
   maxResolveTries: 5,
   /** Finished patterns stay listed this long. */
   keepMs: 30 * 60_000,
+  /** A graduation first seen later than this is not watched: its first minutes are unknown (after a restart, say). */
+  firstSampleWithinMs: 45_000,
 });
 
 export interface GoldenWatch {
@@ -224,7 +229,7 @@ export class GoldenTracker {
     for (const g of list) {
       const known = this.watches.get(g.mint);
       if (known) { known.symbol ??= g.symbol ?? null; continue; }
-      if (now - g.at > this.rules.maxPatternMin * 60_000) continue;
+      if (now - g.at > GOLDEN.firstSampleWithinMs) continue;
       this.watches.set(g.mint, { mint: g.mint, symbol: g.symbol ?? null, startAt: g.at, state: pocketState(g.at), pool: null, vaults: null,
         resolveTries: 0, lastUsd: null, lastSampleAt: null, peakUsd: null });
     }
