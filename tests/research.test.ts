@@ -165,7 +165,7 @@ test('metadata goes through pump.fun\'s gateway, never ipfs.io', async () => {
 });
 
 test('dataset: point-in-time features and labels — nothing after the decision time leaks into a feature', async () => {
-  const { readDataset, rows, features } = await import('../src/research/dataset');
+  const { readDataset, rows, features, blindSpots } = await import('../src/research/dataset');
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'research-ds-'));
   const t0 = Date.parse('2026-10-02T12:00:00Z'), s0 = t0 / 1000;
   // Curve: virtual SOL starts at 30 SOL; each buy adds its lamports, each sell removes them. vTok shrinks so price rises.
@@ -184,7 +184,7 @@ test('dataset: point-in-time features and labels — nothing after the decision 
     ['META', t0 + 9 * 60_000, 0, { tw: 'https://x.com/tryagency', web: 'https://agencypad.fun', tg: null, desc: 'living tokens', img: null, keys: 5 }],
     ['XT', t0 + 6 * 60_000, 0, 'tryagency', '2', t0 + 80_000, { a: 'tryagency', t: 'CA', mint: 1 }],
     ...T,
-    ['K', s0 + 60 * 30, 0, 50, 400, 50, 400, 0, 0, 0, 0, 0, 0, 1],
+    ['K', Math.floor(s0 / 60) + 30, 0, 50, 400, 50, 400, 0, 0, 0, 0, 0, 0, 1],
     ['X', t0 + 31 * 60_000, s0 + 1860, 0],
     ['GAP', t0 + 400_000, 'logs0', 'logs0: closed (1006)'],
     ['M', 1, 'MINTB'], ['PC', t0 + 7 * 3600e3, 0, 1, 'sig', 'Later', 'LATER', null, 0.1, 1e6, 28, 0]];
@@ -192,25 +192,35 @@ test('dataset: point-in-time features and labels — nothing after the decision 
   const ds = readDataset([path.join(dir, 'ev-20261002-12.jsonl')]);
   const a = ds.launches.get('MINTA')!;
   assert.equal(a.creator, 'DEV'); assert.equal(a.trades.length, 7);
-  const f60 = features(a, 60, { creatorLaunches: 0, creatorGraduations: 0 }, ds.gaps);
+  const f60 = features(a, 60, { creatorLaunches: 0, creatorGraduations: 0 }, blindSpots(ds));
   assert.equal(f60.buyers, 4, 'buyers up to 60 s only'); assert.equal(f60.trades, 4);
   assert.equal(f60.xCaPost, false, 'the CA post at +80 s is not known at 60 s (nor before +110 s: 30 s to see it)');
   assert.equal(f60.hasX, true, 'metadata is an immutable document named at creation: known from the start');
   assert.equal(f60.gapInWindow, false); assert.equal(f60.chainBreaks, 0);
   assert.ok(Math.abs(f60.top1! - 2 / 5) < 1e-9, 'B3 bought 2 of 5 SOL');
-  const f120 = features(a, 120, { creatorLaunches: 0, creatorGraduations: 0 }, ds.gaps);
+  const f120 = features(a, 120, { creatorLaunches: 0, creatorGraduations: 0 }, blindSpots(ds));
   assert.equal(f120.xCaPost, true); assert.equal(f120.xCaPostDelayS, 80);
-  assert.equal(features(a, 100, { creatorLaunches: 0, creatorGraduations: 0 }, ds.gaps).xCaPost, false, 'posted at +80 s, seen at +110 s');
+  assert.equal(features(a, 100, { creatorLaunches: 0, creatorGraduations: 0 }, blindSpots(ds)).xCaPost, false, 'posted at +80 s, seen at +110 s');
   assert.equal(f120.devSold, false); assert.equal(f120.sellSol, 0.5);
   assert.ok(Math.abs(f120.mcapSol! - at90 / 1e9 * 1e6 * 1e9) < 1e-6, 'market cap from the last trade before 120 s');
   const r120 = rows(ds, 120).find(r => r.mint === 'MINTA')!;
-  assert.equal(r120.y.graduated, true); assert.ok(r120.y.mfe[60]! > 3, 'the minute-30 candle at 400 SOL is in the 1 h window');
+  assert.equal(r120.y.graduated, true, 'completed at 31 min: inside the hour'); assert.ok(r120.y.mfe[60]! > 3, 'the minute-30 candle at 400 SOL is in the 1 h window');
+  assert.equal(r120.y.graduatedMin, 31);
   assert.equal(r120.y.reached[5], true);
   assert.equal(r120.y.twoBeforeHalf, true);
-  const f600 = features(a, 600, { creatorLaunches: 0, creatorGraduations: 0 }, ds.gaps);
+  const f600 = features(a, 600, { creatorLaunches: 0, creatorGraduations: 0 }, blindSpots(ds));
   assert.equal(f600.gapInWindow, true, 'the logs disconnect at +400 s is inside the 600 s window');
   // A trade lost in a disconnect shows up as a break in the curve-state chain.
   a.trades.splice(2, 1);
-  assert.equal(features(a, 60, { creatorLaunches: 0, creatorGraduations: 0 }, ds.gaps).chainBreaks, 1);
+  assert.equal(features(a, 60, { creatorLaunches: 0, creatorGraduations: 0 }, blindSpots(ds)).chainBreaks, 1);
   assert.equal(rows(ds, 60).some(r => r.mint === 'MINTB'), false, 'a launch at the very end of the data has no decision time yet');
+  // Labels wait for their whole window: with the data ending 40 min after the decision, the 1 h outcomes are unknown.
+  const short = { ...ds, last: a.createdObs + 120_000 + 40 * 60_000 };
+  const early = rows(short, 120).find(r => r.mint === 'MINTA')!;
+  assert.equal(early.y.graduated, null); assert.equal(early.y.reached[5], null); assert.equal(early.y.twoBeforeHalf, null);
+  assert.ok(early.y.mfe[15]! > 0); assert.equal(early.y.mfe[60], null);
+  // One feed down while another is connected is no blind spot; both down at once, or a restart, is.
+  assert.deepEqual(blindSpots({ runs: [{ start: 0, sources: 2 }], gaps: [{ obs: 100_000, source: 'logs0', detail: '' }] }), []);
+  assert.deepEqual(blindSpots({ runs: [{ start: 0, sources: 2 }, { start: 500_000, sources: 2 }], gaps: [{ obs: 100_000, source: 'logs0', detail: '' }, { obs: 105_000, source: 'logs1', detail: '' }] }),
+    [100_000, 105_000, 500_000]);
 });

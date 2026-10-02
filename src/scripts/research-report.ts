@@ -31,12 +31,12 @@ function main(): void {
   for (const t of times) {
     let all = rows(ds, t);
     if (t === times[0]) for (const line of coverage(ds, all)) console.log(`  ${line}`);
-    if (strict) all = all.filter(r => !r.f.gapInWindow && r.f.chainBreaks === 0);
+    if (strict) all = all.filter(r => !r.f.gapInWindow && (r.f.mayhem || r.f.chainBreaks === 0));
     const cut = all[Math.floor(all.length * split)]?.createdObs ?? Infinity;
     const discovery = all.filter(r => r.createdObs < cut), validation = all.filter(r => r.createdObs >= cut);
     const baseD = outcome(discovery), baseV = outcome(validation);
     console.log(`\n== DECISION ${t} s after creation · ${all.length} launches still on the curve${strict ? ' (strict)' : ''} · validation from ${Number.isFinite(cut) ? new Date(cut).toISOString().slice(0, 16) : '–'} UTC`);
-    console.log(`  outcomes from the price at ${t} s: win = 2× before halving · 5× = reached 5× within 6 h · grad = curve completed within 6 h · mfe1h/mae15m = median best/worst multiple`);
+    console.log(`  outcomes from the price at ${t} s, within 1 h (counted only once the hour is in the data): win = 2× before halving · 2×/5× = reached · grad = curve completed · mfe1h/mae15m = median best/worst multiple`);
     console.log(`  base rate         D ${cell(baseD)} | V ${cell(baseV)}`);
     const found: Array<{ k: FeatureKey; b: Bin; l: CohortLine }> = [];
     for (const k of [...NUMERIC, ...BOOLEAN]) {
@@ -73,15 +73,16 @@ function main(): void {
     console.log('  TOP RUNNERS and what was known at the decision time');
     for (const r of runners) {
       const f = r.f;
-      console.log(`    ${(r.symbol ?? r.mint.slice(0, 6)).slice(0, 12).padEnd(12)} ${new Date(r.createdObs).toISOString().slice(5, 16)} peak ${(1 + (r.y.mfe[360] ?? r.y.mfe[60] ?? 0)).toFixed(1)}× ${r.y.graduated ? 'grad' : '    '} | ` +
-        `mcap ${f.mcapSol?.toFixed(0) ?? '?'} SOL · curve ${((f.progress ?? 0) * 100).toFixed(0)}% · vel ${((f.velocity60 ?? 0) * 100).toFixed(1)}%/min · buyers ${f.buyers} (eff ${f.effectiveBuyers?.toFixed(0) ?? '–'}, top1 ${((f.top1 ?? 0) * 100).toFixed(0)}%) · ` +
+      console.log(`    ${(r.symbol ?? r.mint.slice(0, 6)).slice(0, 12).padEnd(12)} ${new Date(r.createdObs).toISOString().slice(5, 16)} peak ${(1 + (r.y.mfe[360] ?? r.y.mfe[60] ?? 0)).toFixed(1)}× ${r.y.graduatedMin !== null ? `grad ${r.y.graduatedMin.toFixed(0)}m` : '       '} | ` +
+        `mcap ${f.mcapSol?.toFixed(0) ?? '?'} SOL${f.mayhem ? ' MAYHEM' : ''} · curve ${((f.progress ?? 0) * 100).toFixed(0)}% · vel ${((f.velocity60 ?? 0) * 100).toFixed(1)}%/min · buyers ${f.buyers} (eff ${f.effectiveBuyers?.toFixed(0) ?? '–'}, top1 ${((f.top1 ?? 0) * 100).toFixed(0)}%) · ` +
         `dev ${f.devBuySol?.toFixed(2) ?? '?'} SOL${f.devSold ? ' SOLD' : ''} · X ${f.hasX ? (f.xCaPost ? `CA posted +${f.xCaPostDelayS}s` : 'yes') : 'no'} · site ${f.hasSite ? 'yes' : 'no'} · creator ${f.creatorLaunches}/${f.creatorGraduations}`);
     }
     if (arg('csv')) for (const r of all) {
-      if (!csv.length) csv.push(['t', 'mint', 'symbol', 'createdUtc', 'set', ...Object.keys(r.f).filter(k => k !== 't'), 'win', 'reach2', 'reach5', 'reach10', 'graduated', 'mfe5', 'mfe15', 'mfe60', 'mfe360', 'mae5', 'mae15', 'mae60', 'peakMin'].join(','));
+      if (!csv.length) csv.push(['t', 'mint', 'symbol', 'createdUtc', 'set', ...Object.keys(r.f).filter(k => k !== 't'), 'win1h', 'reach2_1h', 'reach5_1h', 'reach10_1h', 'reach5_6h', 'reach10_6h', 'grad1h', 'grad6h', 'mfe5', 'mfe15', 'mfe60', 'mfe360', 'mae5', 'mae15', 'mae60', 'peakMin'].join(','));
       const y = r.y;
       csv.push([t, r.mint, JSON.stringify(r.symbol ?? ''), new Date(r.createdObs).toISOString(), r.createdObs < cut ? 'D' : 'V', ...Object.entries(r.f).filter(([k]) => k !== 't').map(([, v]) => v ?? ''),
-        y.twoBeforeHalf ?? '', y.reached[2] ?? '', y.reached[5] ?? '', y.reached[10] ?? '', y.graduated ?? '', y.mfe[5] ?? '', y.mfe[15] ?? '', y.mfe[60] ?? '', y.mfe[360] ?? '',
+        y.twoBeforeHalf ?? '', y.reached[2] ?? '', y.reached[5] ?? '', y.reached[10] ?? '', y.reached6h[5] ?? '', y.reached6h[10] ?? '', y.graduated ?? '', y.graduated6h ?? '',
+        y.mfe[5] ?? '', y.mfe[15] ?? '', y.mfe[60] ?? '', y.mfe[360] ?? '',
         y.mae[5] ?? '', y.mae[15] ?? '', y.mae[60] ?? '', y.peakMin ?? ''].join(','));
     }
   }

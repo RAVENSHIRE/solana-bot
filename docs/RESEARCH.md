@@ -45,7 +45,7 @@ are numbers from the file's own dictionaries (`["M", i, mint]`, `["W", i, wallet
 | `PC` | obs, m, creator w, signature prefix, name, symbol, uri, dev buy SOL, dev buy tokens, market cap SOL, mayhem 0/1 — PumpPortal creation |
 | `C` | obs, chain ts (s), slot, m, creating wallet w, creator w (if different), signature prefix, name, symbol, uri — CreateEvent |
 | `T` | obs, chain ts (s), slot, m, wallet w, buy 1/0, lamports, token units, virtual SOL, virtual tokens, real tokens (after the trade), signature prefix |
-| `K` | minute (unix s), m, open, high, low, close (market cap SOL), buy lamports, sell lamports, buys, sells, unique buyers, first-time buyers, curve progress at close |
+| `K` | minute (unix minutes), m, open, high, low, close (market cap SOL), buy lamports, sell lamports, buys, sells, unique buyers, first-time buyers, curve progress at close |
 | `X` | obs, chain ts, m — the curve completed |
 | `G` | obs, m, signature prefix, pool — migrated (PumpPortal) |
 | `META` | obs, m, {tw, web, tg, desc, img, keys} or {error} |
@@ -58,9 +58,17 @@ are numbers from the file's own dictionaries (`["M", i, mint]`, `["W", i, wallet
 
 ## Study design (the report)
 
-Decision times 60, 120 and 300 s after creation. Features use only records observed by then: curve progress,
+Decision times 60, 120, 300 and 600 s after creation. Features use only records observed by then: curve progress,
 velocity and acceleration; unique and first-time buyers and their acceleration; buyer concentration (HHI, top-1/top-5
 share); buy/sell flow; dev buy and dev selling; metadata completeness; X account facts and whether its own CA post
 existed by then; website CA; the creator's earlier launches in the dataset. Labels from the price at the decision time:
-maximum gain and drawdown over 5 min, 15 min, 1 h and 6 h, reached 2×/5×/10×/20×/50×, graduated, time to peak.
+maximum gain and drawdown over 5 min, 15 min, 1 h and 6 h; reached 2×/5×/10× and graduated within 1 h and 6 h; 2× before
+halving within 1 h; time to peak. A horizon's labels stay empty until the data covers the whole horizon (no early
+counting of fast hits). The curve is observed up to graduation; the pool afterwards is not, so multiples are capped
+at the graduation price.
+
+Data quality: a missing trade shows as a break in the curve-state chain (each trade reports the reserves after it;
+the reserves before it must be some earlier trade's). On 2 Oct 99 % of normal launches had no break; launches in
+pump.fun's "mayhem mode" break by design (their curve moves without matching trades) and are a separate feature.
+A blind spot is an observer restart or every trade feed down at once; `--strict` drops rows with either.
 Cohorts are measured on the first 60 % of launches and checked, unchanged, on the last 40 %.

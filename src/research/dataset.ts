@@ -32,7 +32,9 @@ export interface LaunchFacts {
   sites: Array<{ obs: number; verdict: string | null }>;
 }
 export interface Gap { obs: number; source: string; detail: string }
-export interface Dataset { launches: Map<string, LaunchFacts>; gaps: Gap[]; first: number; last: number; files: number; wallets: number }
+/** The observer's runs: when each started and how many trade feeds it merged (one feed down is covered by another). */
+export interface Run { start: number; sources: number }
+export interface Dataset { launches: Map<string, LaunchFacts>; gaps: Gap[]; runs: Run[]; first: number; last: number; files: number; wallets: number }
 
 /** Ledger files in time order (gzipped or the open hour). */
 export function ledgerFiles(dir: string): string[] {
@@ -40,7 +42,7 @@ export function ledgerFiles(dir: string): string[] {
 }
 
 export function readDataset(files: string[], o: { from?: number; to?: number } = {}): Dataset {
-  const launches = new Map<string, LaunchFacts>(), gaps: Gap[] = [], walletIds = new Map<string, number>();
+  const launches = new Map<string, LaunchFacts>(), gaps: Gap[] = [], runs: Run[] = [], walletIds = new Map<string, number>();
   let first = Infinity, last = 0;
   const launch = (mint: string, obs: number): LaunchFacts => {
     let l = launches.get(mint);
@@ -64,7 +66,8 @@ export function readDataset(files: string[], o: { from?: number; to?: number } =
       const tag = r[0];
       if (tag === 'M') { mints[r[1] as number] = r[2] as string; continue; }
       if (tag === 'W') { wallets[r[1] as number] = r[2] as string; continue; }
-      const obs = tag === 'K' ? (r[1] as number) * 1000 + 60_000 : r[1] as number;
+      // A candle's field 1 is its minute (unix minutes); it is complete, i.e. known, when the minute ends.
+      const obs = tag === 'K' ? (r[1] as number) * 60_000 + 60_000 : r[1] as number;
       if (typeof obs !== 'number') continue;
       if ((o.from !== undefined && obs < o.from) || (o.to !== undefined && obs > o.to)) continue;
       if (tag !== 'STAT') { first = Math.min(first, obs); last = Math.max(last, obs); }
@@ -96,7 +99,7 @@ export function readDataset(files: string[], o: { from?: number; to?: number } =
         }
         case 'K': {
           const l = launches.get(mintOf(r[2]) ?? '');
-          if (l) l.candles.push({ m: (r[1] as number) * 1000, h: r[4] as number, l: r[5] as number, c: r[6] as number });
+          if (l) l.candles.push({ m: (r[1] as number) * 60_000, h: r[4] as number, l: r[5] as number, c: r[6] as number });
           break;
         }
         case 'X': { const l = launches.get(mintOf(r[3]) ?? ''); if (l) l.completeObs ??= obs; break; }
@@ -123,6 +126,7 @@ export function readDataset(files: string[], o: { from?: number; to?: number } =
           break;
         }
         case 'GAP': gaps.push({ obs, source: String(r[2]), detail: String(r[3]) }); break;
+        case 'START': runs.push({ start: obs, sources: Number((r[2] as { sources?: number } | null)?.sources ?? 1) }); break;
         default: break;
       }
     }
@@ -131,7 +135,7 @@ export function readDataset(files: string[], o: { from?: number; to?: number } =
     l.trades.sort((a, b) => a.slot - b.slot || a.obs - b.obs);
     l.candles.sort((a, b) => a.m - b.m);
   }
-  return { launches, gaps, first: Number.isFinite(first) ? first : 0, last, files: files.length, wallets: walletIds.size };
+  return { launches, gaps, runs, first: Number.isFinite(first) ? first : 0, last, files: files.length, wallets: walletIds.size };
 }
 
 // ------------------------------------------------------------------ features
@@ -150,6 +154,8 @@ export interface Features {
   gapInWindow: boolean;
   /** Trades whose reported curve state does not follow from the previous one (missing trades), up to t. */
   chainBreaks: number;
+  /** pump.fun "mayhem mode" (PumpPortal flag): its curve does not follow the trades alone, so chain breaks are expected. */
+  mayhem: boolean;
 }
 
 /** The launch's price path (market cap in SOL): trades in the raw window, minute candles after. */
@@ -161,7 +167,21 @@ function pathAfter(l: LaunchFacts, from: number): Array<{ at: number; h: number;
   return out.sort((a, b) => a.at - b.at);
 }
 
-export function features(l: LaunchFacts, tS: number, history: { creatorLaunches: number; creatorGraduations: number }, gaps: Gap[]): Features {
+/**
+ * Moments when the observer could have missed trades: its own restarts (a run starting), and a feed disconnect while
+ * the run had only one feed, or while another feed was disconnected within the same few seconds.
+ */
+export function blindSpots(ds: Pick<Dataset, 'gaps' | 'runs'>): number[] {
+  const out = ds.runs.map(r => r.start).slice(1);
+  const logs = ds.gaps.filter(g => g.source.startsWith('logs')).sort((a, b) => a.obs - b.obs);
+  for (const g of logs) {
+    const run = [...ds.runs].reverse().find(r => r.start <= g.obs);
+    if (!run || run.sources <= 1 || logs.some(o => o.source !== g.source && Math.abs(o.obs - g.obs) <= 10_000)) out.push(g.obs);
+  }
+  return out.sort((a, b) => a - b);
+}
+
+export function features(l: LaunchFacts, tS: number, history: { creatorLaunches: number; creatorGraduations: number }, blind: number[]): Features {
   const end = l.createdObs + tS * 1000, seen = l.trades.filter(t => t.obs <= end), last = seen.at(-1);
   const progressAt = (ms: number) => { const tr = l.trades.filter(t => t.obs <= ms).at(-1); return tr ? curveProgress(tr.realTok) : 0; };
   const p = last ? curveProgress(last.realTok) : null;
@@ -169,15 +189,16 @@ export function features(l: LaunchFacts, tS: number, history: { creatorLaunches:
   const v30 = tS >= 30 ? vel(30_000) : null, v60 = tS >= 60 ? vel(60_000) : null;
   const prev30 = tS >= 60 && p !== null ? (progressAt(end - 30_000) - progressAt(end - 60_000)) / 0.5 : null;
   const firstBuy = new Map<number, number>(), spent = new Map<number, number>();
-  let buySol = 0, sellSol = 0, devSold = false, breaks = 0, prev: Trade | null = null;
-  for (const t of seen) {
+  let buySol = 0, sellSol = 0, devSold = false, breaks = 0;
+  // Each trade's curve state before it must be the state after an earlier trade (or the first trade seen): trades in
+  // one slot can arrive in any order, so it is checked against every earlier state, not only the previous one.
+  const states = new Set<number>();
+  for (const [i, t] of seen.entries()) {
+    const before = t.buy ? t.vSol - t.lamports : t.vSol + t.lamports;
+    if (i > 0 && !states.has(before)) breaks++;
+    states.add(t.vSol);
     if (t.buy) { buySol += t.lamports / 1e9; spent.set(t.w, (spent.get(t.w) ?? 0) + t.lamports); if (!firstBuy.has(t.w)) firstBuy.set(t.w, t.obs); }
     else { sellSol += t.lamports / 1e9; if (t.w === l.creatorW) devSold = true; }
-    if (prev) {
-      const before = t.buy ? t.vSol - t.lamports : t.vSol + t.lamports;
-      if (Math.abs(before - prev.vSol) > Math.max(1_000, prev.vSol * 1e-6)) breaks++;
-    }
-    prev = t;
   }
   const newIn = (a: number, b: number) => [...firstBuy.values()].filter(x => x > a && x <= b).length;
   const n30 = newIn(end - 30_000, end), nPrev = newIn(end - 60_000, end - 30_000);
@@ -200,49 +221,59 @@ export function features(l: LaunchFacts, tS: number, history: { creatorLaunches:
     xCaPost: l.meta && x.kind === 'ACCOUNT' ? !!caPost : null, xCaPostDelayS: caPost ? Math.round((caPost.at - created) / 1000) : null,
     xFollowers: xr?.followers ?? null, xAccountAgeH: xr?.joined ? (created - xr.joined) / 3_600_000 : null,
     creatorLaunches: history.creatorLaunches, creatorGraduations: history.creatorGraduations,
-    gapInWindow: gaps.some(g => g.source.startsWith('logs') && g.obs >= l.createdObs && g.obs <= end), chainBreaks: breaks,
+    gapInWindow: blind.some(at => at >= l.createdObs && at <= end), chainBreaks: breaks, mayhem: l.mayhem,
   };
 }
 
 // ------------------------------------------------------------------ labels
 
+/**
+ * Outcomes after the decision time. Every label of a horizon is null until the data covers that whole horizon, so
+ * an early report never counts the fast hits while the misses are still open.
+ */
 export interface Labels {
-  /** Max gain and max drawdown (fractions of the decision price) within each horizon; null when the data ends first. */
+  /** Max gain and max drawdown (fractions of the decision price) within each horizon (minutes). */
   mfe: Record<number, number | null>; mae: Record<number, number | null>;
-  reached: Record<number, boolean | null>;
-  /** 2× reached before the price halved (a take-profit / stop pair, pessimistic within a minute). */
+  /** Reached k× the decision price within 60 min and within 6 h. */
+  reached: Record<number, boolean | null>; reached6h: Record<number, boolean | null>;
+  /** 2× before the price halved, within 60 min (a take-profit / stop pair; pessimistic within a minute). */
   twoBeforeHalf: boolean | null;
-  graduated: boolean | null; graduatedMin: number | null; peakMin: number | null;
+  /** The curve completed (graduated) within 60 min / 6 h. */
+  graduated: boolean | null; graduated6h: boolean | null; graduatedMin: number | null; peakMin: number | null;
 }
 
 export function labels(l: LaunchFacts, tS: number, entryMcap: number | null, dataEnd: number): Labels {
   const from = l.createdObs + tS * 1000;
-  const out: Labels = { mfe: {}, mae: {}, reached: {}, twoBeforeHalf: null, graduated: null, graduatedMin: null, peakMin: null };
+  const out: Labels = { mfe: {}, mae: {}, reached: {}, reached6h: {}, twoBeforeHalf: null, graduated: null, graduated6h: null, graduatedMin: null, peakMin: null };
   if (!entryMcap || entryMcap <= 0) return out;
-  const path = pathAfter(l, from), full = 360 * 60_000;
   // A curve that completed is worth its graduation price at least: the path is capped there (the pool is not observed).
+  const path = pathAfter(l, from);
+  const within = (min: number) => path.filter(p => p.at <= from + min * 60_000);
+  const covered = (min: number) => from + min * 60_000 <= dataEnd;
   for (const h of HORIZONS_MIN) {
-    const until = from + h * 60_000;
-    if (until > dataEnd) { out.mfe[h] = null; out.mae[h] = null; continue; }
-    const seg = path.filter(p => p.at <= until);
+    if (!covered(h)) { out.mfe[h] = null; out.mae[h] = null; continue; }
+    const seg = within(h);
     out.mfe[h] = seg.length ? Math.max(...seg.map(p => p.h)) / entryMcap - 1 : 0;
     out.mae[h] = seg.length ? Math.min(...seg.map(p => p.l)) / entryMcap - 1 : 0;
   }
-  const complete = from + full <= dataEnd;
-  const seg = path.filter(p => p.at <= from + full);
+  const hour = within(60), day = within(360);
   for (const k of MULTIPLES) {
-    const hit = seg.some(p => p.h >= entryMcap * k);
-    out.reached[k] = hit ? true : complete ? false : null;
+    out.reached[k] = covered(60) ? hour.some(p => p.h >= entryMcap * k) : null;
+    out.reached6h[k] = covered(360) ? day.some(p => p.h >= entryMcap * k) : null;
   }
-  let result: boolean | null = complete ? false : null;
-  for (const p of seg) {
-    if (p.l <= entryMcap * 0.5) { result = false; break; }
-    if (p.h >= entryMcap * 2) { result = true; break; }
+  if (covered(60)) {
+    let result = false;
+    for (const p of hour) {
+      if (p.l <= entryMcap * 0.5) break;
+      if (p.h >= entryMcap * 2) { result = true; break; }
+    }
+    out.twoBeforeHalf = result;
   }
-  out.twoBeforeHalf = result;
-  const grad = l.completeObs !== null && l.completeObs > from && l.completeObs <= from + full;
-  out.graduated = grad ? true : l.completeObs !== null && l.completeObs <= from ? null : complete ? false : null;
-  out.graduatedMin = grad ? (l.completeObs! - l.createdObs) / 60_000 : null;
+  const gradAt = l.completeObs !== null && l.completeObs > from ? l.completeObs : null;
+  out.graduated = covered(60) ? gradAt !== null && gradAt <= from + 60 * 60_000 : null;
+  out.graduated6h = covered(360) ? gradAt !== null && gradAt <= from + 360 * 60_000 : null;
+  out.graduatedMin = gradAt !== null ? (gradAt - l.createdObs) / 60_000 : null;
+  const seg = covered(360) ? day : hour;
   if (seg.length) { const peak = seg.reduce((a, b) => (b.h > a.h ? b : a)); out.peakMin = (peak.at - l.createdObs) / 60_000; }
   return out;
 }
@@ -252,13 +283,13 @@ export interface Row { mint: string; symbol: string | null; createdObs: number; 
 /** Every launch with a creation record, at one decision time; launches already complete by then are left out. */
 export function rows(ds: Dataset, tS: number): Row[] {
   const list = [...ds.launches.values()].filter(l => l.createdObs >= ds.first).sort((a, b) => a.createdObs - b.createdObs);
-  const byCreator = new Map<string, LaunchFacts[]>();
+  const byCreator = new Map<string, LaunchFacts[]>(), blind = blindSpots(ds);
   const out: Row[] = [];
   for (const l of list) {
     const end = l.createdObs + tS * 1000, earlier = l.creator ? byCreator.get(l.creator) ?? [] : [];
     if (end <= ds.last && (l.completeObs === null || l.completeObs > end)) {
       const history = { creatorLaunches: earlier.length, creatorGraduations: earlier.filter(e => e.completeObs !== null && e.completeObs <= end).length };
-      const f = features(l, tS, history, ds.gaps);
+      const f = features(l, tS, history, blind);
       out.push({ mint: l.mint, symbol: l.symbol, createdObs: l.createdObs, f, y: labels(l, tS, f.mcapSol, ds.last) });
     }
     if (l.creator) byCreator.set(l.creator, [...earlier, l]);
