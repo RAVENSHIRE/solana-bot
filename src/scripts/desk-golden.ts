@@ -176,10 +176,18 @@ async function main(): Promise<void> {
   // Stop slippage: a fast pool falls through the stop between two checks (live, 1 Oct: $358K sold under a $392.5K stop).
   const deployed = { rules: onlyUp({ bars: 2, ref: 2, chasePct: 12, windowMin: 10, stopBelowPct: 5 }), minVolumeUsd: 0 };
   console.log('\nONLY_UP as deployed (2 green, stop −5%, trail 25% after +50%, 60m) by stop slippage:');
-  for (const stopSlipPct of [3, 6, 10, 15]) {
-    const trades = entriesOf(deployed).map(({ s, e }) => pocketTrade(s, e, { mode: 'TRAIL', trailing: { activationPct: 50, stopPct: 25 }, belowResistancePct: 0, maxHoldMin: 60 }, { ...costs, stopSlipPct }));
+  for (const gapFill of [false, true]) for (const stopSlipPct of [3, 6, 10, 15]) {
+    const trades = entriesOf(deployed).map(({ s, e }) => pocketTrade(s, e, { mode: 'TRAIL', trailing: { activationPct: 50, stopPct: 25 }, belowResistancePct: 0, maxHoldMin: 60 }, { ...costs, stopSlipPct, gapFill }));
     const all = summarize(trades), a = summarize(trades.filter(t => t.entryAt < split)), b = summarize(trades.filter(t => t.entryAt >= split));
-    console.log(`  ${String(stopSlipPct).padStart(2)}% · n ${all.trades} · mean ${all.meanPct.toFixed(1)}% · PF ${all.profitFactor.toFixed(2)} · halves ${a.meanPct.toFixed(1)}% / ${b.meanPct.toFixed(1)}%`);
+    console.log(`  ${gapFill ? 'gapped stops at the minute close' : 'stops at their level'} · ${String(stopSlipPct).padStart(2)}% · n ${all.trades} · mean ${all.meanPct.toFixed(1)}% · PF ${all.profitFactor.toFixed(2)} · halves ${a.meanPct.toFixed(1)}% / ${b.meanPct.toFixed(1)}% · worst ${all.worstPct.toFixed(0)}%`);
+  }
+  // By entry level: how far above the pool's first price the only-up fill is (live, 2 Oct: SpaceX, Mr Beast, SIGF at 25–30× and $300–470K).
+  console.log('\nONLY_UP as deployed, gapped stops, by market cap at entry:');
+  for (const [lo, hi] of [[0, 100_000], [100_000, 250_000], [250_000, 1e12]] as const) {
+    const trades = entriesOf(deployed).filter(({ e }) => e.price >= lo && e.price < hi)
+      .map(({ s, e }) => pocketTrade(s, e, { mode: 'TRAIL', trailing: { activationPct: 50, stopPct: 25 }, belowResistancePct: 0, maxHoldMin: 60 }, { ...costs, gapFill: true }));
+    const all = summarize(trades);
+    console.log(`  $${lo / 1000}K–${hi > 1e9 ? '…' : `$${hi / 1000}K`} · n ${all.trades} · mean ${all.meanPct.toFixed(1)}% · PF ${all.profitFactor.toFixed(2)} · worst ${all.worstPct.toFixed(0)}%`);
   }
 
   // Tokens named on the command line: the pattern each rule set saw and the trade it made.

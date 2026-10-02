@@ -11,23 +11,28 @@ const MINUTE = 60_000;
  * the replay is pessimistic: losses (stop loss, profit lock) are checked against the low before the candle's high
  * can raise the peak or reach the take profit. Returns percentages on price, before fees and impact.
  */
-export function replayExit(candles: Candle[], entryAt: number, entryPrice: number, r: ExitRules, horizonMs: number): ReplayExit {
+/**
+ * `gapFill`: a stop-type exit in a minute that closes under the stop level sells at that close, not at the level — a
+ * pool rugged by one large sell falls through the stop in seconds (GOLDEN live, 2 Oct: −78 … −97 % on a 5 % stop).
+ */
+export function replayExit(candles: Candle[], entryAt: number, entryPrice: number, r: ExitRules, horizonMs: number, o: { gapFill?: boolean } = {}): ReplayExit {
   const series = candles.filter(c => c.t + MINUTE > entryAt && c.t < entryAt + horizonMs).sort((a, b) => a.t - b.t);
   const pct = (p: number) => (p / entryPrice - 1) * 100, at = (p: number) => entryPrice * (1 + p / 100);
   let peak = 0;
+  const stopFill = (level: number, open: number, close: number) => o.gapFill && close < level ? Math.min(close, open) : Math.min(level, open);
   for (const c of series) {
     const stopAt = entryAt + r.maxHoldMin * MINUTE;
     // The entry candle's range before the entry is unknown; only its close is used.
     const first = c.t <= entryAt, low = first ? c.c : c.l, high = first ? c.c : c.h, open = first ? c.c : c.o;
     const sl = at(-r.stopLossPct);
-    if (low <= sl) return { exitAt: Math.max(c.t, entryAt), exitPrice: Math.min(sl, open), reason: 'STOP_LOSS', peakPct: peak };
+    if (low <= sl) return { exitAt: Math.max(c.t, entryAt), exitPrice: stopFill(sl, open, c.c), reason: 'STOP_LOSS', peakPct: peak };
     if (r.giveback && peak >= r.giveback.lockPeakPct) {
       const lock = at(peak - r.giveback.points);
-      if (low <= lock) return { exitAt: Math.max(c.t, entryAt), exitPrice: Math.min(lock, open), reason: 'PROFIT_LOCK', peakPct: peak };
+      if (low <= lock) return { exitAt: Math.max(c.t, entryAt), exitPrice: stopFill(lock, open, c.c), reason: 'PROFIT_LOCK', peakPct: peak };
     }
     if (r.trailing && peak >= r.trailing.activationPct) {
       const trail = at(peak) * (1 - r.trailing.stopPct / 100);
-      if (low <= trail) return { exitAt: Math.max(c.t, entryAt), exitPrice: Math.min(trail, open), reason: 'TRAILING_STOP', peakPct: peak };
+      if (low <= trail) return { exitAt: Math.max(c.t, entryAt), exitPrice: stopFill(trail, open, c.c), reason: 'TRAILING_STOP', peakPct: peak };
     }
     if (pct(high) >= r.takeProfitPct) return { exitAt: Math.max(c.t, entryAt), exitPrice: Math.max(at(r.takeProfitPct), open), reason: 'TAKE_PROFIT', peakPct: Math.max(peak, pct(high)) };
     peak = Math.max(peak, pct(high));

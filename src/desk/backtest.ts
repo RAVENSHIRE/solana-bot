@@ -30,6 +30,8 @@ export interface Costs {
   fixedUsd: number;
   /** Extra loss on stop-type exits: they fire after the level is crossed and sell into a falling pool. */
   stopSlipPct: number;
+  /** A stop gapped within a minute (closed under the level) sells at that minute's close (see replayExit). */
+  gapFill?: boolean;
 }
 export interface Signal { at: number; price: number; change5mPct: number; volume5mUsd: number; marketCapUsd: number; liquidityUsd: number }
 export interface SimTrade { mint: string; symbol: string | null; entryAt: number; entryPrice: number; exitAt: number; exitPrice: number; reason: string; peakPct: number; returnPct: number; pnlUsd: number }
@@ -133,7 +135,7 @@ export function pocketTrade(s: PoolSeries, fill: PocketFill, x: PocketExit, cost
   const trade = (exitAt: number, exitPrice: number, reason: string, peakPct: number, pnlUsd: number): SimTrade => ({ mint: s.mint, symbol: s.symbol, entryAt: fill.at,
     entryPrice: fill.price, exitAt, exitPrice, reason, peakPct, returnPct: pnlUsd / costs.sizeUsd * 100, pnlUsd });
   if (bar && bar.l <= fill.stop) {
-    const exitPrice = fill.stop * (1 - costs.stopSlipPct / 100);
+    const exitPrice = (costs.gapFill && bar.c < fill.stop ? bar.c : fill.stop) * (1 - costs.stopSlipPct / 100);
     return trade(fill.at, exitPrice, 'STOP_LOSS', 0, net(exitPrice, costs.sizeUsd) * costs.sizeUsd - costs.fixedUsd);
   }
   const tpPct = Math.max(3, (fill.resistance * (1 - x.belowResistancePct / 100) / fill.price - 1) * 100);
@@ -144,7 +146,7 @@ export function pocketTrade(s: PoolSeries, fill: PocketFill, x: PocketExit, cost
   let pnlUsd = -costs.fixedUsd, exitAt = fill.at, peakPct = 0, value = 0;
   const reasons: string[] = [];
   for (const leg of legs) {
-    const r = replayExit(s.candles, fill.at, fill.price, leg.rules, x.maxHoldMin * MINUTE + MINUTE);
+    const r = replayExit(s.candles, fill.at, fill.price, leg.rules, x.maxHoldMin * MINUTE + MINUTE, { gapFill: costs.gapFill });
     const exitPrice = STOPS.has(r.reason) ? r.exitPrice * (1 - costs.stopSlipPct / 100) : r.exitPrice;
     pnlUsd += net(exitPrice, costs.sizeUsd * leg.weight) * costs.sizeUsd * leg.weight;
     exitAt = Math.max(exitAt, r.exitAt); peakPct = Math.max(peakPct, r.peakPct); value += exitPrice * leg.weight; reasons.push(r.reason);
