@@ -4,7 +4,10 @@
  * phone (DESK_NTFY_TOPIC / Telegram); every other candidate rule is recorded as a shadow call. Qualification is rerun
  * every 6 h in a child process. Read-only on chain: it never signs, trades or reads a private key.
  *
- *   npm run research:observe -- [--dir data-desk/research] [--sources public,publicnode[,helius]] [--min-free-mb 700] [--no-calls] [--no-phone]
+ *   npm run research:observe -- [--dir data-desk/research] [--sources public,publicnode[,helius]] [--min-free-mb 700] [--no-calls] [--no-phone] [--no-verified]
+ *
+ * Also watches established coins with a blue check (Jupiter verified, or on the watchlist watch-tokens.json in the
+ * research folder) and sends an INFO message when one starts to move (research/verified.ts).
  *
  * Trade sources are merged, each transaction once. "helius" adds the first Helius endpoint of RPC_ENDPOINTS;
  * Helius may bill websocket traffic against the plan's credits, so it is off unless asked for.
@@ -18,6 +21,7 @@ import { ResearchLedger } from '../research/ledger';
 import { ResearchObserver, PUBLIC_RPC_WS, PUBLICNODE_WS } from '../research/observer';
 import { CallEngine } from '../research/calls';
 import { LocalFeed, LOCAL_FEED } from '../research/local-feed';
+import { VerifiedWatch } from '../research/verified';
 import type { Qualification } from '../research/qualify';
 
 const arg = (name: string) => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : undefined; };
@@ -79,6 +83,12 @@ async function main(): Promise<void> {
     next(age > REQUALIFY_MS ? 60_000 : REQUALIFY_MS - age);
   }
 
+  // Established coins with a blue check that start to move: INFO to the phone, VT records for later study.
+  const verified = process.argv.includes('--no-verified') ? null : new VerifiedWatch({ ledger, watchFile: path.join(dir, 'watch-tokens.json'),
+    notify: phone?.channels.length ? phone.notify : null, link: fomoUrl, jupiterApiKey: env.JUPITER_API_KEY?.trim() || null,
+    log: line => console.log(`${new Date().toISOString().slice(0, 19)} ${line}`) });
+  verified?.start();
+
   // New launches and migrations for the desk on this machine (it stops polling the RPC for them while this runs).
   let observer: ResearchObserver | null = null;
   const feed = new LocalFeed(() => observer?.streamHealthy() ?? false);
@@ -87,10 +97,10 @@ async function main(): Promise<void> {
   observer.start();
   console.log(`research observer: ${dir} · trade sources: ${wanted.filter(w => ['public', 'publicnode', 'helius'].includes(w)).join(' + ') || 'public'} · ` +
     `calls: ${calls ? `on, phone ${phone?.channels.length ? phone.channels.join(' + ') : 'not configured'}` : 'off'} · status every minute`);
-  const stop = async () => { observer?.stop(); feed.close(); await ledger.close(); process.exit(0); };
+  const stop = async () => { observer?.stop(); verified?.stop(); feed.close(); await ledger.close(); process.exit(0); };
   process.on('SIGINT', () => void stop());
   process.on('SIGTERM', () => void stop());
-  setInterval(() => console.log(observer!.status()), 60_000).unref();
+  setInterval(() => console.log(`${observer!.status()}${verified ? ` · ${verified.status()}` : ''}`), 60_000).unref();
 }
 
 main().catch(error => { console.error(`research:observe failed: ${(error as Error).message}`); process.exit(1); });

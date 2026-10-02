@@ -19,9 +19,8 @@ export const CALLS = Object.freeze({
   judgeAfterMs: 90_000,
   maxOpen: 50_000,
   /**
-   * INFO messages (not calls): a launch whose own X account posted its contract address and has a checkmark or
-   * ≥ `infoMinFollowers` followers, or whose linked account has a gold (organisation) or grey (government) checkmark.
-   * At most `infoPerHour`, once per launch.
+   * INFO messages (not calls): a launch whose own X account posted its contract address and has a checkmark (blue,
+   * gold or grey) or ≥ `infoMinFollowers` followers. At most `infoPerHour`, once per launch.
    */
   infoMinFollowers: 1_000, infoPerHour: 8,
 });
@@ -76,7 +75,7 @@ export class CallEngine {
 
   /**
    * An X read of a launch's linked account: an INFO message (not a call) for a checkmarked or established project
-   * account that posted this contract address, or a gold/grey-checkmark account.
+   * account that posted this contract address.
    */
   xRead(l: LaunchFacts, handle: string, read: XRead): void {
     if (!this.d.notify || this.infoSent.has(l.mint) || !read.profile) return;
@@ -86,7 +85,8 @@ export class CallEngine {
     const own = read.posts.find(x => x.author?.toLowerCase() === handle.toLowerCase() && x.raw.includes(l.mint));
     const org = p.verifiedType === 'business' || p.verifiedType === 'government';
     const established = p.verified === true || (p.followers ?? 0) >= CALLS.infoMinFollowers;
-    if (!(own && established) && !org) return;
+    // Only the project's own post of this CA counts: a launch merely linking a big or checkmarked account is often a copycat.
+    if (!own || !(established || org)) return;
     this.infoSent.set(l.mint, now); this.stats.info++;
     const badge = p.verifiedType === 'business' ? 'gold check (organisation)' : p.verifiedType === 'government' ? 'grey check (government)' : p.verified ? 'blue check' : 'no check';
     const last = [...l.trades].sort((a, b) => a.obs - b.obs).at(-1), sol = this.d.solUsd?.() ?? null;
@@ -96,12 +96,12 @@ export class CallEngine {
     const body = [
       `Not a qualified call — for your eyes.`,
       `@${handle}: ${badge}, ${(p.followers ?? 0).toLocaleString('en-US')} followers${age !== null ? `, account ${age < 2 ? `${Math.round(age * 24)} h` : `${Math.round(age)} days`} old` : ''}.`,
-      own ? `It posted this contract address ${Math.max(0, Math.round((own.at - l.createdObs) / 1000))} s after launch.` : `It is linked by the launch but has not posted this contract address.`,
+      `It posted this contract address ${Math.max(0, Math.round((own.at - l.createdObs) / 1000))} s after launch.`,
       `Now ${mcSol !== null ? (sol ? `${usdK(mcSol * sol)} (${mcSol.toFixed(0)} SOL)` : `${mcSol.toFixed(0)} SOL`) : 'no trade yet'} market cap · ${buyers} buyers · ${ageMin < 1 ? `${Math.round(ageMin * 60)} s` : `${ageMin.toFixed(1)} min`} old${l.mayhem ? ' · mayhem mode' : ''}${l.completeObs ? ' · graduated' : ''}.`,
       this.d.link ? this.d.link(l.mint) : `https://pump.fun/coin/${l.mint}`,
     ].join('\n');
-    this.d.ledger.put(['INFO', now, { $m: l.mint }, handle, { badge: p.verifiedType ?? (p.verified ? 'blue' : null), f: p.followers, ownCa: own ? 1 : 0, mcSol }]);
-    void this.d.notify(`INFO ${l.symbol ?? l.mint.slice(0, 6)}: ${own ? 'project posted its CA' : badge}`, body).catch(() => undefined);
+    this.d.ledger.put(['INFO', now, { $m: l.mint }, handle, { badge: p.verifiedType ?? (p.verified ? 'blue' : null), f: p.followers, ownCa: 1, mcSol }]);
+    void this.d.notify(`INFO ${l.symbol ?? l.mint.slice(0, 6)}: project posted its CA${org ? ` (${badge})` : ''}`, body).catch(() => undefined);
   }
   qualification(): Qualification | null { return this.q; }
   /** Mints with a signal still waiting for its result: the observer keeps their trades. */

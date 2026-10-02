@@ -435,7 +435,7 @@ test('reviews: Gemini answers while Claude is out of credits', async () => {
   assert.match(r.status(), /Gemini review \(gemini-3\.5-flash\): 3 done/);
 });
 
-test('info messages: a checkmarked project account that posted its CA, or an organisation badge; capped, once per launch', async () => {
+test('info messages: a checkmarked or established project account that posted its CA; capped, once per launch', async () => {
   const { CallEngine, CALLS } = await import('../src/research/calls');
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'research-info-'));
   const now = Date.parse('2026-10-03T10:00:00Z');
@@ -446,7 +446,7 @@ test('info messages: a checkmarked project account that posted its CA, or an org
   const profile = (o: Partial<import('../src/research/xread').XProfileFacts>) => ({ handle: 'proj', followers: 50, following: 0, statuses: 3, joinedAt: now - 5 * 86_400_000,
     verified: false, verifiedType: null, website: null, bio: null, ...o });
   const read = (mint: string, p: ReturnType<typeof profile>, posted: boolean) => ({ status: 'OK' as const, http: 200, detail: '', profile: p,
-    posts: posted ? [{ id: '1', at: now - 30_000, author: 'proj', text: `CA ${mint}`, views: 100, likes: 1, reposts: 0, replies: 0, quotes: 0, repost: false, replyTo: null, raw: JSON.stringify({ t: `CA ${mint}` }) }] : [] });
+    posts: posted ? [{ id: '1', at: now - 30_000, author: p.handle, text: `CA ${mint}`, views: 100, likes: 1, reposts: 0, replies: 0, quotes: 0, repost: false, replyTo: null, raw: JSON.stringify({ t: `CA ${mint}` }) }] : [] });
   const l = syntheticLaunch(0, now - 60_000, true);
   engine.xRead(l, 'proj', read(l.mint, profile({}), true));
   assert.equal(sent.length, 0, 'an unchecked 50-follower account posting its CA is not enough');
@@ -457,9 +457,63 @@ test('info messages: a checkmarked project account that posted its CA, or an org
   engine.xRead(l, 'proj', read(l.mint, profile({ verified: true, verifiedType: 'individual' }), true));
   assert.equal(sent.length, 1, 'once per launch');
   const org = syntheticLaunch(1, now - 60_000, true);
+  // A launch that merely links a gold-check company account is often a copycat: nothing without the account's own CA post.
   engine.xRead(org, 'bigco', read(org.mint, profile({ handle: 'bigco', verified: true, verifiedType: 'business', followers: 120_000 }), false));
-  assert.match(sent[1]![0], /gold check \(organisation\)/); assert.match(sent[1]![1], /has not posted this contract address/);
-  for (let i = 2; i < 30; i++) { const x = syntheticLaunch(i, now - 60_000, true); engine.xRead(x, 'bigco', read(x.mint, profile({ verified: true, verifiedType: 'government' }), false)); }
+  assert.equal(sent.length, 1);
+  engine.xRead(org, 'bigco', read(org.mint, profile({ handle: 'bigco', verified: true, verifiedType: 'business', followers: 120_000 }), true));
+  assert.match(sent[1]![0], /^INFO T1: project posted its CA \(gold check \(organisation\)\)$/);
+  for (let i = 2; i < 30; i++) { const x = syntheticLaunch(i, now - 60_000, true); engine.xRead(x, 'bigco', read(x.mint, profile({ handle: 'bigco', verified: true, verifiedType: 'government' }), true)); }
   assert.equal(sent.length, CALLS.infoPerHour, 'capped per hour');
   await ledger.close();
+});
+
+test('verified coins: a blue-check memecoin that starts to move is an INFO message; stables, unverified coins and repeats are not', async () => {
+  const { VerifiedWatch, VERIFIED } = await import('../src/research/verified');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'research-verified-'));
+  let now = Date.parse('2026-10-03T10:00:00Z');
+  const ledger = new ResearchLedger({ dir, now: () => now, freeBytes: async () => 5e9 });
+  await ledger.start();
+  const mint = (i: number) => Keypair.fromSeed(new Uint8Array(32).fill(i + 1)).publicKey.toBase58();
+  const coin = (i: number, o: Record<string, unknown> = {}) => ({ id: mint(i), name: `Coin ${i}`, symbol: `C${i}`, usdPrice: 0.01, mcap: 15e6, liquidity: 9e5, holderCount: 20_000,
+    organicScore: 85, organicScoreLabel: 'high', isVerified: true, tags: ['verified'], launchpad: 'pump.fun', firstPool: { createdAt: '2026-09-25T21:14:34Z' },
+    stats5m: { priceChange: 2 }, stats1h: { priceChange: 22, buyVolume: 4e5, sellVolume: 3e5, numTraders: 1200, numNetBuyers: 150 }, stats6h: { priceChange: -8 }, stats24h: { priceChange: -12 }, ...o });
+  let lists: Array<Record<string, unknown>> = [
+    coin(0),                                                         // moving, verified: INFO
+    coin(1, { tags: ['verified', 'stable'] }),                       // a stablecoin
+    coin(2, { isVerified: undefined, tags: ['unknown'] }),           // not verified, not on the watchlist
+    coin(3, { stats1h: { priceChange: 22, buyVolume: 1e5, sellVolume: 3e5, numNetBuyers: -40 } }), // up, but sellers win
+    coin(4, { mintAuthority: 'AUTH' }),                              // a wrapped/bridged token
+  ];
+  const watched = coin(5, { isVerified: undefined, tags: ['unknown'], mcap: 4e5, liquidity: 5e4 });
+  const urls: string[] = [];
+  const fetcher = (async (url: string) => {
+    urls.push(url);
+    if (url.includes('/search?query=')) return new Response(JSON.stringify(url.includes(mint(5)) ? [watched] : []));
+    return new Response(JSON.stringify(url.includes('toptrending') ? lists : []));
+  }) as typeof fetch;
+  const watchFile = path.join(dir, 'watch-tokens.json');
+  await fs.writeFile(watchFile, JSON.stringify([{ mint: mint(5), note: 'blue check on FOMO' }, { mint: 'not a mint' }]));
+  const sent: Array<[string, string]> = [];
+  const w = new VerifiedWatch({ ledger, watchFile, fetcher, now: () => now, notify: async (t, b) => { sent.push([t, b]); }, link: m => `https://fomo.family/tokens/solana/${m}` });
+  await w.check();
+  assert.deepEqual(sent.map(s => s[0]), ['INFO C0: verified coin up +22% in 1h', 'INFO C5: verified coin up +22% in 1h']);
+  assert.match(sent[0]![1], /Not a qualified call/); assert.match(sent[0]![1], /blue check: Jupiter verified\./);
+  assert.match(sent[0]![1], /\$15\.0M market cap · \$900K liquidity · 20,000 holders · organic score 85 \(high\)/);
+  assert.match(sent[0]![1], /150 more buyers than sellers, bought \$400K vs sold \$300K/);
+  assert.match(sent[1]![1], /blue check: blue check on FOMO\./, 'a watchlist coin needs no Jupiter check and no size floor');
+  assert.ok(urls.every(u => u.startsWith('https://lite-api.jup.ag/tokens/v2/')));
+  // The same coins five minutes later: no repeat; another +25 % on the price: once more (after an hour).
+  now += 5 * 60_000; await w.check();
+  assert.equal(sent.length, 2, 'no repeat');
+  now += 60 * 60_000; lists = [coin(0, { usdPrice: 0.0126 })]; await w.check();
+  assert.equal(sent.length, 3, 'again after another +25 %');
+  // At most VERIFIED.perHour messages an hour.
+  now += 13 * 3_600_000; lists = Array.from({ length: 10 }, (_, i) => coin(10 + i)); await w.check();
+  assert.equal(sent.length - 3, VERIFIED.perHour);
+  await ledger.close();
+  const read = async (f: string) => f.endsWith('.gz') ? gunzipSync(await fs.readFile(path.join(dir, f))).toString() : await fs.readFile(path.join(dir, f), 'utf8');
+  const recs = lines((await Promise.all((await fs.readdir(dir)).filter(f => f.startsWith('ev-')).sort().map(read))).join(''));
+  const vt = recs.filter(r => r[0] === 'VT');
+  assert.ok(vt.length >= 5 && vt.every(r => r[4] === 'J' || r[4] === 'W'), 'every watched coin is recorded at every check');
+  assert.equal(recs.filter(r => r[0] === 'VINFO').length, sent.length);
 });

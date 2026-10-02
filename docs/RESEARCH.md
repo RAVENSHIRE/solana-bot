@@ -88,15 +88,33 @@ The desk sends nothing to ntfy by default (no rug confirmations). The research o
 
 1. **CALL** — a buy signal from a rule that passed the qualification gate below. No rule passes yet, so there are none
    until one does.
-2. **INFO** — an interesting coin, *not* a call ("Not a qualified call — for your eyes"): the launch's own X account
-   posted this contract address and is checkmarked or has ≥ 1,000 followers, or the linked account has a gold
-   (organisation, like E/ACC) or grey (government) checkmark. At most 8 per hour, one per coin; the message gives the
-   account (badge, followers, age), how many seconds after launch it posted the CA, the market cap, buyers and the link.
-   Blue checks alone are not enough: about 70 % of linked X accounts carry one. `INFO` records keep every message.
+2. **INFO** — an interesting coin, *not* a call ("Not a qualified call — for your eyes"), of two kinds:
+   - **a new launch whose own X account posted its contract address** and has a checkmark (blue, gold or grey) or
+     ≥ 1,000 followers: the account (badge, followers, age), how many seconds after launch it posted the CA, the market
+     cap, buyers and the link. A launch that only *links* a big or checkmarked account (often a copycat) does not count.
+     At most 8 per hour, one per launch; `INFO` records.
+   - **an established coin with a blue check that starts to move** (`src/research/verified.ts`): every 5 minutes the
+     observer reads Jupiter's hourly top-trending, top-organic and top-traded lists (free token API). A coin counts when
+     Jupiter marks it verified (its `isVerified` flag: the blue check in Jupiter and most Solana wallets), it is a
+     memecoin or project coin (no stablecoins, staked SOL, majors, tokenised stocks, nothing with a mint or freeze
+     authority) with ≥ $1M market cap and ≥ $100K liquidity — or it is on your **watchlist**. It is sent when it is up
+     ≥ 15 % in the hour, still rising over 5 minutes, with more buyers than sellers and more bought than sold, and an
+     organic score that is not low. At most 4 per hour; the same coin again only after 12 h or another +25 %. Every
+     coin is recorded at every check (`VT`), so "verified movers" can be qualified like any rule once there is data.
+
+   FOMO's blue check is FOMO's own: its token lists need a FOMO login (the `FOMO_JWT` in `.env` is a one-hour Privy
+   token that expired on 21 Sep, and `FOMO_API_KEY` is not accepted there). Coins checked on FOMO but not on Jupiter go
+   on the watchlist, `data-desk/research/watch-tokens.json`, read at every check (no restart):
+
+   ```json
+   [{ "mint": "CbcyNo7m1amFWqEQm2m4PLv1UNvpcL3C1Ujm6AkzpKoU", "note": "E/ACC, blue check on FOMO" }]
+   ```
+
 3. **Research** — when a rule starts or stops calling, and once a day (first requalification after 00:00 UTC): how
    many rules qualify and the closest candidate with its later-period result and the hit rate it still needs.
 
-`--no-phone` keeps all three off the phone (records are still written); `--no-calls` turns the call engine off.
+`--no-phone` keeps all three off the phone (records are still written); `--no-calls` turns the call engine off,
+`--no-verified` the verified-coin watch.
 
 **Rules** (`src/research/rules.ts`, fixed in code): a group of launches, a decision time after creation (5, 15, 30, 60
 or 120 s) and an exit (+40 % or +100 % target, −20 %/−35 %/no stop, 15 or 60 min). Groups use only what the live
@@ -124,3 +142,6 @@ for a decision time is not called.
 
 Records: `SIG` obs, m, rule id, qualified 0/1, market cap SOL at the decision, sent 0/1, {features} · `RES` obs, m, rule
 id, qualified 0/1, net %, exit reason, entry and exit market cap SOL, peak % · `QUAL` obs, {qualified rule ids, data window}.
+`INFO` obs, m, X handle, {badge, followers, ownCa, market cap SOL} · `VT` obs, m, symbol, checks (J Jupiter, M Moonshot,
+W watchlist), market cap $, liquidity $, holders, organic score, price $, change % 5m/1h/6h/24h, net buyers 1h, bought $
+1h, sold $ 1h, traders 1h · `VINFO` obs, m, symbol, why, checks, market cap $, price $.
