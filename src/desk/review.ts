@@ -80,7 +80,8 @@ export class LaunchReviewer implements Reviewer {
   /** Whether another review fits in the hourly budget (counted when a request is sent). */
   available(now: number): boolean {
     while (this.used.length && now - this.used[0]! > 3_600_000) this.used.shift();
-    return this.used.length < this.maxPerHour;
+    // After a hard failure (no credits, key rejected) it rests, alone or in the rotation.
+    return now >= this.down && this.used.length < this.maxPerHour;
   }
 
   /** For the dashboard: reviews sent, answered, failed, and the last failure. */
@@ -141,7 +142,8 @@ export class GeminiReviewer implements Reviewer {
   downUntil(): number { return this.down; }
   available(now: number): boolean {
     while (this.used.length && now - this.used[0]! > 3_600_000) this.used.shift();
-    return this.used.length < this.maxPerHour;
+    // After a hard failure (no credits, key rejected) it rests, alone or in the rotation.
+    return now >= this.down && this.used.length < this.maxPerHour;
   }
   status(): string {
     const s = this.stats;

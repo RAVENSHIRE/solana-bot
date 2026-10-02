@@ -66,5 +66,9 @@ test('Claude review: one low-effort structured request with fallbacks; bounded p
   const broke = new LaunchReviewer('k', { beta: { messages: { parse: async () => { throw new Error('400 Your credit balance is too low to access the Anthropic API.'); } } } } as never);
   await broke.review(input, NOW);
   assert.match(broke.status(), /1 failed \(no API credits — add credits under Plans & Billing/);
+  // Out of credits it rests 30 minutes on its own (no Gemini key: no rotation), instead of spending the hour's budget on failures.
+  assert.equal(broke.available(NOW + 60_000), false); assert.equal(await broke.review(input, NOW + 60_000), null);
+  assert.match(broke.status(), /1 failed/, 'no second request while resting');
+  assert.equal(broke.available(NOW + 30 * 60_000 + 1), true);
   assert.match(reviewPrompt({ ...input, x: null, website: null }, NOW), /Website: none\nX: none$/);
 });
