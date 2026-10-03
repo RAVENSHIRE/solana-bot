@@ -13,7 +13,7 @@ import { curveMcapSol, curveProgress } from './pump-events';
  *   - trades and curve state: observed at or before creation + T
  *   - metadata (an immutable IPFS document named in the creation transaction): known from creation
  *   - an X post: known 30 s after its post time (a reader polling the account would see it), never before
- *   - X account facts (followers, join date): as first read, which is after T for early decision times (flagged)
+ *   - X account facts (followers, join date): from the first read observed at or before T; unknown (null) before it
  *   - the creator's history: only earlier launches by the same wallet whose outcome was known by creation + T
  */
 export const DECISION_S = [60, 120, 300, 600] as const;
@@ -222,7 +222,7 @@ export function features(l: LaunchFacts, tS: number, history: { creatorLaunches:
   const m = l.meta;
   const x = parseXLink(m?.tw);
   const caPost = l.xPosts.filter(post => post.mint && post.at + X_POST_LATENCY_MS <= end && post.at >= l.createdObs - 72 * 3_600_000).sort((a, b) => a.at - b.at)[0];
-  const xr = l.xReads.find(r => r.st === 'OK');
+  const xr = l.xReads.find(r => r.st === 'OK' && r.obs <= end);
   const created = l.createdTs ?? l.createdObs;
   return {
     t: tS, mcapSol: last ? curveMcapSol(last.vSol, last.vTok) : null, progress: p, trades: seen.length,

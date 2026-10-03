@@ -10,7 +10,7 @@ import { DexScreenerClient } from '../data/dexscreener';
 import { GeckoTerminalClient } from '../data/geckoterminal';
 import { TokenSafetyChecker } from '../analysis/token-safety';
 import { Logger } from '../utils/logger';
-import { acquireProcessLock } from '../utils/fs';
+import { acquireProcessLock, atomicWriteFile } from '../utils/fs';
 import { JupiterClient } from '../execution/jupiter-client';
 import { TransactionSender } from '../execution/tx-sender';
 import { LaunchFeed } from './launches';
@@ -88,10 +88,17 @@ export interface DeskHandle {
   phoneAlerts?: { kinds: () => AlertKind[]; set: (kinds: AlertKind[]) => Promise<void> };
 }
 
-/** The dashboard's phone-alert choice, if the owner made one (data-desk/phone-alerts.json); null: use DESK_ALERTS. */
+/**
+ * The dashboard's phone-alert choice, if the owner made one (data-desk/phone-alerts.json); null: no file, use DESK_ALERTS.
+ * A file that exists but cannot be read (truncated, hand-edited) is a choice we cannot see: nothing reaches the phone
+ * until the owner sets the switches again, rather than DESK_ALERTS silently taking over.
+ */
 export async function savedPhoneAlerts(file: string): Promise<Set<AlertKind> | null> {
-  const saved = await fs.readFile(file, 'utf8').then(t => JSON.parse(t) as { kinds?: unknown }).catch(() => null);
-  return Array.isArray(saved?.kinds) ? new Set(saved.kinds.filter((k): k is AlertKind => ALERT_KINDS.includes(k as AlertKind))) : null;
+  let text: string;
+  try { text = await fs.readFile(file, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; return new Set(); }
+  let saved: { kinds?: unknown } | null = null;
+  try { saved = JSON.parse(text) as { kinds?: unknown } | null; } catch { return new Set(); }
+  return Array.isArray(saved?.kinds) ? new Set(saved.kinds.filter((k): k is AlertKind => ALERT_KINDS.includes(k as AlertKind))) : new Set();
 }
 export interface DeskContext { wallet: (mode: DeskMode) => DeskWallet | null; authorized: () => boolean }
 
@@ -139,7 +146,7 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
     const opening = new OpeningTracker(rpc, pumpStream);
     // GOLDEN POCKET: every fresh graduation's PumpSwap pool, its reserves read on chain every few seconds.
     const golden = new GoldenTracker(rpc, GOLDEN_RULES);
-    const alerts = notifier(env), launches = new LaunchFeed(rpc, fetch, undefined, undefined,
+    const alerts = notifier(env, fetch, { onFailure: r => logger.warn('Phone delivery failed', { channel: r.channel, status: r.status, error: r.error }) }), launches = new LaunchFeed(rpc, fetch, undefined, undefined,
       { rugs, review: reviewer ? (i, now) => reviewer.review(i, now) : null, reviewAvailable: reviewer ? now => reviewer.available(now) : undefined,
         onDecoded: (events, now) => opening.observe(events, now), stream: pumpStream });
     // Research record (src/research): every alert as an immutable evidence snapshot, and the signal tape, as events in
@@ -188,7 +195,7 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
       phoneAlerts: { kinds: () => ALERT_KINDS.filter(k => phoneAlerts.has(k)), set: async kinds => {
         phoneAlerts.clear();
         for (const k of kinds) if (ALERT_KINDS.includes(k)) phoneAlerts.add(k);
-        await fs.writeFile(phoneFile, `${JSON.stringify({ kinds: ALERT_KINDS.filter(k => phoneAlerts.has(k)), at: new Date().toISOString() })}\n`);
+        await atomicWriteFile(phoneFile, `${JSON.stringify({ kinds: ALERT_KINDS.filter(k => phoneAlerts.has(k)), at: new Date().toISOString() })}\n`);
       } },
       holdings: wallet => walletHoldings({ wallet, rpc, dex: shared.dex }), close: async () => {
       await watch.settled();

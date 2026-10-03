@@ -525,15 +525,21 @@ export class DeskEngine {
     await this.orders; await this.background; await this.settingsWrite; await this.idleSync;
   }
   async persist(): Promise<void> {
-    await this.events.flush();
+    // Ledgers first, each on its own: they hold positions and orders. A failing telemetry write (a locked event log, a
+    // full disk for the tape) must never skip them; the first error is still reported to the caller.
+    const errors: unknown[] = [];
+    for (const b of this.books()) await b.ledger.save().catch(error => { errors.push(error); });
+    await this.events.flush().catch(error => { errors.push(error); });
     if (this.tape.length) {
       const rows = this.tape.splice(0), file = path.join(this.d.dir, `tape-${this.d.mode}.jsonl`);
-      const size = await fs.stat(file).then(st => st.size, () => 0);
-      // A unique suffix: renaming to `.1` overwrote the previous rotation and destroyed the older tape.
-      if (size > 20 * 1024 * 1024) await fs.rename(file, `${file}.${new Date().toISOString().replace(/[:.]/g, '-')}`).catch(() => undefined);
-      await fs.appendFile(file, rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+      await (async () => {
+        const size = await fs.stat(file).then(st => st.size, () => 0);
+        // A unique suffix: renaming to `.1` overwrote the previous rotation and destroyed the older tape.
+        if (size > 20 * 1024 * 1024) await fs.rename(file, `${file}.${new Date().toISOString().replace(/[:.]/g, '-')}`).catch(() => undefined);
+        await fs.appendFile(file, rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+      })().catch(error => { errors.push(error); });
     }
-    for (const b of this.books()) await b.ledger.save();
+    if (errors.length) throw errors[0];
   }
 
   // ------------------------------------------------------------------ scan

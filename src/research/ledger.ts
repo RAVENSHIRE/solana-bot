@@ -44,6 +44,9 @@ export class ResearchLedger {
   lowDisk = false;
   bytes = 0;
   records = 0;
+  /** Failed appends (their lines are lost) and the last error; each is also written as a `GAP` record once writing works again. */
+  writeErrors = 0;
+  lastWriteError: string | null = null;
 
   constructor(private readonly o: LedgerOptions) { this.now = o.now ?? Date.now; }
 
@@ -75,8 +78,21 @@ export class ResearchLedger {
     const file = this.file(), text = this.lines.join('\n') + '\n';
     this.lines = [];
     this.bytes += Buffer.byteLength(text);
-    this.chain = this.chain.then(() => fsp.appendFile(file, text)).catch(() => undefined);
+    const lost = text.split('\n').length - 1;
+    this.chain = this.chain.then(() => fsp.appendFile(file, text)).catch((error: unknown) => this.writeFailed(file, error, lost));
     return this.chain;
+  }
+
+  /**
+   * An append failed (disk full, file locked): its lines are gone. The failure is counted and recorded as a GAP, and if
+   * it hit the current hour's file the dictionaries start over, so later records never point at a mint or wallet whose
+   * dictionary line was in the lost batch (readers apply dictionary lines in order, so a re-numbered entry is safe).
+   */
+  private writeFailed(file: string, error: unknown, lost: number): void {
+    this.writeErrors++;
+    this.lastWriteError = `${path.basename(file)}: ${error instanceof Error ? error.message : String(error)}`;
+    if (file === this.file()) { this.mints = new Map(); this.wallets = new Map(); }
+    this.push(JSON.stringify(['GAP', this.now(), 'ledger', `write failed, ${lost} lines lost: ${this.lastWriteError}`]));
   }
 
   async close(): Promise<void> {
@@ -98,7 +114,10 @@ export class ResearchLedger {
     const previous = this.key;
     if (previous) void this.flush();
     this.key = key; this.mints = new Map(); this.wallets = new Map();
-    if (previous) { const file = this.file(previous); this.chain = this.chain.then(() => this.compress(file)).catch(() => undefined); }
+    if (previous) {
+      const file = this.file(previous);
+      this.chain = this.chain.then(() => this.compress(file)).catch((error: unknown) => { this.writeErrors++; this.lastWriteError = `gzip ${path.basename(file)}: ${error instanceof Error ? error.message : String(error)}`; });
+    }
   }
 
   private async compress(file: string): Promise<void> {
