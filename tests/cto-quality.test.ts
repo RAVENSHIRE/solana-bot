@@ -66,3 +66,15 @@ test('CTO-04: a failed research-ledger write is counted, recorded as a GAP, and 
   const ds = readDataset([file]);
   assert.ok(ds.gaps.some(g => g.source === 'ledger'));
 });
+
+test('CTO-05: X account facts read after the decision time do not leak into its features', () => {
+  const t0 = Date.parse('2026-10-02T12:00:00Z');
+  const l: LaunchFacts = { mint: 'MINTA', createdObs: t0, createdTs: t0, creator: null, creatorW: null, devBuySol: null, name: 'A', symbol: 'A', mayhem: false,
+    trades: [], candles: [], completeObs: null, migrateObs: null, meta: { tw: 'https://x.com/tryagency', web: null, tg: null, desc: null }, metaError: false,
+    xReads: [{ obs: t0 + 6 * 60_000, st: 'OK', followers: 5_000, joined: t0 - 86_400_000, statuses: 10 }], xPosts: [], sites: [] };
+  const at60 = features(l, 60, { creatorLaunches: 0, creatorGraduations: 0 }, []);
+  assert.equal(at60.xFollowers, null, 'the profile was first read at +6 min');
+  assert.equal(at60.xAccountAgeH, null);
+  const at600 = features(l, 600, { creatorLaunches: 0, creatorGraduations: 0 }, []);
+  assert.equal(at600.xFollowers, 5_000);
+});
