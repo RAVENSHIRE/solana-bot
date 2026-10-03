@@ -22,6 +22,29 @@ Get-Content data-desk\dashboard.log -Wait
 
 A console window that is clicked, or has text selected, pauses every program that writes to it (Windows QuickEdit). A dashboard started with `npm start` in a visible window can therefore freeze until the window gets a key press. On 1 Oct it stopped answering for minutes. With the output in a file this cannot happen.
 
+### Auto-start and restart (unattended)
+
+Run `ops\install-autostart.cmd` once (no admin rights needed). From then on a supervisor (`ops\supervise.mjs`) keeps the
+research observer and the dashboard running:
+
+- **A process that stops is started again**, after 3 s, doubling up to 5 min while it keeps crashing. The phone is told
+  (at most once per half hour per process), and again when the PC comes back after the desk was down (reboot, sleep).
+- **The supervisor itself comes back**: a Startup-folder shortcut starts it at logon, and a Task Scheduler task
+  ("Solana desk watchdog") every 5 minutes. Only one runs at a time (`data-desk\supervisor.lock`).
+- **The session comes back** (`data-desk\desk-session.json`, written by the dashboard whenever it changes): a running
+  TEST resumes as it was. LIVE with the local key comes back **with exits only**: holdings are reconciled as at every
+  LIVE start, then stops, targets and rug exits run for the open positions, and new entries stay paused until you
+  press *Resume*. If the reconciliation fails it is retried every 30 s for 5 minutes, then the phone is told. LIVE with
+  Phantom cannot sign by itself and is never resumed; the phone is told that its positions have no exits.
+- Logs over 50 MB are moved to `.1` at a restart. The supervisor's own log is `data-desk\supervisor.log`.
+
+Commands: `node ops\supervise.mjs --status` (last heartbeat), `--restart` (after a `git pull`; no phone message),
+`--stop` (stops everything and keeps the watchdog off), `--start`. `ops\uninstall-autostart.cmd` removes it. While it
+is installed, `dashboard\start-background.cmd` and `start-research.cmd` refuse to start a second copy.
+
+Limits: after a Windows Update reboot the desk starts when you log in (sign-in without a password, or auto-logon,
+avoids the wait). A PC that sleeps stops everything: set *Sleep* to *Never* while plugged in.
+
 ## Operational controls and restart
 
 Strategy toggles, TEST drill and TEST reset are switched in the dashboard and saved per mode (`DESK_DEPLOYMENT_MODE=EDITABLE`, the default). For an unattended deployment set `DESK_DEPLOYMENT_MODE=LOCKED` in `.env`: they are then fixed at startup by the flags below and rejected by the server; Pause, Stop and EXIT NOW remain available. The startup flags are `DESK_PAPER_FAIR_ENABLED`, `DESK_PAPER_CRASH_ENABLED`, `DESK_LIVE_FAIR_ENABLED`, `DESK_LIVE_CRASH_ENABLED`; LIVE CRASH defaults to false. All keys are allowlisted and validated at startup.

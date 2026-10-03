@@ -136,7 +136,17 @@ each group's exit is chosen on the earlier 60 % of launches; unchanged, on the l
 - a profit after costs on average ($2 trades, 1.25 % pump.fun fee per side, $0.10 per round trip),
 - a target hit rate at least the rate at which its trades break even ("hits +40 % often enough to cover the losers"),
 - a profit on the tuning period too,
+- **no luck** (owner, 3 Oct): about 40 rules are tested in every run, so a positive average must be clear of chance
+  for all of them together. A one-sided bootstrap p-value (2,000 resamples of the later trades, shifted to an average
+  of 0) must pass Holm's correction at 0.05 over every rule of the run (the best rule needs p ≤ 0.05/40),
+- **no single spike**: still profitable without its best 1 % of trades (at least one),
 - and, once 30 of its live calls are judged, no average loss live.
+
+**At the owner's speed** (owner, 3 Oct): a call goes to a person who reads it and buys in FOMO, not to a bot. The gate
+and the judging of live calls buy **45 s after the call** at that moment's price (`PHONE_FILL_MS`, `GATE_COSTS`), and
+hold and exit from there. Each rule also shows what the same exit would have made bought by a bot within 2 s
+(`botFill`), so the price of the delay is visible; it never decides. The CALL message says it assumes a buy about 45 s
+after the message.
 
 The result is `data-desk/research/qualified.json` — every candidate with its evidence and the reasons it failed.
 

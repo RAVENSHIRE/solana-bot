@@ -1,4 +1,5 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { PublicKey } from '@solana/web3.js';
@@ -34,8 +35,22 @@ function rejectDetail(error: unknown, code: string): string | undefined {
   return message.startsWith(`${code}: `) ? message.slice(code.length + 2) : undefined;
 }
 
+/** The running session as last seen, so a restart (crash, reboot, deploy) can bring it back. */
+export interface SavedSession { mode: DeskMode; running: boolean; paused: boolean; at: string }
+export interface TradingOptions {
+  /** data-desk/desk-session.json; none: sessions are never saved or restored. */
+  sessionFile?: string | null;
+  /** A LIVE restore that fails is retried this often, this many times (the RPC may still be starting). */
+  restoreRetryMs?: number; restoreAttempts?: number;
+  log?: (line: string) => void;
+}
+
 export class TradingService {
   readonly broker = new SigningBroker({ sessionTtlMs: 900_000 });
+  /** Nothing is saved until the restore has run (or been given up), so the idle start-up never overwrites the saved session. */
+  private restoring = true;
+  private savedText: string | null = null;
+  private restoreTimer: ReturnType<typeof setTimeout> | null = null;
   private capability = randomBytes(32).toString('base64url');
   private sessionId: string | null = null;
   private heartbeat = 0;
@@ -45,7 +60,8 @@ export class TradingService {
   private deskError: string | null = null;
   private closed = false;
   private timer: ReturnType<typeof setInterval>;
-  constructor(private readonly factory: DeskFactory) {
+  constructor(private readonly factory: DeskFactory, private readonly o: TradingOptions = {}) {
+    if (!o.sessionFile) this.restoring = false;
     this.timer = setInterval(() => {
       if (this.closed || !this.desk) return;
       const live = this.desk.engines.LIVE;
@@ -54,8 +70,87 @@ export class TradingService {
       for (const engine of Object.values(this.desk.engines)) engine.tick();
       // Watch rules run whether the desk scans or not: a floor can break while TEST and LIVE are stopped.
       this.desk.watch?.tick();
+      void this.saveSession();
     }, 1000);
     this.timer.unref();
+  }
+
+  /** Writes the running session when it changed: TEST or LIVE, scanning or not, entries paused or not. */
+  private async saveSession(): Promise<void> {
+    if (!this.o.sessionFile || this.restoring || !this.desk) return;
+    const e = this.desk.engines[this.mode], state = { mode: this.mode, running: e.scanner, paused: e.scanner && !e.execution };
+    const text = JSON.stringify(state);
+    if (text === this.savedText) return;
+    this.savedText = text;
+    const tmp = `${this.o.sessionFile}.tmp`;
+    await fs.writeFile(tmp, `${JSON.stringify({ ...state, at: new Date().toISOString() } satisfies SavedSession)}\n`)
+      .then(() => fs.rename(tmp, this.o.sessionFile!)).catch(() => { this.savedText = null; });
+  }
+
+  /**
+   * After a restart, brings back the session that was running. TEST resumes as it was. LIVE with the local key comes
+   * back with **exits only** (entries paused until the owner presses Resume), after the usual reconciliation of
+   * holdings; with Phantom it cannot sign by itself, so the owner is told instead. Returns what was done.
+   */
+  async restoreSession(attempt = 1): Promise<string | null> {
+    try { return await this.restoreOnce(attempt); } catch (error) {
+      this.restoring = false; this.o.log?.(`session restore failed: ${rejectCode(error) ?? (error as Error).message}`); return null;
+    }
+  }
+
+  private async restoreOnce(attempt: number): Promise<string | null> {
+    const file = this.o.sessionFile, log = this.o.log ?? (() => undefined);
+    if (!file || this.closed) { this.restoring = false; return null; }
+    let saved: SavedSession | null = null;
+    try { saved = JSON.parse(await fs.readFile(file, 'utf8')) as SavedSession; } catch { /* nothing saved yet */ }
+    if (!saved?.running || (saved.mode !== 'PAPER' && saved.mode !== 'LIVE')) { this.restoring = false; return null; }
+    let handle: DeskHandle;
+    try { handle = await this.ensureDesk(); } catch (error) { return this.retryRestore(attempt, `desk unavailable: ${rejectCode(error) ?? 'error'}`); }
+    const tell = (title: string, body: string) => { log(`${title}: ${body}`); void handle.notify?.(title, body).catch(() => undefined); };
+    if (saved.mode === 'PAPER') {
+      const paper = handle.engines.PAPER;
+      this.restoring = false;
+      try {
+        this.mode = 'PAPER';
+        if (!paper.scanner) paper.start();
+        if (saved.paused) paper.pause();
+      } catch (error) {
+        // Never thrown on: a start-up that fails the same way at every restart would loop under the supervisor.
+        log(`TEST not restored after a restart: ${rejectCode(error) ?? 'error'}`);
+        return null;
+      }
+      log(`TEST restored after a restart${saved.paused ? ' (entries paused, as before)' : ''}`);
+      return 'TEST';
+    }
+    if (!this.localKey()) {
+      this.restoring = false;
+      tell('LIVE stopped by a restart', 'The desk restarted while LIVE was running. LIVE with Phantom is never resumed by itself: open LIVE positions have no exits until you start LIVE again.');
+      return 'LIVE_NOT_RESUMED';
+    }
+    const live = handle.engines.LIVE;
+    try {
+      await live.prepareStart?.();
+      this.mode = 'LIVE';
+      if (!live.scanner) live.start();
+      live.pause();
+    } catch (error) { return this.retryRestore(attempt, rejectCode(error) ?? 'error', tell); }
+    this.restoring = false;
+    tell('LIVE restored: exits only', 'The desk restarted while LIVE was running. LIVE is back for its open positions (stops, targets, rug exits); new entries stay paused until you press Resume.');
+    return 'LIVE_EXITS_ONLY';
+  }
+
+  private retryRestore(attempt: number, why: string, tell?: (title: string, body: string) => void): null {
+    const attempts = this.o.restoreAttempts ?? 10;
+    if (attempt < attempts && !this.closed) {
+      this.o.log?.(`session restore failed (${why}), retry ${attempt + 1}/${attempts}`);
+      this.restoreTimer = setTimeout(() => { this.restoreTimer = null; void this.restoreSession(attempt + 1); }, this.o.restoreRetryMs ?? 30_000);
+      this.restoreTimer.unref?.();
+      return null;
+    }
+    this.restoring = false;
+    const body = `The desk restarted while LIVE was running and could not bring it back (${why}). Open LIVE positions have no exits until you start LIVE again.`;
+    if (tell) tell('LIVE NOT restored', body); else this.o.log?.(`LIVE NOT restored: ${body}`);
+    return null;
   }
   private authorized = () => this.broker.connection().connected && Date.now() - this.heartbeat < 12_000;
   /** LIVE signs with WALLET_PRIVATE_KEY (DESK_LIVE_SIGNER=local-key): no Phantom session is involved. */
@@ -81,7 +176,8 @@ export class TradingService {
 
   async close(): Promise<void> {
     if (this.closed) return;
-    this.closed = true; clearInterval(this.timer); this.broker.cancel();
+    // The saved session stays as it was: a deliberate shutdown (deploy, reboot) restores it at the next start.
+    this.closed = true; clearInterval(this.timer); if (this.restoreTimer) clearTimeout(this.restoreTimer); this.broker.cancel();
     const handle = this.desk ?? await this.opening?.catch(() => null) ?? null;
     this.desk = null;
     await handle?.close();
@@ -141,6 +237,10 @@ export class TradingService {
 
   private async deskAction(action: string, body: Record<string, unknown>, handle: DeskHandle): Promise<void> {
     const { PAPER: paper, LIVE: live } = handle.engines;
+    if (['start-test', 'stop-test', 'start-live', 'stop-live', 'pause', 'resume', 'select-mode'].includes(action) && this.restoring) {
+      if (this.restoreTimer) clearTimeout(this.restoreTimer);
+      this.restoreTimer = null; this.restoring = false;
+    }
     if (handle.operational?.deploymentMode === 'LOCKED' && ['strategy', 'strategy-save', 'strategy-delete', 'drill-on', 'drill-off', 'reset-test'].includes(action))
       throw new DeskReject('CONFIG_LOCKED');
     const requireSession = () => {

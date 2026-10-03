@@ -86,6 +86,8 @@ export interface DeskHandle {
   holdings?: (wallet: string) => Promise<Holding[]>;
   /** Which alert kinds reach the phone; the dashboard switch is saved in data-desk/phone-alerts.json and wins over DESK_ALERTS. */
   phoneAlerts?: { kinds: () => AlertKind[]; set: (kinds: AlertKind[]) => Promise<void> };
+  /** The phone (ntfy/Telegram), for messages about the desk itself, such as a LIVE session restored after a restart. */
+  notify?: (title: string, body: string) => Promise<void>;
 }
 
 /**
@@ -191,7 +193,7 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
       if (!sol) throw new DeskReject('SOL_PRICE_UNAVAILABLE');
       return walletHistory({ wallet, solUsd: sol, rpc, dex: shared.dex });
     };
-    return { engines, capital, operational, liveSigner: live.signer, watch, assistant, walletHistory: history,
+    return { engines, capital, operational, liveSigner: live.signer, watch, assistant, walletHistory: history, notify: alerts.notify,
       phoneAlerts: { kinds: () => ALERT_KINDS.filter(k => phoneAlerts.has(k)), set: async kinds => {
         phoneAlerts.clear();
         for (const k of kinds) if (ALERT_KINDS.includes(k)) phoneAlerts.add(k);

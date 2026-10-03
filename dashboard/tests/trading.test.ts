@@ -29,14 +29,14 @@ function engine(mode: DeskMode) {
     status: (wallet: { connected: boolean; address: string | null }) => ({ mode, scanner: e.scanner, execution: e.execution, wallet }) };
   return e;
 }
-function service(liveSigner: DeskHandle['liveSigner'] = 'PHANTOM', locked = false) {
-  const engines = { PAPER: engine('PAPER'), LIVE: engine('LIVE') };
+function service(liveSigner: DeskHandle['liveSigner'] = 'PHANTOM', locked = false, options: ConstructorParameters<typeof TradingService>[1] = {}) {
+  const engines = { PAPER: engine('PAPER'), LIVE: engine('LIVE') }, phone: string[] = [];
   let wallets: Parameters<DeskFactory>[0] | null = null;
   const factory: DeskFactory = async context => { wallets = context;
     return { engines: engines as unknown as Record<DeskMode, DeskEngine>, capital: { plannedStartingCapitalUsd: 5.45, baseEntryUsd: 2, slippageBps: 100 }, liveSigner,
-      operational: locked ? deskOperational({ DESK_DEPLOYMENT_MODE: 'LOCKED' }) : undefined,
+      operational: locked ? deskOperational({ DESK_DEPLOYMENT_MODE: 'LOCKED' }) : undefined, notify: async (title: string) => { phone.push(title); },
       close: async () => {} } as DeskHandle; };
-  return { trading: new TradingService(factory), engines, context: () => wallets! };
+  return { trading: new TradingService(factory, options), engines, context: () => wallets!, phone };
 }
 async function serve(trading: TradingService) {
   const server = http.createServer((req, res) => { void trading.handleRequest(req, res); });
@@ -215,4 +215,67 @@ test('a desk that cannot start reports why instead of pretending to scan', async
     const view = await (await fetch(`${base}/api/trading`)).json();
     assert.equal(view.desk, null); assert.equal(view.deskError, 'RPC_NOT_CONFIGURED');
   } finally { await close(); await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('session restore: TEST comes back after a restart, LIVE (local key) comes back with exits only, Phantom LIVE never by itself', async () => {
+  const dir = await fs.mkdtemp(path.join(process.cwd(), '.tmp-session-'));
+  const sessionFile = path.join(dir, 'desk-session.json');
+  const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
+  try {
+    // A running TEST is saved by the service's own timer…
+    const first = service('PHANTOM', false, { sessionFile });
+    assert.equal(await first.trading.restoreSession(), null, 'nothing saved yet');
+    const { base, post, close } = await serve(first.trading);
+    const { capability } = await (await fetch(`${base}/api/trading/bootstrap`)).json();
+    assert.equal((await post('desk', { action: 'start-test' }, { 'X-Local-Capability': capability })).status, 200);
+    await wait(1_300);
+    assert.deepEqual({ ...JSON.parse(await fs.readFile(sessionFile, 'utf8')), at: undefined }, { mode: 'PAPER', running: true, paused: false, at: undefined });
+    // …and a shutdown (deploy, reboot) keeps it: the next start resumes TEST.
+    await close();
+    const second = service('PHANTOM', false, { sessionFile });
+    assert.equal(await second.trading.restoreSession(), 'TEST');
+    assert.equal(second.engines.PAPER.scanner, true); assert.equal(second.engines.PAPER.execution, true);
+    assert.deepEqual(second.phone, [], 'TEST restores quietly');
+    await second.trading.close();
+
+    // LIVE with the local key: reconciled, started, and paused at once (exits only); the phone is told.
+    await fs.writeFile(sessionFile, JSON.stringify({ mode: 'LIVE', running: true, paused: false, at: 'x' }));
+    const live = service('LOCAL_KEY', false, { sessionFile });
+    assert.equal(await live.trading.restoreSession(), 'LIVE_EXITS_ONLY');
+    assert.equal(live.engines.LIVE.prepared, 1, 'holdings reconciled first');
+    assert.equal(live.engines.LIVE.scanner, true); assert.equal(live.engines.LIVE.execution, false, 'no new entries until Resume');
+    assert.deepEqual(live.phone, ['LIVE restored: exits only']);
+    await live.trading.close();
+
+    // LIVE with Phantom: it cannot sign by itself, so it is never resumed; the owner is told.
+    const phantom = service('PHANTOM', false, { sessionFile });
+    assert.equal(await phantom.trading.restoreSession(), 'LIVE_NOT_RESUMED');
+    assert.equal(phantom.engines.LIVE.scanner, false);
+    assert.deepEqual(phantom.phone, ['LIVE stopped by a restart']);
+    await phantom.trading.close();
+
+    // A failing reconciliation (RPC still starting) is retried; after the last try the owner is told.
+    const failing = service('LOCAL_KEY', false, { sessionFile, restoreRetryMs: 20, restoreAttempts: 3 });
+    let tries = 0;
+    failing.engines.LIVE.prepareStart = async () => { tries++; if (tries < 3) throw new DeskReject('RPC_UNAVAILABLE'); };
+    await failing.trading.restoreSession();
+    await wait(150);
+    assert.equal(tries, 3); assert.equal(failing.engines.LIVE.execution, false); assert.equal(failing.engines.LIVE.scanner, true);
+    assert.deepEqual(failing.phone, ['LIVE restored: exits only']);
+    await failing.trading.close();
+    const giveUp = service('LOCAL_KEY', false, { sessionFile, restoreRetryMs: 10, restoreAttempts: 2 });
+    giveUp.engines.LIVE.prepareStart = async () => { throw new DeskReject('LIVE_HOLDINGS_MISMATCH'); };
+    await giveUp.trading.restoreSession();
+    await wait(100);
+    assert.equal(giveUp.engines.LIVE.scanner, false);
+    assert.deepEqual(giveUp.phone, ['LIVE NOT restored']);
+    await giveUp.trading.close();
+
+    // A TEST that cannot start (an unresolved order) is reported, never thrown: a crash would loop under the supervisor.
+    await fs.writeFile(sessionFile, JSON.stringify({ mode: 'PAPER', running: true, paused: false, at: 'x' }));
+    const blocked = service('PHANTOM', false, { sessionFile });
+    blocked.engines.PAPER.start = () => { throw new DeskReject('TRANSACTION_RECONCILIATION_REQUIRED'); };
+    assert.equal(await blocked.trading.restoreSession(), null);
+    await blocked.trading.close();
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
