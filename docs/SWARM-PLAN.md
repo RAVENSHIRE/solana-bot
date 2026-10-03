@@ -50,12 +50,37 @@ work to each other, and a place where the owner can direct coding from the dashb
 | Decide | **Risk officer**, allocator | code | every order | limits, kill, sizes | exists (`risk/`, guard) |
 | | **Executor** | code | approved order | TEST fills / LIVE swaps | exists |
 | Build | **Workshop coder** | Claude Agent SDK | owner prompt or SUPPORTED hypothesis | diff in a worktree | new |
+| Oversight | **CTO** | LLM, high effort + code checks | daily, every merge and deploy | quality ledger, Workshop tasks | new (runs as a session now) |
+| | **Research department** (literature scout) | LLM + web search | weekly, on owner question | literature cards → hypotheses | new (runs as a session now) |
 
 Why these new ones: the Troy Moose day (2 Oct) had eight copies of one story within 25 minutes. Moose graduated in
 4 minutes with 727 different curve buyers and went to $284K; the desk's MIGRATION2 bought the wrong copy. Its filters
 read "buy/sell 1.0–1.3" and "graduated too fast" as bad signs. A narrative scout ranks copies; a migration card records
 what was knowable at graduation; the research loop decides whether that ranking pays, out of sample, before any
 strategy uses it.
+
+## Oversight: the CTO and the research department
+
+The owner's verdict (3 Oct): "many things aren't quite professional enough", and 90 % of calls are rugs. Two roles watch
+the whole desk instead of one strategy:
+
+- **CTO.** Owns quality, not trading. Every day and after every merge or deploy it reads the diff, the test and build
+  results, the logs and the dashboard state, and keeps `docs/cto/QUALITY-LEDGER.md`: findings ranked P0–P3 with
+  evidence (`file:line`, log line, record id), a proposed fix and a status. It tracks the numbers that say whether the
+  desk is professional: call precision (share of phone calls that reached their target before their stop), rug share
+  of calls, phone volume per day, test count and flaky tests, observer and dashboard uptime, data freshness, provider
+  error rates, spend. It never changes code itself: a fix becomes a Workshop task, or a small reviewed commit while
+  the Workshop does not exist yet.
+- **Research department.** Searches the literature and practitioner write-ups for best practice in this space
+  (scam/rug detection, wash trading and bot volume, pump-and-dump dynamics, attention and narratives, backtest
+  overfitting, Solana execution and MEV, exits and sizing for small capital). Each source becomes a card in
+  `docs/research/literature/`: what was studied, on which data, the result in numbers, whether it transfers to
+  pump.fun in 2026, and one to three pre-registered hypotheses written in the observer's feature language. Those
+  hypotheses go to the curiosity scout's queue and only the qualification gate decides whether any of them reaches
+  the phone.
+
+Until the `swarm` process exists, both run as separate Claude Code sessions on their own branches, briefed by
+`docs/swarm/briefs/CTO.md` and `docs/swarm/briefs/RESEARCH.md`; this desk's main session reviews and merges their work.
 
 ## Orchestration
 
