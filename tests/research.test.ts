@@ -354,6 +354,33 @@ test('call engine: a qualified rule calls the phone at its decision time, other 
   assert.equal(recs.filter(r => r[0] === 'QUAL').length, 1);
 });
 
+test('call engine: without explicit costs, live calls are judged at the gate\'s costs ($0.10 a round trip), not the cheaper simulation default', async () => {
+  const { qualify } = await import('../src/research/qualify');
+  const { CallEngine } = await import('../src/research/calls');
+  const { simulate, GATE_COSTS } = await import('../src/research/direct');
+  const q = qualify(syntheticDataset(400, 2), freeCosts);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'research-calls-costs-'));
+  const t0 = Date.parse('2026-10-03T00:00:00Z');
+  let now = t0;
+  const ledger = new ResearchLedger({ dir, now: () => now, freeBytes: async () => 5e9 });
+  await ledger.start();
+  const engine = new CallEngine({ ledger, now: () => now, notify: null, solUsd: () => 150 });
+  engine.setQualification(q);
+  const l = syntheticLaunch(0, t0, true);
+  now = t0 + 5_000; engine.tick([l]);
+  now = t0 + 62 * 60_000 + 95_000; engine.tick([]);
+  await ledger.close();
+  const read = async (f: string) => f.endsWith('.gz') ? gunzipSync(await fs.readFile(path.join(dir, f))).toString() : await fs.readFile(path.join(dir, f), 'utf8');
+  const recs = lines((await Promise.all((await fs.readdir(dir)).filter(f => f.startsWith('ev-')).sort().map(read))).join(''));
+  const res = recs.filter(r => r[0] === 'RES');
+  assert.ok(res.length > 0);
+  for (const r of res) {
+    const rule = q.rules.find(x => x.id === r[3])!;
+    const expected = simulate(l, rule.exit, { ...GATE_COSTS, delayS: rule.delayS }, now)!.netPct;
+    assert.ok(Math.abs((r[5] as number) - expected) < 0.01, `${rule.id} judged with the gate's costs (${r[5]} vs ${expected})`);
+  }
+});
+
 test('live and look-back features are the same code over the same facts', async () => {
   const { readDataset, features } = await import('../src/research/dataset');
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'research-parity-'));

@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ledgerFiles, readDataset } from '../research/dataset';
-import { DIRECT_DEFAULTS } from '../research/direct';
+import { GATE_COSTS } from '../research/direct';
 import { qualify } from '../research/qualify';
 import { describeExit } from '../research/rules';
 
@@ -20,7 +20,7 @@ function main(): void {
   // Files are hourly (UTC): keep the ones that can hold data from the window.
   const files = ledgerFiles(dir).filter(f => { const m = /ev-(\d{4})(\d{2})(\d{2})-(\d{2})/.exec(path.basename(f)); return !m || Date.UTC(+m[1]!, +m[2]! - 1, +m[3]!, +m[4]! + 1) >= since; });
   const ds = readDataset(files, { from: since });
-  const costs = { ...DIRECT_DEFAULTS, sizeUsd: Number(arg('size') ?? 2), fixedUsd: Number(arg('fixed-usd') ?? 0.10), feePct: Number(arg('fee-pct') ?? DIRECT_DEFAULTS.feePct) };
+  const costs = { ...GATE_COSTS, sizeUsd: Number(arg('size') ?? GATE_COSTS.sizeUsd), fixedUsd: Number(arg('fixed-usd') ?? GATE_COSTS.fixedUsd), feePct: Number(arg('fee-pct') ?? GATE_COSTS.feePct) };
   const q = qualify(ds, costs);
   const out = path.resolve(arg('out') ?? path.join(dir, 'qualified.json'));
   fs.writeFileSync(`${out}.tmp`, JSON.stringify(q, null, 1));

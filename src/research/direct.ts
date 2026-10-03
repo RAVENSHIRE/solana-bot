@@ -16,6 +16,8 @@ import type { Dataset, LaunchFacts } from './dataset';
 export interface ExitRule { tpPct: number; slPct: number | null; maxHoldMin: number; trailPct?: number | null }
 export interface DirectOptions { delayS: number; latencyMs: number; feePct: number; fixedUsd: number; sizeUsd: number; solUsd: number }
 export const DIRECT_DEFAULTS: Omit<DirectOptions, 'delayS'> = { latencyMs: 2_000, feePct: 1.25, fixedUsd: 0.03, sizeUsd: 2, solUsd: 118 };
+/** The costs of the qualification gate ($0.10 network/priority per round trip), and so of judging its live calls too. */
+export const GATE_COSTS: Omit<DirectOptions, 'delayS'> = Object.freeze({ ...DIRECT_DEFAULTS, fixedUsd: 0.10 });
 export interface DirectTrade { mint: string; symbol: string | null; createdObs: number; entryAt: number; entryMcap: number; exitAt: number; exitMcap: number; reason: string; netPct: number; peakPct: number }
 
 interface Point { at: number; h: number; l: number; c: number; trade: boolean }

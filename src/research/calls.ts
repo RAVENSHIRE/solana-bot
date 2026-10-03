@@ -1,5 +1,5 @@
 import { features, type LaunchFacts } from './dataset';
-import { simulate, DIRECT_DEFAULTS, type DirectOptions } from './direct';
+import { simulate, GATE_COSTS, type DirectOptions } from './direct';
 import { GROUPS, describeExit } from './rules';
 import type { Qualification, RuleEvidence } from './qualify';
 import type { ResearchLedger } from './ledger';
@@ -30,6 +30,7 @@ export interface CallDeps {
   /** The phone (ntfy/Telegram); null: nothing is sent. */
   notify?: ((title: string, body: string) => Promise<void>) | null;
   solUsd?: () => number | null;
+  /** Defaults to the gate's costs, so live calls are judged exactly as the gate judged their rule. */
   costs?: Omit<DirectOptions, 'delayS'>;
   link?: (mint: string) => string;
   log?: (line: string) => void;
@@ -156,7 +157,7 @@ export class CallEngine {
   }
 
   private judge(now: number): void {
-    const costs = this.d.costs ?? DIRECT_DEFAULTS, keep: Signal[] = [];
+    const costs = this.d.costs ?? GATE_COSTS, keep: Signal[] = [];
     for (const s of this.open) {
       const endsAt = s.decisionAt + costs.latencyMs + s.rule.exit.maxHoldMin * 60_000;
       if (now < endsAt + CALLS.judgeAfterMs) { keep.push(s); continue; }
