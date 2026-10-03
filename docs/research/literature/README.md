@@ -85,6 +85,7 @@ The research platform's experiment pipeline already computes a deflated Sharpe r
 gate that decides what reaches the phone (`qualify.ts`) does not use it.
 
 See also [FLAG-LEDGER.md](FLAG-LEDGER.md): the owner's idea of scoring every flag (watchlist, INFO, known cases) as
-a research point, with three more hypotheses (F1–F3).
+a research point, with three more hypotheses (F1–F3). [NARRATIVE-REGIME.md](NARRATIVE-REGIME.md): narratives, leaders
+and market breadth across the whole memecoin market (N1–N4, E1–E2).
 The brief's topic 4 sources (deflated Sharpe ratio, PBO, Harvey and Liu) are the ones to open first to choose the
 correction, once the hosts are allowed.
