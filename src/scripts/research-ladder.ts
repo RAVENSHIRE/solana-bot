@@ -54,8 +54,11 @@ function main(): void {
   for (const mint of watch) {
     const c = data.get(`solana:${mint}`), s = c?.snaps.at(-1);
     if (!c || !s?.mcap) { console.log(`    ${mint.slice(0, 6)}…  not recorded yet`); continue; }
-    const hist = c.histories.at(-1), ath = Math.max(hist?.athMcap ?? 0, ...c.snaps.map(x => x.mcap ?? 0)), lv = levels(s.mcap), held = c.holders.at(-1);
-    console.log(`    ${(c.symbol ?? mint.slice(0, 6)).padEnd(10)} ${usd(s.mcap)} (${tierOf(s.mcap)}, between ${usd(lv.below)} and ${usd(lv.above)}) · high ${usd(ath)} → ${((1 - s.mcap / ath) * 100).toFixed(0)} % below · ` +
+    const hist = c.histories.at(-1), lv = levels(s.mcap), held = c.holders.at(-1);
+    // The high is known only once the coin's candles were read; snapshots alone start at the first sighting.
+    const ath = hist ? Math.max(hist.athMcap, ...c.snaps.map(x => x.mcap ?? 0)) : null;
+    console.log(`    ${(c.symbol ?? mint.slice(0, 6)).padEnd(10)} ${usd(s.mcap)} (${tierOf(s.mcap)}, between ${usd(lv.below)} and ${usd(lv.above)}) · ` +
+      `${ath ? `high ${usd(ath)} → ${((1 - s.mcap / ath) * 100).toFixed(0)} % below` : 'high not read yet'} · ` +
       `holders ${s.holders ?? '–'} (${s.holderCh24h === null ? '–' : `${s.holderCh24h >= 0 ? '+' : ''}${s.holderCh24h.toFixed(1)} % 24h`}) · real buys/sells 1h ${usd(s.orgBuyVol1h)} / ${usd(s.orgSellVol1h)}` +
       `${held ? ` · team ${held.team.toFixed(1)} %, clusters ${held.clu.toFixed(1)} %, fresh wallets ${held.fresh.toFixed(1)} %` : ''}`);
   }
