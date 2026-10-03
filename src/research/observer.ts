@@ -384,7 +384,7 @@ export class ResearchObserver {
     const s = this.stats;
     return `${new Date(this.now()).toISOString().slice(0, 19)} · tracked ${this.tracks.size} · creates ${s.createsPortal}/${s.createsLog} (portal/logs) · trades ${s.trades} (logged ${s.tradesLogged}, untracked ${s.untracked}) · ` +
       `completes ${s.completes} · migrations ${s.migrations} · meta ${s.metaOk} ok/${s.metaFail} failed · X ${s.xReads} reads (${s.xLimited} limited, ${s.xErrors} errors, ${s.xLate} late) · ` +
-      `sites ${s.siteReads} · gaps ${s.gaps} · ${(this.d.ledger.bytes / 1048576).toFixed(1)} MB written${this.d.ledger.lowDisk ? ' · LOW DISK: trades paused' : ''}` +
+      `sites ${s.siteReads} · gaps ${s.gaps} · ${(this.d.ledger.bytes / 1048576).toFixed(1)} MB written${this.d.ledger.lowDisk ? ' · LOW DISK: trades paused' : ''}${this.d.ledger.writeErrors ? ` · WRITE ERRORS ${this.d.ledger.writeErrors} (last: ${this.d.ledger.lastWriteError})` : ''}` +
       (this.d.calls ? ` · calls ${this.d.calls.stats.calls} sent, ${this.d.calls.stats.shadows} shadow, ${this.d.calls.stats.judged} judged` : '');
   }
 }

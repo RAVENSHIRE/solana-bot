@@ -46,3 +46,23 @@ test('CTO-03: the notifier keeps a delivery health record (HTTP refusals and net
   assert.equal(h.lastError, 'ntfy TypeError');
   assert.deepEqual(failures, ['ntfy 429', 'ntfy TypeError']);
 });
+
+test('CTO-04: a failed research-ledger write is counted, recorded as a GAP, and does not orphan later records of the same mint', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cto-ledger-'));
+  const now = Date.parse('2026-10-02T10:30:00Z'), file = path.join(dir, 'ev-20261002-10.jsonl');
+  const ledger = new ResearchLedger({ dir, now: () => now, freeBytes: async () => 10_000 * 1048576 });
+  await ledger.start();
+  // The hour's file cannot be written (a directory in its place stands for a locked or full disk).
+  await fs.mkdir(file);
+  ledger.put(['T', now, { $m: 'MINT1' }, { $w: 'W1' }, 1]);
+  await ledger.flush();
+  assert.equal(ledger.writeErrors, 1);
+  await fs.rmdir(file);
+  ledger.put(['T', now + 1, { $m: 'MINT1' }, { $w: 'W1' }, 0]);
+  await ledger.close();
+  const rows = (await fs.readFile(file, 'utf8')).trim().split('\n').map(l => JSON.parse(l) as unknown[]);
+  assert.ok(rows.some(r => r[0] === 'GAP' && r[2] === 'ledger'), 'the lost lines are recorded as a gap');
+  assert.ok(rows.some(r => r[0] === 'M' && r[2] === 'MINT1'), 'the dictionary line is written again');
+  const ds = readDataset([file]);
+  assert.ok(ds.gaps.some(g => g.source === 'ledger'));
+});
