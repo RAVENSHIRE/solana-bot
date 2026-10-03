@@ -175,6 +175,11 @@ all-time high (WWW on 3 Oct: $1.15M after $8.2M the day before), and old runners
   service and never links wallets. About 45 RPC calls per scan, at most 2 scans per 10 minutes.
   `npm run research:holders -- <mint>` prints one scan.
 
+One coin on demand (its card, a GoPlus/RugCheck contract scan, a look back over its candles with non-round control
+levels) is the fundamentals layer, `docs/FUNDAMENTALS.md`; the tiers are defined once, in
+`src/research/fundamentals/levels.ts`. The ladder's records are the list that layer's studies ask for: every coin as it
+was seen on a past day, whatever happened to it since, not only the survivors.
+
 `npm run research:ladder` measures what followed each snapshot (one sample per coin per day): doubled, reached the next
 level, got back to its all-time high, or halved first, within 24 hours and 7 days. Cohorts: tier, distance under the
 high (the "mid tier, 80 %+ under" row is the WWW case), position between two levels, holders rising or falling, real

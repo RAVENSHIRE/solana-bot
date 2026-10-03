@@ -46,6 +46,7 @@
     "research:platform": "node --import tsx src/scripts/research-platform.ts",
     "research:ladder": "node --import tsx src/scripts/research-ladder.ts",
     "research:holders": "node --import tsx src/scripts/research-holders.ts",
+    "research:fundamentals": "node --import tsx src/scripts/research-fundamentals.ts",
     "research:build": "tsc -p tsconfig.research.json",
     "test:research": "node --import tsx --test tests/research-*.test.ts",
     "test:research:node": "tsc -p tsconfig.research.json && node --test dist-research/tests/*.test.js",

@@ -1,4 +1,5 @@
-import { levels, tierOf, type LadderCoinData, type Tier } from './ladder';
+import { levels, tierOf, type LadderCoinData } from './ladder';
+import { TIERS, type TierId } from './fundamentals/levels';
 
 /**
  * What followed each ladder snapshot. One sample per coin per day (consecutive 10-minute snapshots of one coin are not
@@ -14,7 +15,7 @@ export const REVIVAL = Object.freeze({ minAthAgeDays: 45, maxLowOfAth: 0.3, minO
 
 export interface Outcome { maxMcap: number; up2x: boolean; nextLevel: boolean; ath: boolean | null; halvedFirst: boolean; maxRisePct: number; vanished: boolean }
 export interface LadderSample {
-  key: string; net: string; symbol: string | null; at: number; mcap: number; tier: Tier; level: { below: number; above: number };
+  key: string; net: string; symbol: string | null; at: number; mcap: number; tier: TierId; level: { below: number; above: number };
   /** From candles recorded before this moment (null until the coin's history was read), raised by any higher snapshot since. */
   athMcap: number | null; drawdownPct: number | null; athAgeDays: number | null; revival: boolean | null;
   holderCh24h: number | null; flow: number | null; organicFlow: number | null; liqRatio: number | null; ageDays: number | null;
@@ -84,9 +85,9 @@ export function ladderGroups(samples: LadderSample[]): Array<[string, Array<[str
   const dd = (lo: number, hi: number) => (s: LadderSample) => s.drawdownPct !== null && s.drawdownPct >= lo && s.drawdownPct < hi;
   return [
     ['All', [['every sample', () => true]]],
-    ['Tier', (['micro', 'low', 'mid', 'high', 'large'] as const).map(t => [`${t} (${({ micro: '$10K–100K', low: '$100K–1M', mid: '$1M–10M', high: '$10M–100M', large: '$100M+' })[t]})`, s => s.tier === t])],
+    ['Tier', TIERS.map(t => [`${t.id} (${t.id === 'MICRO' ? '$10K–$100K' : t.label})`, (s: LadderSample) => s.tier === t.id] as [string, (s: LadderSample) => boolean])],
     ['Below the all-time high', [['under 50 %', dd(0, 50)], ['50–80 %', dd(50, 80)], ['80–90 %', dd(80, 90)], ['90 % or more', dd(90, 101)],
-      ['mid tier, 80 %+ below (WWW-like)', s => s.tier === 'mid' && (s.drawdownPct ?? 0) >= 80]]],
+      ['mid tier, 80 %+ below (WWW-like)', s => s.tier === 'MID' && (s.drawdownPct ?? 0) >= 80]]],
     ['Position between the levels', [['just above a level (< 1.5×)', s => s.mcap < s.level.below * 1.5], ['middle (1.5–5×)', s => s.mcap >= s.level.below * 1.5 && s.mcap < s.level.below * 5],
       ['near the next level (≥ 5×)', s => s.mcap >= s.level.below * 5]]],
     ['Holders over 24 h (Solana)', [['rising', s => (s.holderCh24h ?? 0) > 0], ['falling', s => s.holderCh24h !== null && s.holderCh24h <= 0]]],

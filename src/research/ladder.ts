@@ -3,6 +3,7 @@ import { gunzipSync } from 'node:zlib';
 import type { Field, ResearchLedger } from './ledger';
 import { JupiterTokens, type JupToken, type WatchToken } from './verified';
 import { scanHolders, type HolderRpc, type HolderScan } from './holders';
+import { tierOf as tierInfo, type TierId } from './fundamentals/levels';
 
 /**
  * The market-cap ladder: coins on every chain that trade at $10K or more, recorded every 10 minutes, so the research
@@ -34,9 +35,8 @@ export const LADDER = Object.freeze({
   holderScansPerCycle: 2, holderMinMcapUsd: 1_000_000, holderRefreshMs: 24 * 3_600_000,
 });
 
-export const TIERS = [['micro', 1e5], ['low', 1e6], ['mid', 1e7], ['high', 1e8], ['large', Infinity]] as const;
-export type Tier = typeof TIERS[number][0];
-export const tierOf = (mcap: number): Tier => TIERS.find(([, below]) => mcap < below)![0];
+/** The tiers are the fundamentals layer's (one definition): MICRO under $100K, LOW, MID, HIGH, LARGE from $100M. */
+export const tierOf = (mcap: number): TierId => tierInfo(mcap)?.id ?? 'MICRO';
 /** The decade levels around a market cap: $1.15M sits between $1M and $10M. */
 export function levels(mcap: number): { below: number; above: number } {
   const below = 10 ** Math.floor(Math.log10(Math.max(mcap, 1)));

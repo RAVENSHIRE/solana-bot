@@ -14,7 +14,7 @@ const addr = (i: number) => Keypair.fromSeed(new Uint8Array(32).fill(i + 1)).pub
 const SYSTEM = '11111111111111111111111111111111';
 
 test('ladder: tiers and decade levels', () => {
-  assert.equal(tierOf(1.15e6), 'mid'); assert.equal(tierOf(99_999), 'micro'); assert.equal(tierOf(2.5e8), 'large');
+  assert.equal(tierOf(1.15e6), 'MID'); assert.equal(tierOf(99_999), 'MICRO'); assert.equal(tierOf(2.5e8), 'LARGE');
   assert.deepEqual(levels(1.15e6), { below: 1e6, above: 1e7 });
   assert.deepEqual(levels(9_999), { below: 1_000, above: 10_000 });
   assert.deepEqual(levels(100_000), { below: 100_000, above: 1e6 });
@@ -137,7 +137,7 @@ test('ladder study: one sample a day, outcomes over 24 h and 7 days, cohorts by 
   const samples = ladderSamples(data, now);
   const a = samples.filter(s => s.key === 'solana:AAAA');
   assert.equal(a.length, 10, 'one sample a day over 9 days');
-  assert.equal(a[0]!.tier, 'mid'); assert.equal(a[0]!.drawdownPct, 87.5); assert.equal(a[0]!.organicFlow, 2);
+  assert.equal(a[0]!.tier, 'MID'); assert.equal(a[0]!.drawdownPct, 87.5); assert.equal(a[0]!.organicFlow, 2);
   assert.deepEqual(a[0]!.outcome['24h'] && { up2x: a[0]!.outcome['24h'].up2x, next: a[0]!.outcome['24h'].nextLevel }, { up2x: false, next: false });
   assert.equal(a[0]!.outcome['7d']!.up2x, true); assert.equal(a[0]!.outcome['7d']!.ath, false); assert.equal(a[0]!.outcome['7d']!.maxRisePct, 150);
   assert.equal(a.at(-1)!.outcome['7d'], undefined, 'too recent for a 7-day outcome');
