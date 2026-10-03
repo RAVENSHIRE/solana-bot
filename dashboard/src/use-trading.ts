@@ -22,7 +22,7 @@ export interface AssistantAnswer {
     firstBuyMcapUsd: number | null; lastSellMcapUsd: number | null; nowMcapUsd: number | null; stillHeld: boolean }> };
 }
 export type DeskAction = 'select-mode' | 'start-test' | 'stop-test' | 'start-live' | 'pause' | 'resume' | 'stop-live' | 'probe' | 'drill-on' | 'drill-off' | 'strategy-save' | 'strategy-delete' | 'watch-add' | 'watch-remove' | 'watch-rearm' |
-  'strategy' | 'reset-test' | 'exit';
+  'strategy' | 'reset-test' | 'exit' | 'phone-alerts';
 interface Session { id: string; address: string }
 const message = (error: unknown) => error instanceof Error ? error.message : 'Local service unavailable';
 

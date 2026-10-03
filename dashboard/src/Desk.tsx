@@ -70,7 +70,7 @@ export function DeskPanel({ t }: { t: TradingSession }) {
         <Telemetry events={d.events} />
         <PreflightCard p={d.preflights[0] ?? null} live={live} />
       </div>
-      <div id="desk-opening" className="desk-anchor"><OpeningScreen d={d} /></div>
+      <div id="desk-opening" className="desk-anchor"><OpeningScreen d={d} t={t} /></div>
       <div id="desk-golden" className="desk-anchor"><GoldenPocket d={d} /></div>
       <div id="desk-launches" className="desk-anchor"><LaunchRadar d={d} /></div>
       <div id="desk-candidates" className="desk-anchor"><Candidates list={d.candidates} probe={live ? null : mint => void t.desk('probe', { mint })} busy={!!t.busy} /></div>
@@ -670,21 +670,31 @@ function GoldenPocket({ d }: { d: DeskStatus }) {
  * few seconds. A launch whose first one-minute candle reached $10K and that never fell below $6.7K is watched; when it
  * breaks back above its opening high (×1.3) an alert goes out at once and OPEN buys, holds for at least 6× and adds.
  */
-function OpeningScreen({ d }: { d: DeskStatus }) {
+const PHONE_KINDS: Array<[string, string]> = [['open', 'OPEN breakouts'], ['golden', 'GOLDEN fills'], ['rug', 'rug sales'], ['launch', 'LAUNCH entry-ready'], ['radar', 'radar finds']];
+
+function OpeningScreen({ d, t }: { d: DeskStatus; t: TradingSession }) {
   const o = d.opening, list = o?.list ?? [], k = (v: number | null) => v == null ? '--' : `$${(v / 1000).toFixed(1)}K`;
   const mins = (at: number) => `${Math.max(0, Math.round((Date.now() - at) / 60_000))} min`;
   const label: Record<string, string> = { STRONG: 'watching', SIGNAL: 'BREAKOUT', RUG: 'rug (below floor)', GRADUATED: 'graduated first', EXPIRED: 'no breakout' };
+  const phone = new Set(o?.phone ?? []), busy = !!t.busy || !t.online;
+  const toggle = (kind: string) => void t.desk('phone-alerts', { kinds: PHONE_KINDS.map(([k]) => k).filter(k => k === kind ? !phone.has(k) : phone.has(k)) });
   return <section className="panel desk-card" aria-label="Opening screen">
     <div className="card-head"><h3>Opening screen · 10K+ opening candle, never below 6.7K, breakout above the open</h3>
       <small>{o ? `${o.counts.OPENING ?? 0} launches in their first minute · ${o.counts.STRONG ?? 0} strong opens watched · ${o.counts.SIGNAL ?? 0} breakouts · ${o.counts.RUG ?? 0} fell below 6.7K · ${o.counts.WEAK ?? 0} weak opens skipped`
         : 'Runs while TEST or LIVE scans.'} Market caps are read from each launch's bonding curve every 4 s.</small></div>
-    <div className="wallet-table"><table><thead><tr><th>Token</th><th>Age</th><th>Opening candle</th><th>Low</th><th>Now</th><th>Peak</th><th>Status</th><th>OPEN</th></tr></thead>
+    {o?.phone && <div className="chips phone-alerts" role="group" aria-label="Phone alerts">
+      <small>Phone (ntfy; tap opens FOMO):</small>
+      {PHONE_KINDS.map(([kind, text]) => <button key={kind} type="button" className={`chip ${phone.has(kind) ? 'on' : 'off'}`} aria-pressed={phone.has(kind)} disabled={busy}
+        onClick={() => toggle(kind)}>{phone.has(kind) ? '✓' : '✗'} {text}</button>)}
+    </div>}
+    <div className="wallet-table"><table><thead><tr><th>Token</th><th>Age</th><th>Opening candle</th><th>Speed</th><th>Low</th><th>Now</th><th>Peak</th><th>Status</th><th>OPEN entry</th></tr></thead>
       <tbody>{list.map(x => <tr key={x.mint} className={x.status === 'SIGNAL' ? 'launch-ready' : x.status === 'RUG' ? 'launch-fake' : ''}>
         <td title={x.mint}><strong>{x.symbol}</strong> <Fomo mint={x.mint} /><br /><small>{x.name.slice(0, 32)}</small></td>
-        <td>{mins(x.at)}</td><td>{k(x.openHighUsd)}</td><td>{k(x.lowUsd)}</td><td>{k(x.lastUsd)}</td><td>{k(x.peakUsd)}</td>
+        <td>{mins(x.at)}</td><td>{k(x.openHighUsd)}</td><td><small>{x.speed ?? '--'}</small></td><td>{k(x.lowUsd)}</td><td>{k(x.lastUsd)}</td><td>{k(x.peakUsd)}</td>
         <td title={x.detail}><small>{x.status === 'SIGNAL' ? `BREAKOUT at ${k(x.signalUsd)}` : label[x.status] ?? x.status}</small></td>
-        <td><small>{x.held ? `held by ${x.held}` : x.entry ?? (x.status === 'SIGNAL' ? 'waiting for market data' : '--')}</small></td></tr>)}
-        {!list.length && <tr><td colSpan={8}>No strong opening candle yet.</td></tr>}</tbody></table></div>
+        <td><small>{x.held ? `held by ${x.held}` : x.entry ?? (x.status !== 'SIGNAL' ? '--' : x.signalAt && Date.now() - x.signalAt > 30 * 60_000 ? 'not entered (signal expired)'
+          : 'no tradable quote yet (DexScreener lists curve coins late)')}</small></td></tr>)}
+        {!list.length && <tr><td colSpan={9}>No strong opening candle yet.</td></tr>}</tbody></table></div>
   </section>;
 }
 

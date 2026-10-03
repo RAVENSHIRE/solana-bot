@@ -192,7 +192,11 @@ export interface DeskStatus {
     review?: { verdict: 'STRONG' | 'OK' | 'WEAK' | 'SCAM'; idea: number; professionalism: number; aiGenerated: string; summary: string; scamSignals: string[] } | null }>;
   /** Opening screen: launches with a strong opening candle, their breakouts and rugs. */
   opening?: { counts: Record<string, number>; list: Array<{ mint: string; symbol: string; name: string; at: number; status: string; openHighUsd: number | null;
-    lowUsd: number | null; lastUsd: number | null; peakUsd: number | null; signalAt: number | null; signalUsd: number | null; detail: string; held: string | null; entry: string | null }> };
+    lowUsd: number | null; lastUsd: number | null; peakUsd: number | null; signalAt: number | null; signalUsd: number | null; detail: string; held: string | null; entry: string | null;
+    /** From the first read to the breakout, e.g. "$3.4K → $28.9K in 68 s (×8.5)". */
+    speed?: string | null }>;
+    /** Which alert kinds reach the phone right now (dashboard switch, else DESK_ALERTS). */
+    phone?: string[] };
   /** GOLDEN POCKET: fresh graduations' pools watched for the pattern, most advanced first. */
   golden?: { counts: Record<string, number>; entryKinds: string[]; list: Array<{ mint: string; symbol: string | null; pool: string | null; startAt: number; phase: string;
     highUsd: number | null; lowUsd: number | null; topUsd: number | null; lastUsd: number | null; peakUsd: number | null; detail: string;

@@ -1,6 +1,6 @@
 import { blindSpots, features, type Dataset, type Features, type LaunchFacts } from './dataset';
 import { simulate, summarize, type DirectOptions, type DirectTrade, type ExitRule, type Summary } from './direct';
-import { EXITS, GROUPS, groupDelays, ruleId, type GroupId } from './rules';
+import { EXITS, FAST_EXITS, GROUPS, exitsFor, groupDelays, ruleId, type GroupId } from './rules';
 
 /**
  * The gate between research and the phone. A rule qualifies only when, on launches it was never tuned on, it
@@ -55,10 +55,10 @@ export function qualify(ds: Dataset, costs: Omit<DirectOptions, 'delayS'>, o: { 
       const end = l.createdObs + delayS * 1000, earlier = (byCreator.get(l.creator ?? '') ?? []).filter(e => e.createdObs < l.createdObs);
       f.set(l.mint, features(l, delayS, { creatorLaunches: earlier.length, creatorGraduations: earlier.filter(e => e.completeObs !== null && e.completeObs <= end).length }, blind));
     }
-    const sims = EXITS.map(x => ({ x, trades: launches.map(l => simulate(l, x, { ...costs, delayS }, ds.last)).filter((t): t is DirectTrade => !!t) }));
+    const sims = [...EXITS, ...FAST_EXITS].map(x => ({ x, trades: launches.map(l => simulate(l, x, { ...costs, delayS }, ds.last)).filter((t): t is DirectTrade => !!t) }));
     for (const { group } of groupDelays().filter(g => g.delayS === delayS)) {
-      const g = GROUPS[group];
-      const runs = sims.map(({ x, trades }) => {
+      const g = GROUPS[group], menu = exitsFor(group);
+      const runs = sims.filter(s => menu.includes(s.x)).map(({ x, trades }) => {
         const mine = trades.filter(t => g.test(f.get(t.mint)!));
         return { x, tune: mine.filter(t => t.createdObs < cut), later: mine.filter(t => t.createdObs >= cut) };
       });

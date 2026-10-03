@@ -34,11 +34,11 @@ import { crashCheck, crashMarketHint, crashRatioOnlyMiss, goldenEntryCheck, laun
 import type { Candidate, DeskEvent, DeskMode, DeskPosition, DeskStatus, Preflight, Stage, StrategyId, StrategyView, Tier } from './types';
 import type { Launch, LaunchSource } from './launches';
 import type { XFeed } from './xfeed';
-import { OPENING, type OpeningState, type OpeningTracker } from './opening';
+import { OPENING, openingSpeed, type OpeningState, type OpeningTracker } from './opening';
 import { GOLDEN, PUMP_QUOTE_MINT, WSOL_MINT, type GoldenSignal, type GoldenTracker } from './golden-pocket';
 
 import { curveState, insiderExit, insiderHolding, RISK } from './launch-risk';
-import { fomoUrl } from './watch';
+import { fomoUrl, type Notify, type NotifyOptions } from './watch';
 import { PRESETS, loadRuleSpecs, removeRuleSpec, ruleCheck, ruleMarketHint, ruleProfile, saveRuleSpec, type RuleSpec } from './custom';
 import type { DeskResearchHooks } from '../research/integration/desk-recorder';
 import type { ChannelResult } from '../research/alerts/evidence';
@@ -72,9 +72,9 @@ export interface DeskDeps {
   /** Claude review of shortlisted launches: its status line; absent when off. */
   aiReview?: (() => string) | null;
   /** Phone/desktop alerts (ntfy, Telegram) for launch-radar finds and entry-ready signals. */
-  notify?: (title: string, body: string) => Promise<void>;
+  notify?: Notify;
   /** The same send with each channel's outcome, so delivery is recorded (research evidence); `notify` is used without it. */
-  deliver?: (title: string, body: string) => Promise<ChannelResult[]>;
+  deliver?: (title: string, body: string, options?: NotifyOptions) => Promise<ChannelResult[]>;
   /** Configured phone channels (ntfy, Telegram), recorded with each alert. */
   alertChannels?: readonly string[];
   /**
@@ -1043,10 +1043,12 @@ export class DeskEngine {
       if (block) { this.event('FILTERED', `OPEN screen: ${state.symbol} broke out (${state.detail}) but ${block} — no alert, never bought`, ctx); continue; }
       const signal = { state, launch, at: now };
       this.openSignals.set(state.mint, signal); fresh.push(signal);
-      const age = Math.max(1, Math.round((now - state.at) / 60_000));
-      this.event('QUALIFIED', `OPEN screen: ${state.symbol} "${state.name}" ${age} min old · ${state.detail}`, ctx);
-      this.alertOnce(`open:${state.mint}`, `OPEN: ${state.symbol} broke out at $${((state.signalUsd ?? 0) / 1000).toFixed(1)}K`,
-        `${state.name} · ${state.detail}${launch?.insiders ? ` · ${launch.insiders.detail}` : ''}\n${fomoUrl(state.mint)}`, 'open');
+      const age = Math.max(1, Math.round((now - state.at) / 60_000)), speed = openingSpeed(state);
+      this.event('QUALIFIED', `OPEN screen: ${state.symbol} "${state.name}" ${age} min old · ${state.detail}${speed ? ` · ${speed.text}` : ''}`, ctx);
+      const secs = Math.max(0, Math.round(((state.signalAt ?? now) - state.at) / 1000));
+      this.alertOnce(`open:${state.mint}`, `OPEN ${state.symbol}: $${((state.signalUsd ?? 0) / 1000).toFixed(1)}K, ${secs < 120 ? `${secs} s` : `${Math.round(secs / 60)} min`} after launch`,
+        [`${state.name}${speed ? ` · ${speed.text}` : ''}`, state.detail, launch?.insiders?.detail ?? '',
+          'Not a qualified call. Fast openers often rug within minutes: take profit early.', fomoUrl(state.mint)].filter(Boolean).join('\n'), 'open');
     }
     // A breakout is traded fresh: start a scan now instead of waiting for the next one.
     if (fresh.length && this.strategies.OPEN.enabled && !this.work) this.nextScanAt = Date.now();
@@ -1183,9 +1185,11 @@ export class DeskEngine {
     // Every first alert per key is recorded with what the desk knew at this moment, whether or not it reaches the phone.
     const record = this.recordAlert(key, title, body, kind, selected);
     if (!selected.has(kind)) return;
+    // Tapping the notification opens the coin in FOMO.
+    const mint = key.slice(key.indexOf(':') + 1), options: NotifyOptions = { click: /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint) ? fomoUrl(mint) : null, tags: [kind] };
     const text = record?.body ?? body, evidence = record?.evidence, research = this.d.research;
-    if (evidence && research && this.d.deliver) void this.d.deliver(title, text).then(r => research.delivered(evidence, r), () => undefined);
-    else void this.d.notify(title, text).catch(() => undefined);
+    if (evidence && research && this.d.deliver) void this.d.deliver(title, text, options).then(r => research.delivered(evidence, r), () => undefined);
+    else void this.d.notify(title, text, options).catch(() => undefined);
   }
 
   /** The research record of an alert (evidence snapshot + the message to send); null without a recorder or on any error. */
@@ -1723,7 +1727,8 @@ export class DeskEngine {
       }).sort((a, b) => Number(a.stale) - Number(b.stale) || rank(b) - rank(a) || Number(!!b.crash?.signal) - Number(!!a.crash?.signal) || composite(b) - composite(a)).slice(0, 40),
       ...(d.opening ? { opening: { counts: d.opening.counts(), list: d.opening.list().slice(0, 20).map(o => ({ mint: o.mint, symbol: o.symbol, name: o.name, at: o.at, status: o.status,
         openHighUsd: o.openHighUsd, lowUsd: o.lowUsd, lastUsd: o.lastUsd, peakUsd: o.peakUsd, signalAt: o.signalAt, signalUsd: o.signalUsd, detail: o.detail,
-        held: this.heldBy(o.mint) ?? null, entry: this.candidates.get(o.mint)?.open?.signal.summary ?? null })) } } : {}),
+        held: this.heldBy(o.mint) ?? null, entry: this.candidates.get(o.mint)?.open?.signal.summary ?? null, speed: openingSpeed(o)?.text ?? null })),
+        phone: [...(this.d.alerts ?? DEFAULT_ALERTS)] } } : {}),
       ...(d.golden ? { golden: { counts: d.golden.counts(), entryKinds: this.strategies.GOLDEN.entryKinds ?? ['ONLY_UP'], list: d.golden.list().slice(0, 25).map(w => ({ mint: w.mint,
         symbol: w.symbol ?? this.candidates.get(w.mint)?.symbol ?? null, pool: w.pool, startAt: w.startAt, phase: w.state.phase, highUsd: w.state.high, lowUsd: w.state.low, topUsd: w.state.top, lastUsd: w.lastUsd, peakUsd: w.peakUsd, detail: w.state.detail,
         entry: w.state.entry ? { kind: w.state.entry.kind, at: w.state.entry.at, fillUsd: w.state.entry.price, stopUsd: w.state.entry.stop, resistanceUsd: w.state.entry.resistance, zone: w.state.entry.zone } : null,

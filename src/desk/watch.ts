@@ -196,17 +196,27 @@ function pick(r: WatchRule): WatchInput {
   return { mint: r.mint, wallet: r.wallet, trailingStopPct: r.trailingStopPct, marketCapFloorUsd: r.marketCapFloorUsd, marketCapTargetUsd: r.marketCapTargetUsd, action: r.action, note: r.note };
 }
 
+/** Extras a channel may use: ntfy opens `click` when the notification is tapped (e.g. the coin in FOMO). */
+export interface NotifyOptions { click?: string | null; tags?: string[] }
+export type Notify = (title: string, body: string, options?: NotifyOptions) => Promise<void>;
+
 /**
  * Phone notifications, opt-in through .env: DESK_NTFY_TOPIC (the ntfy app, no account; pick a long random topic) and/or
  * DESK_TELEGRAM_BOT_TOKEN with DESK_TELEGRAM_CHAT_ID. Failures are swallowed: an alert must never block a sale.
  */
-export function notifier(env: NodeJS.ProcessEnv, fetcher: typeof fetch = fetch): { notify: (title: string, body: string) => Promise<void>; channels: string[];
-  deliver: (title: string, body: string) => Promise<ChannelResult[]> } {
-  const send: Array<(title: string, body: string) => Promise<unknown>> = [], channels: string[] = [];
+export function notifier(env: NodeJS.ProcessEnv, fetcher: typeof fetch = fetch): { notify: Notify; channels: string[];
+  deliver: (title: string, body: string, options?: NotifyOptions) => Promise<ChannelResult[]> } {
+  const send: Array<(title: string, body: string, options?: NotifyOptions) => Promise<unknown>> = [], channels: string[] = [];
   const topic = env.DESK_NTFY_TOPIC?.trim();
   if (topic && /^[A-Za-z0-9_-]{8,64}$/.test(topic)) {
     const server = (env.DESK_NTFY_SERVER?.trim() || 'https://ntfy.sh').replace(/\/$/, '');
-    send.push((title, body) => fetcher(`${server}/${topic}`, { method: 'POST', body, headers: { Title: title.replace(/[^\x20-\x7e]/g, ''), Priority: 'high' }, signal: AbortSignal.timeout(10_000) }));
+    send.push((title, body, o) => {
+      const headers: Record<string, string> = { Title: title.replace(/[^\x20-\x7e]/g, ''), Priority: 'high' };
+      if (o?.click && /^https:\/\/[^\s]+$/.test(o.click)) headers.Click = o.click;
+      const tags = (o?.tags ?? []).filter(t => /^[a-z0-9_]{1,32}$/.test(t));
+      if (tags.length) headers.Tags = tags.join(',');
+      return fetcher(`${server}/${topic}`, { method: 'POST', body, headers, signal: AbortSignal.timeout(10_000) });
+    });
     channels.push('ntfy');
   }
   const token = env.DESK_TELEGRAM_BOT_TOKEN?.trim(), chat = env.DESK_TELEGRAM_CHAT_ID?.trim();
@@ -216,12 +226,12 @@ export function notifier(env: NodeJS.ProcessEnv, fetcher: typeof fetch = fetch):
     channels.push('Telegram');
   }
   // Each channel's outcome (HTTP status, error class; never a message, which could contain the bot token) for the alert record.
-  const deliver = async (title: string, body: string): Promise<ChannelResult[]> => (await Promise.allSettled(send.map(f => f(title, body)))).map((r, i) => {
+  const deliver = async (title: string, body: string, options?: NotifyOptions): Promise<ChannelResult[]> => (await Promise.allSettled(send.map(f => f(title, body, options)))).map((r, i) => {
     if (r.status === 'rejected') return { channel: channels[i]!, ok: false, status: null, error: r.reason instanceof Error ? r.reason.name : 'error' };
     const res = r.value as { ok?: unknown; status?: unknown } | undefined;
     return { channel: channels[i]!, ok: res?.ok !== false, status: typeof res?.status === 'number' ? res.status : null, error: null };
   });
-  return { channels, deliver, notify: async (title, body) => { await deliver(title, body); } };
+  return { channels, deliver, notify: async (title, body, options) => { await deliver(title, body, options); } };
 }
 
 export interface Holding { mint: string; symbol: string | null; balance: number; valueUsd: number | null; marketCapUsd: number | null; fomoUrl: string }

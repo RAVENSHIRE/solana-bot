@@ -12,7 +12,8 @@ import type { Dataset, LaunchFacts } from './dataset';
  *   - a curve that completes while held sells at the graduation price (the pool after it is not observed);
  *   - fees: pump.fun's curve fee on each side plus a fixed network/priority cost per round trip.
  */
-export interface ExitRule { tpPct: number; slPct: number | null; maxHoldMin: number }
+/** `trailPct`: sell once the price falls this far below its peak since the fill (keeps most of a fast spike). */
+export interface ExitRule { tpPct: number; slPct: number | null; maxHoldMin: number; trailPct?: number | null }
 export interface DirectOptions { delayS: number; latencyMs: number; feePct: number; fixedUsd: number; sizeUsd: number; solUsd: number }
 export const DIRECT_DEFAULTS: Omit<DirectOptions, 'delayS'> = { latencyMs: 2_000, feePct: 1.25, fixedUsd: 0.03, sizeUsd: 2, solUsd: 118 };
 export interface DirectTrade { mint: string; symbol: string | null; createdObs: number; entryAt: number; entryMcap: number; exitAt: number; exitMcap: number; reason: string; netPct: number; peakPct: number }
@@ -41,11 +42,15 @@ export function simulate(l: LaunchFacts, rule: ExitRule, o: DirectOptions, dataE
   const entry = Math.max(before?.c ?? 0, ...inFlight.map(p => p.h));
   const tp = entry * (1 + rule.tpPct / 100), sl = rule.slPct === null ? null : entry * (1 - rule.slPct / 100);
   let exitAt = until, exit: number | null = null, reason = 'TIME', peak = entry;
+  const trail = rule.trailPct ? 1 - rule.trailPct / 100 : null;
   for (const p of path) {
     if (p.at <= fillBy) continue;
     if (p.at > until) break;
     if (sl !== null && p.l <= sl) { exit = p.trade ? p.l : Math.min(sl, p.c); exitAt = p.at; reason = 'STOP'; break; }
     if (p.h >= tp) { exit = tp; exitAt = p.at; reason = 'TAKE_PROFIT'; peak = Math.max(peak, p.h); break; }
+    // Trailing stop against the peak before this point (a candle's low may come before its high): a jump through the
+    // level sells at the trade that jumped, like a stop.
+    if (trail !== null && peak > entry && p.l <= peak * trail) { exit = p.trade ? p.l : Math.min(peak * trail, p.c); exitAt = p.at; reason = 'TRAIL'; break; }
     peak = Math.max(peak, p.h);
     if (l.completeObs !== null && p.at >= l.completeObs) { exit = p.c; exitAt = p.at; reason = 'GRADUATED'; break; }
   }

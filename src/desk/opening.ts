@@ -81,6 +81,20 @@ export function openingStep(s: OpeningState, at: number, usd: number): boolean {
   return false;
 }
 
+/**
+ * How fast a launch got to its breakout: from its first read (seconds after creation) to the signal. A launch that
+ * multiplies within its first two minutes is the fast kind the owner trades (GOOP HEAD, 3 Oct: $3.4K → $28.9K in 68 s,
+ * $105K in the same minute, then dead): the call says so, and the research layer tests such sprints with fast exits.
+ */
+export function openingSpeed(s: Pick<OpeningState, 'at' | 'samples' | 'signalAt' | 'signalUsd'>): { fromUsd: number; toUsd: number; secs: number; multiple: number; text: string } | null {
+  const first = s.samples[0];
+  if (!first || !s.signalAt || !s.signalUsd || first[1] <= 0) return null;
+  const secs = Math.max(1, Math.round((s.signalAt - s.at) / 1000)), multiple = s.signalUsd / first[1];
+  const k = (usd: number) => `$${(usd / 1000).toFixed(1)}K`;
+  return { fromUsd: first[1], toUsd: s.signalUsd, secs, multiple,
+    text: `${k(first[1])} → ${k(s.signalUsd)} in ${secs < 120 ? `${secs} s` : `${Math.round(secs / 60)} min`} (×${multiple.toFixed(1)})` };
+}
+
 type Rpc = { execute<T>(label: string, fn: (c: Connection) => Promise<T>): Promise<T> };
 type CurveStream = { healthy(now: number): boolean; curves(mints: string[]): Promise<Map<string, { sol: number; complete: boolean }> | null> };
 

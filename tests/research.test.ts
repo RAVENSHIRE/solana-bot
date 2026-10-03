@@ -246,6 +246,23 @@ test('direct entry look-back: conservative fill, take profit, a stop jumped over
   // No trade before the decision and none in flight: not bought. Data ending inside the hold: not judged.
   assert.equal(simulate(launch([tr(30, 30)]), { tpPct: 40, slPct: 20, maxHoldMin: 15 }, o, t0 + 3_600_000), null);
   assert.equal(simulate(launch([tr(1, 30)]), { tpPct: 40, slPct: 20, maxHoldMin: 15 }, o, t0 + 5 * 60_000), null);
+  // A sprint (GOOP HEAD, 3 Oct): fill 30, spike to 100, then the rug. The trailing exit keeps most of the spike: it sells
+  // at the first trade 20 % under the peak (75), not at the stop and not after the crash; the target alone never hits.
+  const spike = launch([tr(1, 30), tr(10, 60), tr(20, 100), tr(30, 75), tr(40, 4)]);
+  const trailed = simulate(spike, { tpPct: 400, slPct: 25, maxHoldMin: 3, trailPct: 20 }, o, t0 + 3_600_000)!;
+  assert.equal(trailed.reason, 'TRAIL'); assert.equal(trailed.exitMcap, 75); assert.ok(Math.abs(trailed.netPct - 150) < 1e-9);
+  assert.ok(Math.abs(trailed.peakPct - (100 / 30 - 1) * 100) < 1e-9);
+  const held = simulate(spike, { tpPct: 400, slPct: 25, maxHoldMin: 3 }, o, t0 + 3_600_000)!;
+  assert.equal(held.reason, 'STOP', 'without the trailing exit the same trade rides the spike back down');
+  // The sprint group and its fast exits are part of the pre-registered catalog.
+  const { GROUPS, FAST_EXITS, exitsFor, ruleId, describeExit } = await import('../src/research/rules');
+  const f = { velocity30: 0.7, velocity60: null, mayhem: false, buyers: 12, top1: 0.2, devSold: false } as never;
+  assert.ok(GROUPS.sprint.test(f) && GROUPS.sprintBroad.test(f));
+  assert.ok(!GROUPS.sprint.test({ velocity30: 0.1, velocity60: 0.2, mayhem: false } as never));
+  assert.equal(exitsFor('sprint'), FAST_EXITS, 'sprints are judged on the fast exits'); assert.notEqual(exitsFor('all'), FAST_EXITS);
+  const fast = FAST_EXITS.find(x => x.maxHoldMin === 1)!;
+  assert.equal(ruleId('sprint', 30, fast), 'sprint@30s/tp40/sl25/tr20/1m');
+  assert.match(describeExit(fast), /trailing −20% from the peak · 1 min max/);
 });
 
 // ------------------------------------------------------------------ qualified calls

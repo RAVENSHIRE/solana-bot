@@ -148,7 +148,7 @@ export class CallEngine {
     const title = `CALL ${l.symbol ?? l.mint.slice(0, 6)}: +${x.tpPct}% target`;
     const body = [
       `Buy now at ${mc(mcapSol)} market cap, ${rule.delayS} s after launch.`,
-      `Sell at ${mc(mcapSol * (1 + x.tpPct / 100))} (+${x.tpPct}%)${x.slPct !== null ? `, stop ${mc(mcapSol * (1 - x.slPct / 100))} (−${x.slPct}%)` : ''}, after ${x.maxHoldMin} min at the latest.`,
+      `Sell at ${mc(mcapSol * (1 + x.tpPct / 100))} (+${x.tpPct}%)${x.slPct !== null ? `, stop ${mc(mcapSol * (1 - x.slPct / 100))} (−${x.slPct}%)` : ''}${x.trailPct ? `, or once it falls ${x.trailPct}% from its peak` : ''}, after ${x.maxHoldMin} min at the latest.`,
       `Rule: ${rule.groupLabel} · ${describeExit(x)}. On ${v.n} launches it was not tuned on: ${v.meanPct >= 0 ? '+' : ''}${v.meanPct.toFixed(1)}% average after costs, target hit ${v.tpPct.toFixed(0)}%.`,
       this.d.link ? this.d.link(l.mint) : `https://pump.fun/coin/${l.mint}`,
     ].join('\n');

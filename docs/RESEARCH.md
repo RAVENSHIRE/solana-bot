@@ -123,6 +123,11 @@ or 120 s) and an exit (+40 % or +100 % target, −20 %/−35 %/no stop, 15 or 60
 observer knows by the decision time: trades and curve state, the creation message (dev buy) and the metadata —
 every normal launch; own X account; X + website; dev buy ≥ 1 SOL; ≥ 5 buyers; ≥ 15 buyers with no wallet over 30 %;
 organic demand (curve rising, ≥ 3 effective buyers, top buyer < 50 %, dev not sold); organic + own X.
+**Sprints** (owner, 3 Oct: GOOP HEAD went $3.4K → $28.9K in 68 s and $105K in the same minute, then died): launches whose
+curve fills at ≥ 30 % of its length per minute in the first minutes, alone or with ≥ 10 buyers and no wallet over 30 %.
+They are judged on fast exits only: a +40/100/200 % target, a −25 % stop, a trailing exit 20 % under the peak since the
+fill ("keep the max") and 1 or 3 minutes at most ("end early"). A trailing or timed exit that is profitable on average
+needs no target hits to pass.
 
 **Gate** (`npm run research:qualify`, `src/research/qualify.ts`, rerun by the observer every 6 h on the last 48 h):
 each group's exit is chosen on the earlier 60 % of launches; unchanged, on the later 40 % it must have

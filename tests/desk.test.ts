@@ -1017,18 +1017,20 @@ test('OPEN: a breakout above a strong opening candle is alerted at once, bought,
     let pending = [signal];
     const tracker = { observe: () => undefined, poll: async () => { const out = pending; pending = []; return out; }, get: () => null, list: () => [signal],
       counts: () => ({ OPENING: 3, STRONG: 1, SIGNAL: 1, WEAK: 9, RUG: 2, GRADUATED: 0, EXPIRED: 0, UNKNOWN_OPEN: 0 }) };
-    const alerts: Array<{ title: string; body: string }> = [];
+    const alerts: Array<{ title: string; body: string; click: string | null | undefined }> = [];
     // No 60 s settling period in this test (positions are seconds old).
     const profiles = strategyProfiles({}, shared.capital, shared.cfg.rs);
     profiles.OPEN = { ...profiles.OPEN, exits: { ...profiles.OPEN.exits, graceMs: 0 } };
     const engine = await DeskEngine.create({ ...shared, strategies: profiles, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }), opening: tracker as never,
-      notify: async (title, body) => { alerts.push({ title, body }); }, alerts: new Set(['open']) });
+      notify: async (title, body, o) => { alerts.push({ title, body, click: o?.click }); }, alerts: new Set(['open']) });
     engine.setStrategy('CRASH', false); engine.setStrategy('LAUNCH', false); engine.start();
     await engine.pulse();
     const fresh = await engine.openingPass();
     assert.equal(fresh.length, 1);
-    assert.deepEqual(alerts.map(a => a.title), ['OPEN: ABC broke out at $27.0K'], 'alerted at once, before any scan');
+    assert.deepEqual(alerts.map(a => a.title), ['OPEN ABC: $27.0K, 6 min after launch'], 'alerted at once, before any scan');
     assert.match(alerts[0]!.body, /\$20\.0K open → low \$7\.0K \(held \$6\.7K\) → \$27\.0K/);
+    assert.match(alerts[0]!.body, /Not a qualified call/);
+    assert.equal(alerts[0]!.click, `https://fomo.family/tokens/solana/${MINT}`, 'tapping the notification opens the coin in FOMO');
     await engine.pulse();
     let view = engine.status({ connected: false, address: null });
     assert.equal(view.positions.length, 1, view.candidates.find(c => c.mint === MINT)?.open?.signal.summary); assert.equal(view.positions[0]!.strategy, 'OPEN');

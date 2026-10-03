@@ -100,6 +100,24 @@ test('phone notifications are opt-in: ntfy topic and Telegram bot, never blockin
   assert.equal(calls[0]!.url, 'https://ntfy.sh/raven-desk-8f3k2'); assert.equal((calls[0]!.init.headers as Record<string, string>).Title, 'SINU: MCAP FLOOR');
   assert.equal(calls[1]!.url, 'https://api.telegram.org/bot123:abc_DEF/sendMessage'); assert.deepEqual(JSON.parse(String(calls[1]!.init.body)), { chat_id: '-42', text: 'SINU: MCAP FLOOR\nbelow $30M' });
   assert.deepEqual(notifier({ DESK_NTFY_TOPIC: 'a b', DESK_TELEGRAM_BOT_TOKEN: 'x' }).channels, []);
+  // A tap opens the coin in FOMO (ntfy Click); only https links and simple tags are passed on.
+  calls.length = 0;
+  await n.notify('OPEN ABC: $27.0K, 68 s after launch', 'body', { click: 'https://fomo.family/tokens/solana/ABC', tags: ['open', 'bad tag!'] });
+  const h = calls[0]!.init.headers as Record<string, string>;
+  assert.equal(h.Click, 'https://fomo.family/tokens/solana/ABC'); assert.equal(h.Tags, 'open');
+  calls.length = 0;
+  await n.notify('T', 'B', { click: 'javascript:alert(1)' });
+  assert.equal((calls[0]!.init.headers as Record<string, string>).Click, undefined);
+});
+
+test('phone alerts: the dashboard choice is saved and wins over DESK_ALERTS; unknown kinds are dropped', async () => {
+  const { savedPhoneAlerts } = await import('../src/desk/runtime');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'phone-')), file = path.join(dir, 'phone-alerts.json');
+  assert.equal(await savedPhoneAlerts(file), null, 'no choice yet: DESK_ALERTS applies');
+  await fs.writeFile(file, JSON.stringify({ kinds: ['open', 'golden', 'nope'] }));
+  assert.deepEqual([...(await savedPhoneAlerts(file))!], ['open', 'golden']);
+  await fs.writeFile(file, JSON.stringify({ kinds: [] }));
+  assert.deepEqual([...(await savedPhoneAlerts(file))!], [], 'an empty choice means nothing reaches the phone');
 });
 
 test('wallet holdings (e.g. the FOMO wallet): every token with a balance across both token programs, largest value first, with a FOMO link', async () => {

@@ -84,6 +84,14 @@ export interface DeskHandle {
   walletHistory?: (wallet: string) => Promise<WalletHistory>;
   /** What a wallet holds now (e.g. the FOMO wallet), to put tokens under Watch. */
   holdings?: (wallet: string) => Promise<Holding[]>;
+  /** Which alert kinds reach the phone; the dashboard switch is saved in data-desk/phone-alerts.json and wins over DESK_ALERTS. */
+  phoneAlerts?: { kinds: () => AlertKind[]; set: (kinds: AlertKind[]) => Promise<void> };
+}
+
+/** The dashboard's phone-alert choice, if the owner made one (data-desk/phone-alerts.json); null: use DESK_ALERTS. */
+export async function savedPhoneAlerts(file: string): Promise<Set<AlertKind> | null> {
+  const saved = await fs.readFile(file, 'utf8').then(t => JSON.parse(t) as { kinds?: unknown }).catch(() => null);
+  return Array.isArray(saved?.kinds) ? new Set(saved.kinds.filter((k): k is AlertKind => ALERT_KINDS.includes(k as AlertKind))) : null;
 }
 export interface DeskContext { wallet: (mode: DeskMode) => DeskWallet | null; authorized: () => boolean }
 
@@ -143,8 +151,10 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
         recordTape: env.DESK_RESEARCH?.trim().toLowerCase() === 'full' })
         .catch((error: unknown) => { logger.warn('Research recorder unavailable; the desk runs without it', { error: error instanceof Error ? error.message : String(error) }); return null; });
     const recorder = research, researchDeps = { research: recorder, deliver: alerts.deliver, alertChannels: alerts.channels };
-    // Which alerts reach the phone: none by default; DESK_ALERTS=rug, golden, open, launch, radar — or "all".
-    const phoneAlerts = alertKinds(env.DESK_ALERTS);
+    // Which alerts reach the phone: none by default; DESK_ALERTS=rug, golden, open, launch, radar — or "all". The dashboard
+    // switch (data-desk/phone-alerts.json) wins; both engines share this one set, so a change applies at once.
+    const phoneFile = path.join(o.dataDir, 'phone-alerts.json');
+    const phoneAlerts = await savedPhoneAlerts(phoneFile) ?? new Set(alertKinds(env.DESK_ALERTS));
     const sender = new TransactionSender(rpc, logger, { confirmTimeoutMs: cfg.execution.confirmTimeoutMs, pollIntervalMs: 1500, rebroadcastIntervalMs: 2000 });
     const engines = {
       // TEST needs only an address to build and simulate; without Phantom it uses the public key from .env, never a secret.
@@ -175,6 +185,11 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
       return walletHistory({ wallet, solUsd: sol, rpc, dex: shared.dex });
     };
     return { engines, capital, operational, liveSigner: live.signer, watch, assistant, walletHistory: history,
+      phoneAlerts: { kinds: () => ALERT_KINDS.filter(k => phoneAlerts.has(k)), set: async kinds => {
+        phoneAlerts.clear();
+        for (const k of kinds) if (ALERT_KINDS.includes(k)) phoneAlerts.add(k);
+        await fs.writeFile(phoneFile, `${JSON.stringify({ kinds: ALERT_KINDS.filter(k => phoneAlerts.has(k)), at: new Date().toISOString() })}\n`);
+      } },
       holdings: wallet => walletHoldings({ wallet, rpc, dex: shared.dex }), close: async () => {
       await watch.settled();
       for (const e of Object.values(engines)) { e.stop('shutdown'); await e.settled(); await e.persist(); }

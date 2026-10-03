@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { PublicKey } from '@solana/web3.js';
 import { SigningBroker } from '../../src/phantom/signing-broker';
-import type { DeskWallet } from '../../src/desk/engine';
+import { ALERT_KINDS, type AlertKind, type DeskWallet } from '../../src/desk/engine';
 import { DeskReject } from '../../src/desk/guard';
 import { parseRuleSpec } from '../../src/desk/custom';
 import { assistantErrorCode, parseChat } from '../../src/desk/assistant';
@@ -17,7 +17,7 @@ export type DeskFactory = (context: DeskContext) => Promise<DeskHandle>;
 export const deskFactory = (repo: string): DeskFactory => context => createDesk({ envDir: repo, dataDir: path.join(repo, 'data-desk') }, context);
 
 const DESK_ACTIONS = new Set(['select-mode', 'strategy-save', 'strategy-delete', 'watch-add', 'watch-remove', 'watch-rearm', 'start-test', 'stop-test', 'start-live', 'pause', 'resume', 'stop-live', 'probe', 'drill-on', 'drill-off',
-  'strategy', 'reset-test', 'exit']);
+  'strategy', 'reset-test', 'exit', 'phone-alerts']);
 
 /**
  * The reject code of a DeskReject or SigningError. Matched by name, not instanceof: the dashboard is an ES module
@@ -211,6 +211,12 @@ export class TradingService {
           throw new DeskReject(/^[A-Z_]+$/.test(code ?? '') ? code! : 'INVALID_WATCH', rest.join(': '));
         }
         return;
+      }
+      case 'phone-alerts': {
+        // Which alert kinds reach the phone (saved in data-desk/phone-alerts.json); it only changes notifications.
+        const kinds = body.kinds;
+        if (!handle.phoneAlerts || !Array.isArray(kinds) || !kinds.every(k => typeof k === 'string' && (ALERT_KINDS as readonly string[]).includes(k))) throw new DeskReject('INVALID_ALERT_KINDS');
+        await handle.phoneAlerts.set(kinds as AlertKind[]); return;
       }
       case 'exit':
         // EXIT NOW only reduces risk: it sells an open position through the normal guarded SELL path.
