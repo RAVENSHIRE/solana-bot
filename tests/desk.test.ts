@@ -1007,7 +1007,7 @@ test('LAUNCH rug defence: insiders selling is a RUG exit (remembered); insiders 
   }
 });
 
-test('OPEN: a breakout above a strong opening candle is alerted at once, bought, scaled into at 2× and 4×, held to 6×, then trailed', async () => {
+test('OPEN: a breakout above a strong opening candle is bought, scaled into at 2× and 4×, held to 6×, then trailed', async () => {
   const curve = { dexId: 'pumpfun', liquidity: null, marketCap: 28_000, fdv: 28_000, pairCreatedAt: NOW - 6 * 60_000, priceChange: { m5: 12, h1: 40 } };
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-open-')), { w, shared } = world(curve);
   try {
@@ -1027,10 +1027,8 @@ test('OPEN: a breakout above a strong opening candle is alerted at once, bought,
     await engine.pulse();
     const fresh = await engine.openingPass();
     assert.equal(fresh.length, 1);
-    assert.deepEqual(alerts.map(a => a.title), ['OPEN ABC: $27.0K, 6 min after launch'], 'alerted at once, before any scan');
-    assert.match(alerts[0]!.body, /\$20\.0K open → low \$7\.0K \(held \$6\.7K\) → \$27\.0K/);
-    assert.match(alerts[0]!.body, /Not a qualified call/);
-    assert.equal(alerts[0]!.click, `https://fomo.family/tokens/solana/${MINT}`, 'tapping the notification opens the coin in FOMO');
+    assert.deepEqual(alerts, [], 'a breakout 6 min after launch is shown and traded, but the phone gets sprints only');
+    assert.ok(engine.events.list().some(e => /^OPEN screen: ABC "Fantasy Index 6900"/.test(e.message)));
     await engine.pulse();
     let view = engine.status({ connected: false, address: null });
     assert.equal(view.positions.length, 1, view.candidates.find(c => c.mint === MINT)?.open?.signal.summary); assert.equal(view.positions[0]!.strategy, 'OPEN');
@@ -1071,6 +1069,31 @@ test('OPEN screen: a copycat breakout (bigger, older namesake) is never alerted 
     assert.deepEqual(await engine.openingPass(), []);
     assert.deepEqual(alerts, []);
     assert.ok(engine.events.list().some(e => /^OPEN screen: ABC broke out \(x\) but COPYCAT of ABC .+ \(\$520,000, \d+ min older\) — no alert, never bought$/.test(e.message)));
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('OPEN on the phone: only sprints (a breakout within 2 min of launch), at most 4 an hour, tap opens FOMO', async () => {
+  const curve = { dexId: 'pumpfun', liquidity: null, marketCap: 28_000, fdv: 28_000, pairCreatedAt: NOW - 6 * 60_000, priceChange: { m5: 12, h1: 40 } };
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-open-phone-')), { shared } = world(curve);
+  try {
+    const at = Date.now();
+    const sprint = (i: number, secs: number) => ({ mint: key(60 + i).toBase58(), symbol: `S${i}`, name: `Sprint ${i}`, at: at - secs * 1000, status: 'SIGNAL' as const, openHighUsd: 10_000,
+      lowUsd: 7_000, lastUsd: 28_900, peakUsd: 28_900, firstSampleAt: at - secs * 1000 + 3_000, lastSampleAt: at, signalAt: at, signalUsd: 28_900,
+      detail: '$10.0K open → $28.9K: broke above the opening high', samples: [[at - secs * 1000 + 3_000, 3_400]] as Array<[number, number]> });
+    let pending = [sprint(0, 68), sprint(1, 300), ...[2, 3, 4, 5, 6].map(i => sprint(i, 60 + i))];
+    const tracker = { observe: () => undefined, poll: async () => { const out = pending; pending = []; return out; }, get: () => null, list: () => [],
+      counts: () => ({ OPENING: 0, STRONG: 0, SIGNAL: 7, WEAK: 0, RUG: 0, GRADUATED: 0, EXPIRED: 0, UNKNOWN_OPEN: 0 }) };
+    const alerts: Array<{ title: string; body: string; click: string | null | undefined }> = [];
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }), opening: tracker as never,
+      notify: async (title, body, o) => { alerts.push({ title, body, click: o?.click }); }, alerts: new Set(['open']) });
+    for (const id of ['FAIR', 'CRASH', 'LAUNCH', 'OPEN', 'GOLDEN']) engine.setStrategy(id, false);
+    await engine.openingPass();
+    assert.deepEqual(alerts.map(a => a.title), ['OPEN S0: $28.9K, 68 s after launch', 'OPEN S2: $28.9K, 62 s after launch', 'OPEN S3: $28.9K, 63 s after launch',
+      'OPEN S4: $28.9K, 64 s after launch'], 'the 5-minute breakout is held back; the fifth and later sprints this hour too');
+    assert.match(alerts[0]!.body, /\$3\.4K → \$28\.9K in 68 s \(×8\.5\)/);
+    assert.match(alerts[0]!.body, /Not a qualified call/);
+    assert.equal(alerts[0]!.click, `https://fomo.family/tokens/solana/${key(60).toBase58()}`, 'tapping the notification opens the coin in FOMO');
+    assert.equal(engine.events.list().filter(e => /^OPEN screen: S\d/.test(e.message)).length, 7, 'every breakout is still shown');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 

@@ -34,7 +34,8 @@ export interface CandidateLike {
   firstSeenAt?: number; updatedAt?: number; deepAnalyzedAt?: number | null; observations?: number;
 }
 
-export type DeliveryDecision = 'SENT' | 'SUPPRESSED_BY_CONFIG' | 'NO_CHANNEL';
+/** SUPPRESSED_BY_LIMIT: the kind is switched on, but this alert is outside its phone limit (OPEN: a sprint, a few an hour). */
+export type DeliveryDecision = 'SENT' | 'SUPPRESSED_BY_CONFIG' | 'SUPPRESSED_BY_LIMIT' | 'NO_CHANNEL';
 export interface AlertInput {
   key: string; kind: string; title: string; body: string;
   /** When the alert was generated (the decision time). */

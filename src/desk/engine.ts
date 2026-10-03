@@ -151,6 +151,8 @@ export class DeskEngine {
   private pumpUsd: { value: number; at: number } | null = null;
   private copycatSearches = new Map<string, { at: number; pairs: DexPair[] }>();
   private launchAlerts = new Set<string>();
+  /** When the last hour's OPEN alerts went to the phone (the hourly cap). */
+  private readonly openPhoneSent: number[] = [];
   private launchPoll: Promise<void> | null = null;
   /** Every priced token seen, by lower-case ticker and name: the original a copycat imitates is usually among them. */
   private names = new Map<string, Map<string, { mint: string; symbol: string | null; marketCapUsd: number; createdAt: number | null; volume1hUsd?: number | null; at: number }>>();
@@ -1055,7 +1057,8 @@ export class DeskEngine {
       const secs = Math.max(0, Math.round(((state.signalAt ?? now) - state.at) / 1000));
       this.alertOnce(`open:${state.mint}`, `OPEN ${state.symbol}: $${((state.signalUsd ?? 0) / 1000).toFixed(1)}K, ${secs < 120 ? `${secs} s` : `${Math.round(secs / 60)} min`} after launch`,
         [`${state.name}${speed ? ` · ${speed.text}` : ''}`, state.detail, launch?.insiders?.detail ?? '',
-          'Not a qualified call. Fast openers often rug within minutes: take profit early.', fomoUrl(state.mint)].filter(Boolean).join('\n'), 'open');
+          'Not a qualified call. Fast openers often rug within minutes: take profit early.', fomoUrl(state.mint)].filter(Boolean).join('\n'), 'open',
+        secs * 1000 <= OPENING.phoneWithinMs && this.openPhoneSlot(now));
     }
     // A breakout is traded fresh: start a scan now instead of waiting for the next one.
     if (fresh.length && this.strategies.OPEN.enabled && !this.work) this.nextScanAt = Date.now();
@@ -1192,14 +1195,24 @@ export class DeskEngine {
   }
 
   /** One phone alert per key, for the kinds DESK_ALERTS selects (default: none). */
-  private alertOnce(key: string, title: string, body: string, kind: AlertKind): void {
+  /** An OPEN alert may go to the phone: OPEN alerts are switched on and fewer than `OPENING.phonePerHour` went out in the last hour. */
+  private openPhoneSlot(now: number): boolean {
+    if (!(this.d.alerts ?? DEFAULT_ALERTS).has('open')) return false;
+    while (this.openPhoneSent.length && now - this.openPhoneSent[0]! > 3_600_000) this.openPhoneSent.shift();
+    if (this.openPhoneSent.length >= OPENING.phonePerHour) return false;
+    this.openPhoneSent.push(now);
+    return true;
+  }
+
+  /** `phone` false: recorded (and on the dashboard) like any alert, but not sent. */
+  private alertOnce(key: string, title: string, body: string, kind: AlertKind, phone = true): void {
     if (this.launchAlerts.has(key) || !this.d.notify) return;
     this.launchAlerts.add(key);
     if (this.launchAlerts.size > 5_000) this.launchAlerts.delete(this.launchAlerts.values().next().value!);
     const selected = this.d.alerts ?? DEFAULT_ALERTS;
     // Every first alert per key is recorded with what the desk knew at this moment, whether or not it reaches the phone.
-    const record = this.recordAlert(key, title, body, kind, selected);
-    if (!selected.has(kind)) return;
+    const record = this.recordAlert(key, title, body, kind, selected, phone);
+    if (!selected.has(kind) || !phone) return;
     // Tapping the notification opens the coin in FOMO.
     const mint = key.slice(key.indexOf(':') + 1), options: NotifyOptions = { click: /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint) ? fomoUrl(mint) : null, tags: [kind] };
     const text = record?.body ?? body, evidence = record?.evidence, research = this.d.research;
@@ -1208,14 +1221,14 @@ export class DeskEngine {
   }
 
   /** The research record of an alert (evidence snapshot + the message to send); null without a recorder or on any error. */
-  private recordAlert(key: string, title: string, body: string, kind: AlertKind, selected: ReadonlySet<AlertKind>): ReturnType<DeskResearchHooks['alert']> | null {
+  private recordAlert(key: string, title: string, body: string, kind: AlertKind, selected: ReadonlySet<AlertKind>, phone = true): ReturnType<DeskResearchHooks['alert']> | null {
     if (!this.d.research) return null;
     try {
       const mint = key.slice(key.indexOf(':') + 1), token = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint) ? mint : null;
       const candidate = token ? this.candidates.get(token) ?? null : null, channels = [...(this.d.alertChannels ?? [])];
       return this.d.research.alert({ key, kind, title, body, at: Date.now(), mode: this.d.mode, token, symbol: candidate?.symbol ?? null, candidate,
         heldBy: token ? this.heldBy(token) : null, solUsd: this.solUsd,
-        delivery: { decision: !selected.has(kind) ? 'SUPPRESSED_BY_CONFIG' : channels.length ? 'SENT' : 'NO_CHANNEL', channels, selectedKinds: [...selected] } });
+        delivery: { decision: !selected.has(kind) ? 'SUPPRESSED_BY_CONFIG' : !phone ? 'SUPPRESSED_BY_LIMIT' : channels.length ? 'SENT' : 'NO_CHANNEL', channels, selectedKinds: [...selected] } });
     } catch { return null; }
   }
 
