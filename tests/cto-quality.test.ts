@@ -30,3 +30,19 @@ test('CTO-02: an unreadable phone-alerts.json sends nothing to the phone instead
   assert.ok(kinds, 'a choice was made but cannot be read: it is not treated as "no choice"');
   assert.deepEqual([...kinds], []);
 });
+
+test('CTO-03: the notifier keeps a delivery health record (HTTP refusals and network errors count as failures)', async () => {
+  let reply: () => Promise<Response> = async () => new Response('', { status: 200 });
+  const failures: string[] = [];
+  const n = notifier({ DESK_NTFY_TOPIC: 'raven-desk-8f3k2' }, (async () => reply()) as unknown as typeof fetch, { onFailure: r => failures.push(`${r.channel} ${r.status ?? r.error}`) });
+  await n.notify('A', 'ok');
+  reply = async () => new Response('', { status: 429 });
+  await n.notify('B', 'rate limited');
+  reply = async () => { throw new TypeError('fetch failed'); };
+  await n.notify('C', 'offline');
+  const h = n.health();
+  assert.equal(h.sent, 3); assert.equal(h.delivered, 1); assert.equal(h.failed, 2);
+  assert.ok(h.lastOkAt !== null && h.lastFailureAt !== null && h.lastFailureAt >= h.lastOkAt);
+  assert.equal(h.lastError, 'ntfy TypeError');
+  assert.deepEqual(failures, ['ntfy 429', 'ntfy TypeError']);
+});

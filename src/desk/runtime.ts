@@ -146,7 +146,7 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
     const opening = new OpeningTracker(rpc, pumpStream);
     // GOLDEN POCKET: every fresh graduation's PumpSwap pool, its reserves read on chain every few seconds.
     const golden = new GoldenTracker(rpc, GOLDEN_RULES);
-    const alerts = notifier(env), launches = new LaunchFeed(rpc, fetch, undefined, undefined,
+    const alerts = notifier(env, fetch, { onFailure: r => logger.warn('Phone delivery failed', { channel: r.channel, status: r.status, error: r.error }) }), launches = new LaunchFeed(rpc, fetch, undefined, undefined,
       { rugs, review: reviewer ? (i, now) => reviewer.review(i, now) : null, reviewAvailable: reviewer ? now => reviewer.available(now) : undefined,
         onDecoded: (events, now) => opening.observe(events, now), stream: pumpStream });
     // Research record (src/research): every alert as an immutable evidence snapshot, and the signal tape, as events in

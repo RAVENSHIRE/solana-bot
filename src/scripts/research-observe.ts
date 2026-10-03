@@ -55,7 +55,14 @@ async function main(): Promise<void> {
   await refreshSol();
   setInterval(() => void refreshSol(), 5 * 60_000).unref();
 
-  const phone = process.argv.includes('--no-phone') ? null : notifier(env);
+  const stamp = () => new Date().toISOString().slice(0, 19);
+  // Every failed phone delivery is logged at once and counted in the status line: a silent phone is visible in observer.log.
+  const phone = process.argv.includes('--no-phone') ? null : notifier(env, fetch, { onFailure: r => console.log(`${stamp()} phone delivery failed: ${r.channel} ${r.status !== null ? `HTTP ${r.status}` : r.error}`) });
+  const phoneStatus = () => {
+    if (!phone?.channels.length) return '';
+    const h = phone.health();
+    return ` · phone ${h.delivered}/${h.sent} delivered${h.failed ? `, ${h.failed} failed (last ${h.lastError} at ${new Date(h.lastFailureAt!).toISOString().slice(11, 19)})` : ''}`;
+  };
   const calls = process.argv.includes('--no-calls') ? null : new CallEngine({ ledger, notify: phone?.channels.length ? phone.notify : null, solUsd: () => solUsd, link: fomoUrl,
     log: line => console.log(`${new Date().toISOString().slice(0, 19)} ${line}`) });
   const file = path.join(dir, 'qualified.json');
@@ -100,7 +107,7 @@ async function main(): Promise<void> {
   const stop = async () => { observer?.stop(); verified?.stop(); feed.close(); await ledger.close(); process.exit(0); };
   process.on('SIGINT', () => void stop());
   process.on('SIGTERM', () => void stop());
-  setInterval(() => console.log(`${observer!.status()}${verified ? ` · ${verified.status()}` : ''}`), 60_000).unref();
+  setInterval(() => console.log(`${observer!.status()}${verified ? ` · ${verified.status()}` : ''}${phoneStatus()}`), 60_000).unref();
 }
 
 main().catch(error => { console.error(`research:observe failed: ${(error as Error).message}`); process.exit(1); });
