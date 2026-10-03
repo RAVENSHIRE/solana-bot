@@ -195,6 +195,8 @@ How it works:
 - A fill is alerted at once ("GOLDEN POCKET: ABC at $112.0K") and starts a scan; GOLDEN buys while the fill is under 3 minutes old, the pool is above the pattern stop and not more than 8 % above the zone's top, no rug sign is known, the largest wallet holds at most 20 % when known, and the safety gates pass. A retest that is not bought is listed in the panel and the event log, never alerted.
 - The pattern's stop (and a retest's take profit) are stored on the position as market caps and checked against the pool's reserves every 3 s: `POCKET_STOP` / `RESISTANCE_TARGET`. A 40 % stop loss stays as a backstop.
 - Sizing: base entry ($2), TEST sleeve `GOLDEN_CAPITAL_USD` (default $15), at most 2 positions, no re-entry for 4 h. ON in TEST, OFF in LIVE until you switch it on.
+- The pools are read only while they are used: GOLDEN switched on in the running mode, golden alerts going to the
+  phone, or a GOLDEN position still open. Otherwise the sources line says *paused* and no RPC is spent on them.
 - The *Golden pocket* panel shows every watched pool: minutes since graduation, high → dip → breakout, now, peak, pattern state, fill and stop, and GOLDEN's verdict.
 
 ### LAUNCH: the launch radar (the @glabuz pattern)

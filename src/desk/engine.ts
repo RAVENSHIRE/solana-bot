@@ -497,7 +497,7 @@ export class DeskEngine {
       this.lastOpeningAt = Date.now();
       this.openingWork = this.openingPass().then(() => undefined).catch(error => this.note('opening', 'FAILED', `Opening screen: ${errorMessage(error)}`)).finally(() => { this.openingWork = null; });
     }
-    if (this.d.golden && !this.goldenWork && Date.now() - this.lastGoldenAt >= GOLDEN.pollMs) {
+    if (this.d.golden && !this.goldenWork && Date.now() - this.lastGoldenAt >= GOLDEN.pollMs && this.goldenWanted()) {
       this.lastGoldenAt = Date.now();
       this.goldenWork = this.goldenPass().then(() => undefined).catch(error => this.note('golden', 'FAILED', `Golden pocket: ${errorMessage(error)}`)).finally(() => { this.goldenWork = null; });
     }
@@ -582,7 +582,8 @@ export class DeskEngine {
     }
     if (d.launches) this.sources['Launch radar (pump.fun, on-chain)'] = `${this.launchList.size} shortlisted · ${d.pumpStream?.healthy(Date.now()) ? 'launches from the research live stream' : 'launches polled from the RPC'} · X pages read without a key · ${d.aiReview ? d.aiReview() : 'Claude review off'}`;
     if (d.opening) { const o = d.opening.counts(); this.sources['Opening screen (curves, every 4 s)'] = `${o.OPENING} in their first minute · ${o.STRONG} strong opens watched · ${o.SIGNAL} breakouts · ${o.RUG} fell below the floor${d.opening.source ? ` · curves ${d.opening.source === 'stream' ? 'from the research live stream' : 'read from the RPC'}` : ''}`; }
-    if (d.golden) { const g = d.golden.counts(); this.sources['Golden pocket (graduated pools, every 4 s)'] = `${g.watched} pools watched · ${g.DIP} dipped · ${g.BROKEN_OUT} broke out, waiting for the retest · ${g.ENTRY} filled`; }
+    if (d.golden) { const g = d.golden.counts(); this.sources['Golden pocket (graduated pools, every 4 s)'] = !this.goldenWanted() ? 'paused: GOLDEN is off and golden alerts do not go to the phone'
+      : `${g.watched} pools watched · ${g.DIP} dipped · ${g.BROKEN_OUT} broke out, waiting for the retest · ${g.ENTRY} filled`; }
     if (d.xfeed) { const x = d.xfeed.status(); this.sources['X feed (X API search)'] = x.configured ? (x.lastError ?? `${x.signals} token posts from ${x.posts} posts`) : 'off — set X_BEARER_TOKEN in .env'; }
     const staged = await this.stage(found.tokens);
     // CRASH is time-critical: safety evidence for pumping young pools first, entries right after, and only then
@@ -1067,6 +1068,14 @@ export class DeskEngine {
    * and a fill of a pattern GOLDEN buys is alerted at once and queued for the GOLDEN strategy (a scan is started right
    * away). Rugs, impersonators and copycats are never alerted.
    */
+  /**
+   * The golden pocket reads every fresh graduation's pool every 4 s: only while GOLDEN is on in this mode, golden alerts
+   * reach the phone, or GOLDEN still holds a position.
+   */
+  goldenWanted(): boolean {
+    return this.strategies.GOLDEN.enabled || (this.d.alerts ?? DEFAULT_ALERTS).has('golden') || (this.ledgerOf('GOLDEN')?.state.positions.length ?? 0) > 0;
+  }
+
   async goldenPass(now = Date.now()): Promise<GoldenSignal[]> {
     const d = this.d, tracker = d.golden;
     if (!tracker) return [];

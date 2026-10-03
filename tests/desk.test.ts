@@ -1089,9 +1089,9 @@ test('GOLDEN POCKET: an only-up fill on a fresh pool is alerted, bought in TEST 
     const held: string[][] = [];
     const tracker = { watchGraduations: () => undefined, hold: (m: string[]) => { held.push(m); }, poll: async () => { const out = pending; pending = []; return out; },
       get: (m: string) => m === MINT ? { ...watch, lastSampleAt: Date.now() } : null, list: () => [watch], counts: () => ({ IMPULSE: 4, DIP: 2, BROKEN_OUT: 1, ENTRY: 1, FAILED: 9, EXPIRED: 0, watched: 17 }) };
-    const alerts: string[] = [];
+    const alerts: string[] = [], phone = new Set<'golden'>(['golden']);
     const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }), golden: tracker as never,
-      notify: async title => { alerts.push(title); }, alerts: new Set(['golden']) });
+      notify: async title => { alerts.push(title); }, alerts: phone });
     for (const id of ['FAIR', 'CRASH', 'LAUNCH', 'OPEN']) engine.setStrategy(id, false);
     engine.setStrategy('GOLDEN', true);
     engine.start(); await engine.pulse();
@@ -1113,6 +1113,13 @@ test('GOLDEN POCKET: an only-up fill on a fresh pool is alerted, bought in TEST 
     view = engine.status({ connected: false, address: null });
     assert.equal(view.positions.length, 0);
     assert.ok(engine.events.list().some(e => /^GOLDEN · exit signal: POCKET_STOP \$104,000 ≤ \$104,500/.test(e.message)));
+    // The pools are read only while someone uses them: GOLDEN on, golden phone alerts, or a GOLDEN position.
+    engine.setStrategy('GOLDEN', false);
+    assert.equal(engine.goldenWanted(), true, 'golden alerts still go to the phone');
+    phone.delete('golden');
+    assert.equal(engine.goldenWanted(), false);
+    await engine.pulse();
+    assert.match(engine.status({ connected: false, address: null }).sources['Golden pocket (graduated pools, every 4 s)']!, /^paused/);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 

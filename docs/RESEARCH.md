@@ -152,3 +152,40 @@ id, qualified 0/1, net %, exit reason, entry and exit market cap SOL, peak % · 
 `INFO` obs, m, X handle, {badge, followers, ownCa, market cap SOL} · `VT` obs, m, symbol, checks (J Jupiter, M Moonshot,
 W watchlist), market cap $, liquidity $, holders, organic score, price $, change % 5m/1h/6h/24h, net buyers 1h, bought $
 1h, sold $ 1h, traders 1h · `VINFO` obs, m, symbol, why, checks, market cap $, price $.
+
+## The market-cap ladder: every chain, levels, old highs, holders
+
+The launch recorder above sees pump.fun in its first minutes. The ladder (`src/research/ladder.ts`, inside the
+observer, `--no-ladder` to turn it off) records the rest of a coin's life, on every chain, so the owner's way of
+trading can be tested instead of believed: the decade levels ($10K → $100K → $1M → $10M → $100M), a coin far under its
+all-time high (WWW on 3 Oct: $1.15M after $8.2M the day before), and old runners coming back.
+
+- **Universe, every 10 minutes:** Jupiter's top trending / organic / traded lists (Solana: holders, organic volume,
+  holder change), GeckoTerminal's trending pools across every chain (Ethereum, Base, BNB, Robinhood Chain, …), and the
+  watchlist. From $10K market cap and $10K liquidity; no stablecoins, majors, staked SOL, tokenised stocks, or coins
+  with a live mint or freeze authority.
+- **Tracked after it leaves the lists**, for 7 days (the watchlist always), so a coin's fall is recorded as well as its
+  rise. A study of only the coins still trending would see only survivors.
+- **History** once a day per coin: the all-time high, the 30-day low and last week's close, from Birdeye candles
+  (Solana, `BIRDEYE_API_KEY`) or GeckoTerminal (other chains), hourly for coins under 10 days old.
+- **Holders** once a day per Solana coin from $1M (and every watchlist coin), over the Helius endpoint in
+  `RPC_ENDPOINTS`: the 20 largest holders, the wallet behind each, where each wallet got its first SOL, **clusters**
+  (wallets funded by one source or by each other: likely one actor), the **team** (the developer, wallets it funded,
+  wallets sharing its funder) and wallets under 7 days old. A funder with 1,000+ transactions is an exchange or a
+  service and never links wallets. About 45 RPC calls per scan, at most 2 scans per 10 minutes.
+  `npm run research:holders -- <mint>` prints one scan.
+
+`npm run research:ladder` measures what followed each snapshot (one sample per coin per day): doubled, reached the next
+level, got back to its all-time high, or halved first, within 24 hours and 7 days. Cohorts: tier, distance under the
+high (the "mid tier, 80 %+ under" row is the WWW case), position between two levels, holders rising or falling, real
+(organic) buying vs selling, an old runner coming back (high 45+ days old, fell 70 %+, now 50 %+ off its 30-day low),
+team share, and chain. Each row shows the doubling rate in the earlier 60 % and the later 40 % of samples: an effect
+that holds in only one is noise. Nothing here sends a message; a cohort becomes a phone rule only through the same
+kind of gate as the launch rules.
+
+Ladder records (folder `research/ladder`, same file format): `LT` obs, coin (`chain:address`), chain, address, pool,
+symbol, name, developer, source · `LS` obs, coin, source, symbol, market cap $, liquidity $, price $, holders, organic
+score, change % 1h/6h/24h, buys/sells 1h, buyers/sellers 1h, volume $ 1h, bought/sold $ 1h, organic bought/sold $ 1h,
+net buyers 1h, holder change % 1h/24h, top-holder %, developer %, created · `LA` obs, coin, source, interval, candles,
+high $, high time, 30-day low $ and time, close a week ago $ · `LH` obs, coin, {top 20 %, programs %, wallets %,
+clusters %, team %, fresh %, largest cluster, developer, developer's funder, holders}.
