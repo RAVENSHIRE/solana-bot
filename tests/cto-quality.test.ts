@@ -21,3 +21,12 @@ test('CTO-01: a failing telemetry write (event log, tape) never skips saving the
   await assert.rejects(DeskEngine.prototype.persist.call(engine as never), /EPERM/, 'the failure is still reported');
   assert.deepEqual(saved, ['FAIR', 'CRASH'], 'positions and orders are saved even though the telemetry write failed');
 });
+
+test('CTO-02: an unreadable phone-alerts.json sends nothing to the phone instead of silently falling back to DESK_ALERTS', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cto-phone-')), file = path.join(dir, 'phone-alerts.json');
+  assert.equal(await savedPhoneAlerts(file), null, 'no file: no choice made, DESK_ALERTS applies');
+  await fs.writeFile(file, '{"kinds":["op');
+  const kinds = await savedPhoneAlerts(file);
+  assert.ok(kinds, 'a choice was made but cannot be read: it is not treated as "no choice"');
+  assert.deepEqual([...kinds], []);
+});
