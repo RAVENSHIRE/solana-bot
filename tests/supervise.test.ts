@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 // @ts-expect-error plain JavaScript (runs on the PC without a build step)
-import { SUPERVISE, Supervisor, claim, envKeys, nextDelay, rotate } from '../ops/supervise.mjs';
+import { SUPERVISE, Supervisor, claim, envKeys, frontendStale, nextDelay, rotate } from '../ops/supervise.mjs';
 
 test('supervisor: restarts a stopped process, backs off while it keeps crashing, tells the phone once per half hour, quiet on a requested restart', () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'supervise-'));
@@ -59,4 +59,20 @@ test('supervisor: one at a time (a fresh lock of a live process wins, a stale or
   const env = envKeys('WALLET_PRIVATE_KEY=secret\nDESK_NTFY_TOPIC="raven-topic-123"\n# DESK_NTFY_SERVER=x\nANTHROPIC_API_KEY=sk\n', ['DESK_NTFY_TOPIC', 'DESK_NTFY_SERVER']);
   assert.deepEqual(env, { DESK_NTFY_TOPIC: 'raven-topic-123' }, 'nothing but the phone channel');
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('supervisor: the dashboard page is rebuilt before a start when its sources changed after the last build (a git pull)', () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'supervise-ui-')), ui = path.join(repo, 'dashboard');
+  fs.mkdirSync(path.join(ui, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(ui, 'src', 'Desk.tsx'), 'x'); fs.writeFileSync(path.join(ui, 'index.html'), 'x');
+  assert.equal(frontendStale(repo), true, 'never built');
+  fs.mkdirSync(path.join(ui, 'dist'));
+  fs.writeFileSync(path.join(ui, 'dist', 'index.html'), 'built');
+  const later = new Date(Date.now() + 60_000);
+  fs.utimesSync(path.join(ui, 'dist', 'index.html'), later, later);
+  assert.equal(frontendStale(repo), false);
+  const pulled = new Date(Date.now() + 120_000);
+  fs.utimesSync(path.join(ui, 'src', 'Desk.tsx'), pulled, pulled);
+  assert.equal(frontendStale(repo), true, 'a pulled source file is newer than the build');
+  fs.rmSync(repo, { recursive: true, force: true });
 });

@@ -26,7 +26,7 @@ export const VERIFIED = Object.freeze({
 
 interface Stats {
   priceChange?: number; buyVolume?: number; sellVolume?: number; numTraders?: number; numNetBuyers?: number; numOrganicBuyers?: number;
-  numBuys?: number; numSells?: number; holderChange?: number; buyOrganicVolume?: number; sellOrganicVolume?: number;
+  numBuys?: number; numSells?: number; holderChange?: number; buyOrganicVolume?: number; sellOrganicVolume?: number; liquidityChange?: number;
 }
 /** The fields of Jupiter's token API (v2) this module and the ladder (ladder.ts) read. */
 export interface JupToken {
@@ -34,7 +34,8 @@ export interface JupToken {
   organicScore?: number; organicScoreLabel?: string; isVerified?: boolean; tags?: string[]; launchpad?: string;
   mintAuthority?: string | null; freezeAuthority?: string | null; firstPool?: { createdAt?: string };
   stats5m?: Stats; stats1h?: Stats; stats6h?: Stats; stats24h?: Stats;
-  dev?: string; audit?: { topHoldersPercentage?: number; devBalancePercentage?: number };
+  dev?: string; audit?: { topHoldersPercentage?: number; devBalancePercentage?: number; devMints?: number; devMigrations?: number };
+  twitter?: string; website?: string;
 }
 export interface WatchToken { mint: string; note?: string }
 export interface VerifiedDeps {

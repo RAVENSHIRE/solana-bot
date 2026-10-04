@@ -12,6 +12,7 @@ import { historyText, type WalletHistory } from '../../src/desk/wallet-history';
 import { createDesk, deskEnvironment, type DeskContext, type DeskHandle } from '../../src/desk/runtime';
 import type { DeskMode, DeskStatus } from '../../src/desk/types';
 import type { WatchView } from '../../src/desk/watch';
+import type { CoinCheck } from '../../src/research/coin-check';
 
 export { deskEnvironment as tradingEnvironment, type DeskHandle };
 export type DeskFactory = (context: DeskContext) => Promise<DeskHandle>;
@@ -51,6 +52,8 @@ export class TradingService {
   private restoring = true;
   private savedText: string | null = null;
   private restoreTimer: ReturnType<typeof setTimeout> | null = null;
+  private coinCheckBusy = false;
+  private readonly coinChecks = new Map<string, { at: number; value: CoinCheck }>();
   private capability = randomBytes(32).toString('base64url');
   private sessionId: string | null = null;
   private heartbeat = 0;
@@ -375,6 +378,32 @@ export class TradingService {
         if (!handle.holdings) throw new DeskReject('WATCH_UNAVAILABLE');
         const holdings = await handle.holdings(wallet).catch(() => { throw new DeskReject('HOLDINGS_UNAVAILABLE'); });
         this.json(res, 200, { wallet, holdings }); return true;
+      }
+      if (action === 'coin-check') {
+        // Read-only: one coin from four sources (about 20–40 s); one check at a time, the same coin again within 2 min from the cache.
+        const handle = await this.ensureDesk(), mint = String(body.mint ?? '').trim();
+        if (!handle.coinCheck) throw new DeskReject('COIN_CHECK_UNAVAILABLE');
+        if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) throw new DeskReject('INVALID_MINT', 'paste a Solana token address (contract address, CA)');
+        const cached = this.coinChecks.get(mint);
+        if (cached && Date.now() - cached.at < 120_000) { this.json(res, 200, cached.value); return true; }
+        if (this.coinCheckBusy) throw new DeskReject('COIN_CHECK_BUSY', 'another check is still running');
+        this.coinCheckBusy = true;
+        try {
+          const value = await handle.coinCheck(mint);
+          this.coinChecks.set(mint, { at: Date.now(), value });
+          if (this.coinChecks.size > 50) this.coinChecks.delete(this.coinChecks.keys().next().value!);
+          this.json(res, 200, value); return true;
+        } catch (error) { throw error instanceof DeskReject ? error : new DeskReject('COIN_CHECK_FAILED', (error as Error).message.slice(0, 120)); }
+        finally { this.coinCheckBusy = false; }
+      }
+      if (action === 'watchlist-add') {
+        // Only adds a coin to the research watchlist (phone INFO when it moves, daily ladder records); never trades.
+        const handle = await this.ensureDesk(), mint = String(body.mint ?? '').trim();
+        if (!handle.watchlistAdd) throw new DeskReject('WATCHLIST_UNAVAILABLE');
+        if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) throw new DeskReject('INVALID_MINT');
+        const added = await handle.watchlistAdd(mint, typeof body.note === 'string' ? body.note : '');
+        for (const [k, v] of this.coinChecks) if (k === mint) v.value = { ...v.value, watched: true };
+        this.json(res, 200, { added }); return true;
       }
       if (action === 'connect') {
         if (typeof body.address !== 'string') throw new DeskReject('INVALID_ADDRESS');

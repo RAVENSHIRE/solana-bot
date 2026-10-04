@@ -29,13 +29,13 @@ function engine(mode: DeskMode) {
     status: (wallet: { connected: boolean; address: string | null }) => ({ mode, scanner: e.scanner, execution: e.execution, wallet }) };
   return e;
 }
-function service(liveSigner: DeskHandle['liveSigner'] = 'PHANTOM', locked = false, options: ConstructorParameters<typeof TradingService>[1] = {}) {
+function service(liveSigner: DeskHandle['liveSigner'] = 'PHANTOM', locked = false, options: ConstructorParameters<typeof TradingService>[1] = {}, extra: Partial<DeskHandle> = {}) {
   const engines = { PAPER: engine('PAPER'), LIVE: engine('LIVE') }, phone: string[] = [];
   let wallets: Parameters<DeskFactory>[0] | null = null;
   const factory: DeskFactory = async context => { wallets = context;
     return { engines: engines as unknown as Record<DeskMode, DeskEngine>, capital: { plannedStartingCapitalUsd: 5.45, baseEntryUsd: 2, slippageBps: 100 }, liveSigner,
       operational: locked ? deskOperational({ DESK_DEPLOYMENT_MODE: 'LOCKED' }) : undefined, notify: async (title: string) => { phone.push(title); },
-      close: async () => {} } as DeskHandle; };
+      close: async () => {}, ...extra } as DeskHandle; };
   return { trading: new TradingService(factory, options), engines, context: () => wallets!, phone };
 }
 async function serve(trading: TradingService) {
@@ -278,4 +278,33 @@ test('session restore: TEST comes back after a restart, LIVE (local key) comes b
     assert.equal(await blocked.trading.restoreSession(), null);
     await blocked.trading.close();
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('coin check API: a Solana address only, one check at a time, the same coin again within 2 min from the cache; watchlist add', async () => {
+  const mint = Keypair.fromSeed(new Uint8Array(32).fill(77)).publicKey.toBase58(), calls: string[] = [], added: Array<[string, string]> = [];
+  let release: () => void = () => {};
+  const gate = new Promise<void>(r => { release = r; });
+  const { trading } = service('PHANTOM', false, {}, {
+    coinCheck: async (m: string) => { calls.push(m); await gate; return { mint: m, verdict: { tone: 'bad', headline: 'demand is fading', lines: [] }, watched: false } as never; },
+    watchlistAdd: async (m: string, note: string) => { added.push([m, note]); return true; } });
+  const { base, post, close } = await serve(trading);
+  try {
+    const { capability } = await (await fetch(`${base}/api/trading/bootstrap`)).json();
+    const headers = { 'X-Local-Capability': capability };
+    assert.equal((await post('coin-check', { mint }, {})).status, 403, 'capability required');
+    const bad = await post('coin-check', { mint: '0x1234' }, headers);
+    assert.notEqual(bad.status, 200); assert.equal((await bad.json()).message, 'INVALID_MINT');
+    const first = post('coin-check', { mint }, headers);
+    await new Promise(r => setTimeout(r, 50));
+    const busy = await post('coin-check', { mint: Keypair.fromSeed(new Uint8Array(32).fill(78)).publicKey.toBase58() }, headers);
+    assert.equal((await busy.json()).message, 'COIN_CHECK_BUSY');
+    release();
+    const result = await (await first).json();
+    assert.equal(result.verdict.headline, 'demand is fading');
+    assert.equal((await post('coin-check', { mint }, headers)).status, 200);
+    assert.deepEqual(calls, [mint], 'the second check of the same coin came from the cache');
+    const add = await (await post('watchlist-add', { mint, note: 'SI coin check' }, headers)).json();
+    assert.deepEqual(add, { added: true }); assert.deepEqual(added, [[mint, 'SI coin check']]);
+    assert.equal((await (await post('coin-check', { mint }, headers)).json()).watched, true, 'the cached result knows it is watched now');
+  } finally { await close(); }
 });

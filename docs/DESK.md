@@ -327,6 +327,23 @@ FOMO has no public API: its token pages are share links into the app. What the d
 - *Learn from wallet* in the strategy assistant reads your FOMO wallet's trades.
 - FOMO's *Migrated* list is pump.fun graduations, which the desk reads directly from the chain.
 
+### Coin check: paste an address, get the reading
+
+*Coin check* (sidebar, under Overview) answers "is this coin worth a look?" for any Solana token. Paste the contract
+address, or a FOMO, pump.fun or Jupiter link: the check starts at once and takes 20–40 s. Read-only, never a trade.
+
+- **Four sources:** Jupiter (holders and their change, real "organic" buying and selling, the developer wallet's
+  history), DexScreener and GeckoTerminal (market cap, liquidity, the all-time high and how far below it, the decade
+  levels), GoPlus and RugCheck (the contract), and the chain (the 20 largest holders, where each wallet got its first
+  SOL, clusters of wallets funded by one source, the team's share, fresh wallets).
+- **The reading on top:** a headline and the lines behind it, as for WWW and SI on 3 Oct: price and high, contract,
+  holders, demand, and what would make it interesting. Green: holders rising and real buyers leading. Red: a blocked
+  contract, or demand fading (holders falling or real sellers leading). It is not a qualified call.
+- **All numbers** unfold below; a source that did not answer is listed, the rest still shows.
+- **Add to watchlist** puts the coin on the research watchlist (`data-desk/research/watch-tokens.json`): the phone gets
+  INFO when it rises 15 %+ in an hour with buyers leading, and the ladder records it every day.
+- One check at a time; the same coin again within 2 minutes comes from the last check.
+
 ### Watch: exit rules for tokens you hold yourself
 
 The *Watch* section (sidebar: Watch) guards tokens you bought outside the desk, on FOMO, in Phantom or anywhere else. Add the token's CA and the wallet that holds it, then set any of these levels:

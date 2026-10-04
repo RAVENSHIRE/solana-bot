@@ -12,7 +12,7 @@
 //
 // What a restart brings back is the desk's own job: the dashboard restores TEST as it was, and LIVE with exits only
 // (data-desk/desk-session.json). This file never reads keys other than the phone channel from .env.
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, execFileSync, execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -57,6 +57,33 @@ export function rotate(file, maxBytes = SUPERVISE.maxLogBytes) {
     fs.renameSync(file, `${file}.1`);
     return true;
   } catch { return false; }
+}
+
+/** The newest modification time under a directory (0 when it does not exist). */
+export function newest(dir) {
+  let t = 0;
+  try {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const f = path.join(dir, e.name);
+      t = Math.max(t, e.isDirectory() ? newest(f) : fs.statSync(f).mtimeMs);
+    }
+  } catch { /* missing */ }
+  return t;
+}
+
+/** The dashboard page is built (dashboard/dist, not in git): it is stale when its sources changed after the last build. */
+export function frontendStale(repo) {
+  const ui = path.join(repo, 'dashboard');
+  let built = 0;
+  try { built = fs.statSync(path.join(ui, 'dist', 'index.html')).mtimeMs; } catch { return true; }
+  return Math.max(newest(path.join(ui, 'src')), newest(path.join(ui, 'index.html'))) > built;
+}
+
+export function buildFrontend(repo, log) {
+  try {
+    execSync('npm run build', { cwd: path.join(repo, 'dashboard'), stdio: 'ignore', timeout: 300_000, windowsHide: true });
+    log('dashboard: page rebuilt (its sources changed)');
+  } catch (e) { log(`dashboard: page build failed (${e.message.split('\n')[0]}); the last build stays`); }
 }
 
 export const alive = pid => { if (!pid) return false; try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
@@ -107,6 +134,7 @@ export class Supervisor {
       return child.pid ?? null;
     });
     this.isAlive = o.alive ?? alive;
+    this.beforeStart = o.beforeStart ?? null;
     this.children = (o.children ?? CHILDREN).map(c => ({ ...c, pid: null, startedAt: null, restarts: 0, delayMs: 0, nextStartAt: 0, lastStop: null, lastAlertAt: 0 }));
     this.restartFile = path.join(this.repo, 'data-desk', 'supervisor-restart.json');
   }
@@ -143,6 +171,7 @@ export class Supervisor {
       if (now < c.nextStartAt) continue;
       const logFile = path.join(this.repo, c.log);
       fs.mkdirSync(path.dirname(logFile), { recursive: true });
+      this.beforeStart?.(c);
       if (rotate(logFile)) this.log(`${c.name}: log over ${SUPERVISE.maxLogBytes / 1048576} MB moved to ${path.basename(logFile)}.1`);
       try {
         c.pid = this.spawnChild(c, logFile); c.startedAt = now;
@@ -210,7 +239,8 @@ async function main() {
   // Down for a while (a reboot, sleep, or the supervisor itself stopped): say so once.
   let last = null;
   try { last = JSON.parse(fs.readFileSync(statusFile, 'utf8')); } catch { /* first run */ }
-  const notify = phone(repo), s = new Supervisor({ repo, log, notify });
+  // A page whose sources changed since the last build (a git pull) is rebuilt before the dashboard starts.
+  const notify = phone(repo), s = new Supervisor({ repo, log, notify, beforeStart: c => { if (c.name === 'dashboard' && frontendStale(repo)) buildFrontend(repo, log); } });
   s.adopt(desk());
   const gap = last?.at ? Date.now() - Date.parse(last.at) : 0;
   log(`supervisor started (pid ${process.pid})${gap > SUPERVISE.staleMs ? `, ${fmt(gap)} after the last heartbeat` : ''}`);

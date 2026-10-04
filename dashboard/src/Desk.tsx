@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import type { Candidate, DeskEvent, DeskStatus, Evidence, Preflight, Stage, StrategyView } from '../../src/desk/types';
 import type { RuleSpecInput } from '../../src/desk/custom';
 import type { Holding, WatchRule, WatchView } from '../../src/desk/watch';
+import type { CoinCheck } from '../../src/research/coin-check';
 import type { AssistantAnswer, TradingSession } from './use-trading';
 import { money, numeric, short, time } from './format';
 
@@ -64,6 +65,7 @@ export function DeskPanel({ t }: { t: TradingSession }) {
     </div>}
     {d && <>
       <div id="desk-overview" className="desk-anchor"><Capital d={d} /></div>
+      <div id="desk-coin-check" className="desk-anchor"><CoinCheckPanel t={t} /></div>
       <div id="desk-strategies" className="desk-anchor"><Strategies d={d} t={t} /></div>
       <Stages events={d.events} />
       <div id="desk-telemetry" className="desk-grid desk-anchor">
@@ -637,6 +639,87 @@ function Watch({ t, d }: { t: TradingSession; d: DeskStatus }) {
         {!w.rules.length && <tr><td colSpan={8}>Nothing watched yet. Add a token you hold, e.g. with a market-cap floor at your exit level.</td></tr>}</tbody></table></div>
     {w.alerts.length > 0 && <details open><summary>Alerts ({w.alerts.length})</summary><ul className="watch-alerts">{w.alerts.slice(0, 10).map(a =>
       <li key={`${a.ruleId}-${a.at}`}><strong>{ago(a.at)} · {a.title}</strong> — {a.body}</li>)}</ul></details>}
+  </section>;
+}
+
+/** One coin check: the reading on top, every number folded below. */
+export function CoinCheckResult({ r, adding, onAdd }: { r: CoinCheck; adding: boolean; onAdd: () => void }) {
+  const k = (v: number | null | undefined) => v == null ? '--' : v >= 1e9 ? `$${(v / 1e9).toFixed(2)}B` : v >= 1e6 ? `$${(v / 1e6).toFixed(2)}M` : `$${(v / 1000).toFixed(1)}K`;
+  const p = (v: number | null | undefined) => v == null ? '--' : `${v >= 0 ? '+' : ''}${v.toFixed(Math.abs(v) < 10 ? 1 : 0)}%`;
+  const h = r.holders, dm = r.demand;
+  return <div className="coin-result">
+      <div className="coin-title"><strong>{r.token.symbol ?? short(r.mint)}</strong> {r.token.name && <span>{r.token.name}</span>} <Fomo mint={r.mint} />
+        {r.market?.url && <> · <a href={r.market.url} target="_blank" rel="noreferrer">DexScreener</a></>}
+        <small> · {short(r.mint)} · checked {ago(r.at)}</small></div>
+      <div className={`coin-verdict ${r.verdict.tone}`}><strong>{r.verdict.headline}</strong>
+        <ul>{r.verdict.lines.map(line => <li key={line}>{line}</li>)}</ul></div>
+      <div className="spec-actions">{r.watched ? <span className="gate-pass">On the watchlist: the phone gets INFO when it rises 15%+ in an hour with buyers leading.</span>
+        : <button className="source-button" type="button" disabled={adding} onClick={onAdd}>{adding ? 'Adding…' : 'Add to watchlist'}</button>}</div>
+      <details><summary>All numbers</summary>
+        <div className="wallet-table"><table><tbody>
+          <tr><th>Market cap</th><td>{k(r.market?.mcapUsd)} · tier {r.level.tier ?? '--'} · next level {k(r.level.nextUsd)}{r.level.toNextX ? ` (${r.level.toNextX.toFixed(1)}×)` : ''}</td></tr>
+          <tr><th>Liquidity · volume 24 h</th><td>{k(r.market?.liquidityUsd)} · {k(r.market?.volume24hUsd)} · price {p(r.market?.change1hPct)} 1 h, {p(r.market?.change24hPct)} 24 h</td></tr>
+          <tr><th>High</th><td>{r.history ? `${k(r.history.athUsd)} on ${new Date(r.history.athAt).toLocaleString()} · ${p(r.history.drawdownPct)} from it · ${r.history.toAthX.toFixed(1)}× back · lowest since ${k(r.history.lowSinceAthUsd)} (${r.history.bars} ${r.history.interval} candles)` : '--'}</td></tr>
+          <tr><th>Age</th><td>{r.token.createdAt ? `${((r.at - r.token.createdAt) / 86_400_000).toFixed(1)} days` : '--'}{r.token.launchpad ? ` · ${r.token.launchpad}` : ''}{r.token.links.length ? <> · {r.token.links.map(l => <a key={l} href={l} target="_blank" rel="noreferrer">{l.replace(/^https?:\/\//, '').slice(0, 40)} </a>)}</> : ''}</td></tr>
+          <tr><th>Contract</th><td>{r.security ? `${r.security.verdict} · GoPlus ${r.security.goplus} · RugCheck ${r.security.rugcheck}` : '--'}
+            {r.security?.findings.length ? <ul>{r.security.findings.map(f => <li key={f.code + f.detail} className={f.level === 'BLOCK' ? 'gate-fail' : f.level === 'WARN' ? 'gate-unknown' : ''}>{f.level} · {f.detail}</li>)}</ul> : null}</td></tr>
+          <tr><th>Holders</th><td>{h?.count?.toLocaleString() ?? '--'} · {p(h?.change1hPct)} 1 h · {p(h?.change24hPct)} 24 h · largest holders {h?.topHoldersPct != null ? `${h.topHoldersPct.toFixed(1)}%` : '--'}
+            {h?.devMints != null && <> · developer created {h.devMints.toLocaleString()} coins ({h.devMigrations ?? 0} reached the exchange)</>}</td></tr>
+          <tr><th>Holder scan</th><td>{h?.scan ? `top 20 ${h.scan.top20Pct.toFixed(1)}% (pools ${h.scan.programPct.toFixed(1)}%, wallets ${h.scan.walletPct.toFixed(1)}%) · clusters ${h.scan.clusterPct.toFixed(1)}%${h.scan.largestCluster ? ` (largest ${h.scan.largestCluster.pct.toFixed(1)}% in ${h.scan.largestCluster.wallets} wallets)` : ''} · team ${h.scan.teamPct.toFixed(1)}% · wallets under 7 days ${h.scan.freshPct.toFixed(1)}%` : '--'}</td></tr>
+          <tr><th>Real buying vs selling</th><td>1 h {k(dm?.realBuy1hUsd)} / {k(dm?.realSell1hUsd)} · 24 h {k(dm?.realBuy24hUsd)} / {k(dm?.realSell24hUsd)} · real share {dm?.realShare24hPct != null ? `${dm.realShare24hPct.toFixed(0)}%` : '--'} · organic score {dm?.organicScore ?? '--'} · liquidity {p(dm?.liquidityChange24hPct)} 24 h</td></tr>
+          {r.errors.length > 0 && <tr><th>Not answered</th><td className="gate-unknown">{r.errors.join(' · ')}</td></tr>}
+        </tbody></table></div></details>
+    </div>;
+}
+
+/** The token address in whatever was pasted: a bare CA, or a FOMO / pump.fun / Jupiter / Solscan link. */
+function pastedMint(text: string): string | null {
+  const found = text.trim().match(/[1-9A-HJ-NP-Za-km-z]{32,44}/g);
+  return found ? found[found.length - 1]! : null;
+}
+
+/**
+ * Coin check: paste a token address (or a FOMO link) and the desk checks it from four sources on the PC — Jupiter,
+ * DexScreener/GeckoTerminal, GoPlus/RugCheck and the chain's holders — then says what the numbers mean. Read-only.
+ */
+function CoinCheckPanel({ t }: { t: TradingSession }) {
+  const [input, setInput] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<CoinCheck | null>(null), [recent, setRecent] = useState<CoinCheck[]>([]), [started, setStarted] = useState(0), [, tick] = useState(0);
+  const [adding, setAdding] = useState(false);
+  useEffect(() => { if (!busy) return; const id = setInterval(() => tick(x => x + 1), 1000); return () => clearInterval(id); }, [busy]);
+  const run = async (text: string) => {
+    const mint = pastedMint(text);
+    if (!mint) { setError('Paste a Solana token address (CA) or a FOMO link.'); return; }
+    setInput(mint); setBusy(true); setError(null); setStarted(Date.now());
+    try {
+      const r = await t.coinCheck(mint);
+      setResult(r); setRecent(list => [r, ...list.filter(x => x.mint !== r.mint)].slice(0, 6));
+    } catch (e) { setError(describe(e instanceof Error ? e.message : String(e))); }
+    finally { setBusy(false); }
+  };
+  const addToWatchlist = async (r: CoinCheck) => {
+    setAdding(true);
+    try {
+      await t.watchlistAdd(r.mint, `${r.token.symbol ?? r.mint.slice(0, 6)} (${r.token.name ?? '?'}), coin check ${new Date(r.at).toISOString().slice(0, 10)}: ${r.verdict.headline}`);
+      const mark = (x: CoinCheck) => x.mint === r.mint ? { ...x, watched: true } : x;
+      setResult(x => x && mark(x)); setRecent(list => list.map(mark));
+    } catch (e) { setError(describe(e instanceof Error ? e.message : String(e))); }
+    finally { setAdding(false); }
+  };
+  const r = result;
+  return <section className="panel desk-card" aria-label="Coin check">
+    <div className="card-head"><h3>Coin check · paste a token address</h3>
+      <small>Jupiter, DexScreener and GeckoTerminal, GoPlus and RugCheck, and the chain's largest holders. Read-only, not a qualified call.</small></div>
+    <form className="coin-form" onSubmit={e => { e.preventDefault(); void run(input); }}>
+      <input value={input} placeholder="Paste a CA or a FOMO link, e.g. 9aqmJjCnnMQv…caqjj" aria-label="Token address" disabled={busy}
+        onChange={e => setInput(e.target.value)} onPaste={e => { const text = e.clipboardData.getData('text'); if (pastedMint(text)) { e.preventDefault(); void run(text); } }} />
+      <button className="primary-action" type="submit" disabled={busy || !input.trim()}>{busy ? `Checking… ${Math.round((Date.now() - started) / 1000)} s` : 'Check'}</button>
+    </form>
+    {busy && <p className="desk-note">Usually 20–40 s: the holder scan reads the 20 largest wallets and where each got its first SOL.</p>}
+    {error && <p className="trading-error" role="alert">{error}</p>}
+    {recent.length > 1 && <div className="coin-recent">{recent.map(x => <button key={x.mint} type="button" className={`source-button coin-chip ${x.verdict.tone}`}
+      onClick={() => setResult(x)} title={x.mint}>{x.token.symbol ?? short(x.mint)}</button>)}</div>}
+    {r && <CoinCheckResult r={r} adding={adding} onAdd={() => void addToWatchlist(r)} />}
   </section>;
 }
 
