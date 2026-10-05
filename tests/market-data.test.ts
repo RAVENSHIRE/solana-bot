@@ -398,3 +398,15 @@ test('GeckoTerminal rest shared on the PC: a 429 in one process rests every call
   now += 2_500; assert.equal(desk.until(), ladder.until());
   await fsp.rm(dir, { recursive: true, force: true });
 });
+
+test('rate limit: a stop-loss quote never queues behind scan quotes (the token goes to the most urgent caller first)', async () => {
+  const bucket = new TokenBucket(1, 20); // one token every 50 ms
+  await bucket.acquire(); // the bucket is empty now
+  const order: string[] = [];
+  const scans = [1, 2, 3].map(i => bucket.acquire(undefined, 3).then(() => order.push(`scan ${i}`)));
+  await new Promise(r => setTimeout(r, 5));
+  const stop = bucket.acquire(undefined, 1).then(() => order.push('position'));
+  await Promise.all([...scans, stop]);
+  assert.equal(order[0], 'position', `got ${order.join(', ')}`);
+  assert.equal(order.length, 4, 'everyone is served in the end');
+});

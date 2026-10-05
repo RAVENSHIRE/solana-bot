@@ -838,7 +838,11 @@ test('a held token without a Jupiter route never pauses Jupiter for other tokens
 });
 
 test('the four play presets are valid specs; consolidation plays are never stopped out in their first minute', () => {
-  for (const id of ['RUNNER', 'MIGRATION', 'CONSOL', 'SCALP', 'CRASH_V1']) assert.equal(parseRuleSpec(PRESETS[id]!).id, id);
+  for (const id of ['RUNNER', 'MIGRATION', 'CONSOL', 'SCALP', 'CRASH_V1', 'CRASH_70K']) assert.equal(parseRuleSpec(PRESETS[id]!).id, id);
+  // CRASH 70K+: CRASH's band narrowed to $70K+ and 5–15 min, checked as often as CRASH (short holds every 2 s).
+  const k70 = ruleProfile(parseRuleSpec(PRESETS.CRASH_70K!), true);
+  assert.equal(k70.positionCheckMs, CRASH_DEFAULTS.positionCheckMs); assert.equal(ruleProfile(parseRuleSpec(PRESETS.CONSOL!), true).positionCheckMs, DESK.exits.positionCheckMs);
+  assert.deepEqual([k70.exits.takeProfitPct, k70.exits.stopLossPct, k70.exits.maxHoldMin], [100, 35, 10], 'the same exits as CRASH');
   const consol = strategyProfiles({}, deskCapital({}), { takeProfitPct: 20, stopLossPct: 12, trailingActivationPct: 8, trailingStopPct: 6, maxHoldMin: 240 }) && ruleProfile(parseRuleSpec(PRESETS.CONSOL!), true);
   const at = (heldMs: number, pnlPct: number) => exitReason(consol.exits, { pnlPct, peakPct: Math.max(pnlPct, 0), fromPeakPct: pnlPct, heldMs });
   assert.equal(at(30_000, -45), null, 'a −45% wick in the first 30 s does not stop out');

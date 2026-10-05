@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { atomicWriteFile } from '../utils/fs';
-import { DESK, type StrategyProfile } from './config';
+import { CRASH_DEFAULTS, DESK, type StrategyProfile } from './config';
 import type { Candidate, CandidateMetrics, CrashSignal, GateResult } from './types';
 
 /**
@@ -146,7 +146,23 @@ export const CRASH_V1_PRESET: RuleSpecInput = {
   sizing: { capitalUsd: 10, entryUsd: 2, maxOpenPositions: 3, slippageBps: 250, exitSlippageBps: 1_000, maxDragPct: 5 },
   reentryCooldownMin: 10,
 };
-export const PRESETS: Record<string, RuleSpecInput> = { RUNNER: RUNNER_PRESET, MIGRATION: MIGRATION_PRESET, CONSOL: CONSOL_PRESET, SCALP: SCALP_PRESET, CRASH_V1: CRASH_V1_PRESET };
+/**
+ * CRASH on bigger, slightly older pools (pre-registered 5 Oct 2026, 15:00 UTC): in the 88 TEST trades of CRASH (1–5 Oct),
+ * entries at a market cap of $70K or more on a pool at least 5 minutes old made +15.6 % on average (40 trades), the rest
+ * −6.1 % (48). That split was found in those same trades, so it proves nothing yet: this preset runs it beside CRASH in
+ * TEST on the same signals, with CRASH's own exits, and only its trades from now on count.
+ */
+export const CRASH_70K_PRESET: RuleSpecInput = {
+  id: 'CRASH_70K', label: 'CRASH 70K+ (5–15 min)',
+  summary: 'CRASH on pools at $70K–$300K, 5–15 minutes after graduation; same 5m move, volume, buyers and exits as CRASH',
+  entry: { minMarketCapUsd: 70_000, maxMarketCapUsd: 300_000, minPoolAgeMin: 5, maxPoolAgeMin: 15, minPriceChange5mPct: 10, maxPriceChange5mPct: 30,
+    minVolume5mUsd: 50_000, minBuySellRatio: 1.3, minLiquidityUsd: 10_000, maxTop10WalletPct: 50, maxLargestWalletPct: 15 },
+  exits: { takeProfitPct: 100, stopLossPct: 35, trailingActivationPct: null, trailingStopPct: null, maxHoldMin: 10, graceSec: 0 },
+  sizing: { capitalUsd: 10, entryUsd: 2, maxOpenPositions: 3, slippageBps: 250, exitSlippageBps: 1_000, maxDragPct: 5 },
+  reentryCooldownMin: 10,
+};
+export const PRESETS: Record<string, RuleSpecInput> = { RUNNER: RUNNER_PRESET, MIGRATION: MIGRATION_PRESET, CONSOL: CONSOL_PRESET, SCALP: SCALP_PRESET, CRASH_V1: CRASH_V1_PRESET,
+  CRASH_70K: CRASH_70K_PRESET };
 
 const usd = (n: number | null) => n === null ? 'UNKNOWN' : `$${n >= 1000 ? Math.round(n).toLocaleString('en-US') : n.toFixed(2)}`;
 const pct = (n: number | null) => n === null ? 'UNKNOWN' : `${n.toFixed(1)}%`;
@@ -208,7 +224,8 @@ export function ruleProfile(s: RuleSpec, enabled: boolean): StrategyProfile {
   const x = s.exits, z = s.sizing;
   return { id: s.id, label: s.label, summary: s.summary || 'Custom rule strategy', enabled, capitalUsd: z.capitalUsd, entryUsd: z.entryUsd,
     slippageBps: z.slippageBps, exitSlippageBps: z.exitSlippageBps, maxDragBps: BigInt(Math.round(z.maxDragPct * 100)), maxOpenPositions: z.maxOpenPositions,
-    positionCheckMs: DESK.exits.positionCheckMs, exitMode: 'rules', reentryCooldownMs: s.reentryCooldownMin * 60_000,
+    // Holds of 15 minutes or less are checked as often as CRASH (2 s): a 5 s check lets a fast stop overshoot further.
+    positionCheckMs: x.maxHoldMin <= 15 ? CRASH_DEFAULTS.positionCheckMs : DESK.exits.positionCheckMs, exitMode: 'rules', reentryCooldownMs: s.reentryCooldownMin * 60_000,
     exits: { takeProfitPct: x.takeProfitPct ?? Number.POSITIVE_INFINITY, stopLossPct: x.stopLossPct, maxHoldMin: x.maxHoldMin,
       trailing: x.trailingActivationPct !== null && x.trailingStopPct !== null ? { activationPct: x.trailingActivationPct, stopPct: x.trailingStopPct } : null,
       giveback: null, graceMs: x.graceSec * 1000, marketCap: x.marketCapFloorUsd !== null || x.marketCapTargetUsd !== null ? { floorUsd: x.marketCapFloorUsd, targetUsd: x.marketCapTargetUsd } : null },

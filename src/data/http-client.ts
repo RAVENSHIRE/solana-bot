@@ -54,7 +54,7 @@ export class HttpClient {
     const health = source ? this.o.health?.status(source) : undefined;
     try {
       const result = await withRetry(async () => {
-        checkTask(); await this.o.limiter.acquire(requestScope.getStore()?.signal); checkTask();
+        checkTask(); await this.o.limiter.acquire(requestScope.getStore()?.signal, priority()); checkTask();
         return (this.o.gate ?? defaultGate).run(async () => {
           checkTask(); beforeSend?.();
           const started = clock(); if (health) health.requests++;

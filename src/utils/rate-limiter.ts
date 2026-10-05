@@ -19,21 +19,36 @@ export class TokenBucket {
     this.tokens = capacity;
   }
 
-  async acquire(signal?: AbortSignal): Promise<void> {
-    for (;;) {
-      signal?.throwIfAborted();
-      const now = Date.now();
-      if (now < this.pausedUntil) {
-        await delay(Math.min(60_000, this.pausedUntil - now), undefined, { signal });
-        continue;
+  /** Callers waiting, per rank: a token goes to the most urgent rank first. */
+  private readonly waiting = new Map<number, number>();
+
+  /**
+   * `rank`: lower is more urgent (request-scope priority: execution 0, position 1, analysis 2, discovery 3). While a
+   * more urgent caller waits, a less urgent one does not take the next token: a stop-loss quote never queues behind
+   * scan or entry quotes.
+   */
+  async acquire(signal?: AbortSignal, rank = 2): Promise<void> {
+    this.waiting.set(rank, (this.waiting.get(rank) ?? 0) + 1);
+    try {
+      for (;;) {
+        signal?.throwIfAborted();
+        const now = Date.now();
+        if (now < this.pausedUntil) {
+          await delay(Math.min(60_000, this.pausedUntil - now), undefined, { signal });
+          continue;
+        }
+        this.refill(now);
+        const ahead = [...this.waiting].some(([r, n]) => r < rank && n > 0);
+        if (this.tokens >= 1 && !ahead) {
+          this.tokens -= 1;
+          return;
+        }
+        const waitMs = ahead ? 10 : Math.ceil(((1 - this.tokens) / this.refillPerSecond) * 1000);
+        await delay(Math.max(10, waitMs), undefined, { signal });
       }
-      this.refill(now);
-      if (this.tokens >= 1) {
-        this.tokens -= 1;
-        return;
-      }
-      const waitMs = Math.ceil(((1 - this.tokens) / this.refillPerSecond) * 1000);
-      await delay(Math.max(10, waitMs), undefined, { signal });
+    } finally {
+      const n = (this.waiting.get(rank) ?? 1) - 1;
+      if (n > 0) this.waiting.set(rank, n); else this.waiting.delete(rank);
     }
   }
 

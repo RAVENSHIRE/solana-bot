@@ -97,6 +97,18 @@ Native reserve (0.003 SOL) and max drag (1.5 %) are the project's existing micro
   | **New: pool ≤ 15 min, +10–30 %, ≥ $50K, ≤ $300K · SL 35 %, TP 100 %, 10 min** | 36 | 53 % | **+24.3 %** | +12.6 % | 2.41 | +20.9 % / +27.1 % |
 
   The entry rule carries the result: with the new exits the old entry still loses (−11 %/trade); chasing moves above +30 % or trading on less than $50K five-minute volume turns it negative. The profit lock cost about 10 points in every variant; stops at 15–25 % were shaken out. The new rules stay positive with 8 % stop slippage (+22.9 %), at $100 per trade (+22.1 %) and with the old costs (+14.3 %). **Limits:** one night of data; about 12,000 rule combinations were compared, so the best one is optimistic; buy/sell ratio, buy count and holder gates (which the desk also applies) are not in candles. Re-run `npm run desk:backtest` regularly and compare with TEST.
+- **TEST record, 1–5 Oct (88 trades, the history saved after the 3 Oct power cut plus the trades since):** +$6.63 in
+  total, +3.8 % per trade on average, median −18 %, 34 won. By day +18 %, −2.5 %, −4.4 %, then +58 % on 3 trades. A
+  bootstrap luck test gives p = 0.23: the average could be chance. **Not ready for real money.** What the trades show:
+  - Take profit (+100 %) was hit 23 times (+101 % each); the 10-minute time stop closed 14, 10 of them up (+25 %).
+  - **The −35 % stop filled at −56 % on average** (36 trades; most between −42 % and −55 %): the price falls on between
+    two checks, plus fees. Position and exit quotes now go to Jupiter before scan and entry quotes (a rate-limited
+    Jupiter key used to queue them behind each other), and short-hold custom strategies are checked every 2 s too.
+  - Entries at **$70K+ market cap on a pool 5+ minutes old** made +15.6 % on average (40 trades), the rest −6.1 % (48).
+    Found in these same trades, so it is a hypothesis: the **CRASH 70K+** preset (`CRASH_70K`) runs it beside CRASH in
+    TEST on the same signals with the same exits; only its trades from 5 Oct on count.
+  - Before any LIVE CRASH: about 100 more TEST trades positive after costs, the luck test passing, and the EXEC records
+    showing how long a LIVE order takes from signal to confirmation.
 - Other CRASH settings in `.env`: `CRASH_ENABLED`, `CRASH_TAKE_PROFIT_PCT`, `CRASH_LOCK_PEAK_PCT`, `CRASH_GIVEBACK_PTS`, `CRASH_STOP_LOSS_PCT`, `CRASH_MAX_HOLD_MIN`, `CRASH_TRAIL_ACTIVATION_PCT`, `CRASH_TRAIL_STOP_PCT`, `CRASH_RIDE_MAX_HOLD_MIN`.
 
 ### Custom strategies (your own rules, added in the dashboard)
