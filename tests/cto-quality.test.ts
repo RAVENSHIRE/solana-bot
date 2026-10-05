@@ -199,3 +199,16 @@ test('CTO-12 (Q-21): a save that fails after a TEST probe is reported in the eve
   assert.ok(events.some(x => x.startsWith('FAILED Saving desk state failed: EPERM')), events.join(' | '));
   assert.equal(e.work, null);
 });
+
+test('CTO-13 (Q-25, Q-26, Q-30): the docs say what the code does', async () => {
+  const { DEFAULT_ALERTS } = await import('../src/desk/engine');
+  const desk = await fs.readFile(path.join(process.cwd(), 'docs', 'DESK.md'), 'utf8');
+  const engine = await fs.readFile(path.join(process.cwd(), 'src', 'desk', 'engine.ts'), 'utf8');
+  assert.equal(DEFAULT_ALERTS.size, 0);
+  assert.match(desk, /The default is \*\*none\*\*/, 'DESK.md: no desk alert on the phone by default');
+  assert.doesNotMatch(engine, /Default: rug sales of held positions only/, 'engine comment matches DEFAULT_ALERTS');
+  assert.doesNotMatch(desk, /^- Empty token accounts are not closed automatically/m, 'the local key closes them after each exit');
+  const pm2 = await fs.readFile(path.join(process.cwd(), 'ecosystem.config.js'), 'utf8');
+  assert.match(pm2, /LEGACY/);
+  assert.deepEqual([...pm2.matchAll(/script: '([^']+)'/g)].map(m => m[1]), ['./dist/index.js', './dist/dashboard/server.js'], 'PM2 runs only the legacy bot and its dashboard');
+});

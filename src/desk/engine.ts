@@ -86,7 +86,7 @@ export interface DeskDeps {
    */
   research?: DeskResearchHooks | null;
   /**
-   * Which alerts reach the phone (DESK_ALERTS). Default: rug sales of held positions only. On 1–2 Oct,
+   * Which alerts reach the phone (DESK_ALERTS, or the dashboard switch). Default: none (DEFAULT_ALERTS). On 1–2 Oct,
    * 175 alerts in 5 h were ~95 % dead launches — radar news 88, OPEN breakouts 65 (no exit made them pay at a realistic
    * fill), LAUNCH entry-ready 23. Everything stays in the dashboard and the event log.
    */

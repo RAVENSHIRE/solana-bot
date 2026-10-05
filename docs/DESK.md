@@ -546,6 +546,6 @@ Runs TEST on live data (both strategies; `--no-crash` / `--no-fair` to switch on
 - With $2 entries, the 1.5 % max drag (including 1 % slippage tolerance) blocks many meme-coin routes before a transaction is built; the reason is shown on the event. CRASH allows 5 % for exactly this reason.
 - Priority fee: each order authorizes a priority-fee budget (`MAX_PRIORITY_FEE_LAMPORTS`, within the drag cap for entries) and Jupiter's `PRIORITY_LEVEL` estimate picks the actual fee inside it; the fee actually charged is measured before signing.
 - `JUPITER_MAX_RPS` (default 1) limits how often positions can be valued; with several open positions each check takes that many seconds.
-- Empty token accounts are not closed automatically (closing needs its own Phantom signature), so their rent stays locked.
+- With Phantom, empty token accounts are not closed automatically (closing needs its own Phantom signature), so their rent stays locked. With the local key they are closed after each exit (see *Costs per trade*).
 - Token-account rent (≈ 0.0015–0.002 SOL per new token) stays locked after an exit until the account is closed; the desk reports it as reserved, not as a fee.
 - The real Phantom signature and Auto-Confirm flow can only be verified by the wallet owner.
