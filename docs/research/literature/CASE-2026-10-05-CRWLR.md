@@ -20,7 +20,7 @@ evidence.
 | 13:22 | | 283 SOL (2.8× the INFO) |
 | 13:39:38 | +72.7 min | **graduated** (411 SOL, 4.1× the INFO), then the pool (owner: $70K) |
 
-Over the extract: 2,009 buys and 1,460 sells. The dev locked 50M tokens with Streamflow at 12:35, posted at 12:42.
+Over the extract: 2,009 buys and 1,460 sells. The project posted a 50M-token Streamflow lock at 12:35:53 (read at 12:42).
 
 ## What it shows
 
