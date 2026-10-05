@@ -49,3 +49,7 @@ simulation**: no costs, no stops, a 6 h window rather than F1a's 30 min.
   the observer runs with `--no-phone`, so the owner cannot see it or turn it off on the dashboard.
 - **Proposal:** an INFO switch in the Phone panel and an INFO list on the dashboard. Until F1a or F1c passes, drop
   INFO flags under 40 SOL from the phone; keep recording them.
+- **Mayhem-mode coins show "$0.0K (0 SOL)" in INFO.** Example (owner, 5 Oct): @Teemlings, `HGurtw…TEEM`, 298 buyers,
+  6 min old. The INFO text computes the market cap from the last trade's virtual reserves (`calls.ts`, `mcSol`). A
+  mayhem curve's price does not follow its trades (`dataset.ts`, `mayhem`), so the number is wrong. The research
+  rules already exclude mayhem launches. INFO should too, or at least label them and not print a market cap.
