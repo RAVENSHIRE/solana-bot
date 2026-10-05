@@ -865,6 +865,28 @@ test('held positions ask Jupiter only when due: a quiet price is re-quoted every
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
+test('a fall in the on-chain pool price is re-quoted at once, while DexScreener still shows the entry price', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-onchain-quote-')), { w, shared } = world({ ...YOUNG_PUMP }, 'insider');
+  const pool = { lastUsd: 100_000 };
+  const golden = { get: (mint: string) => mint === MINT ? { mint, lastUsd: pool.lastUsd, lastSampleAt: Date.now() } : null, counts: () => ({}), list: () => [] };
+  try {
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }), golden: golden as never, alerts: new Set() });
+    engine.setStrategy('GOLDEN', false);
+    const inner = engine as unknown as { lastPositionCheckAt: Record<string, number> };
+    const check = async () => { inner.lastPositionCheckAt.CRASH = 0; engine.tick(); await engine.settled(); };
+    engine.start(); await engine.pulse();
+    assert.deepEqual(engine.status({ connected: false, address: null }).positions.map(p => p.strategy), ['CRASH']);
+    await check();
+    const quoted = w.sellQuotes;
+    await check(); assert.equal(w.sellQuotes, quoted, 'pool and DexScreener quiet: no quote');
+    pool.lastUsd = 97_000; await check(); assert.equal(w.sellQuotes, quoted, '−3 % on-chain is under the 5 % trigger');
+    pool.lastUsd = 90_000; w.priceFactor = 0.9; await check(); assert.equal(w.sellQuotes, quoted + 1, '−10 % on-chain: quoted at once');
+    pool.lastUsd = 72_000; w.priceFactor = 0.72; await check(); await check();
+    assert.equal(w.sellQuotes, quoted + 3, 'about −28 % on the pool, within 12 points of the 35 % stop: quoted at every check');
+    assert.equal(engine.status({ connected: false, address: null }).positions.length, 1, 'above the stop: still held');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
 test('pausing stops entries only: an open position still takes its exit', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-pause-')), { w, shared } = world(YOUNG_PUMP, 'insider');
   try {

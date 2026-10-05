@@ -168,7 +168,7 @@ export class DeskEngine {
   /** Alert keys already raised, with when: saved to alerts-sent-<MODE>.json so a restart neither re-alerts nor resets the OPEN cap. */
   private launchAlerts = new Map<string, number>();
   /** The last Jupiter valuation per held token, with the DexScreener price at that moment (quoteDue). */
-  private readonly lastQuote = new Map<string, { at: number; dexPrice: number | null }>();
+  private readonly lastQuote = new Map<string, { at: number; dexPrice: number | null; cap: number | null }>();
   /** Position checks that needed no Jupiter quote (shown in the data sources line). */
   private quotesSkipped = 0;
   private alertWrite: Promise<void> = Promise.resolve();
@@ -990,12 +990,19 @@ export class DeskEngine {
   /**
    * Whether a position needs a Jupiter quote this check (DESK.exits.quote): always for exits that depend on every
    * price (an active trailing stop or profit lock, market-cap levels, scale-ins), otherwise when the last quote is old or
-   * the DexScreener price is near the stop or the target or moved since the last quote.
+   * the DexScreener price or the on-chain pool price is near the stop or the target or moved since the last quote.
    */
-  private quoteDue(p: DeskPosition, profile: StrategyProfile, dexPrice: number | null): boolean {
+  private quoteDue(p: DeskPosition, profile: StrategyProfile, dexPrice: number | null, cap = this.liveCap(p.mint)): boolean {
     const q = DESK.exits.quote, last = this.lastQuote.get(p.mint), x = profile.exits, now = Date.now();
     if (!last || now - last.at >= q.maxAgeMs || dexPrice === null || !p.entryPriceUsd) return true;
     const cost = exactNumber(BigInt(p.costLamports)), peakPct = (exactNumber(BigInt(p.peakValueLamports)) - cost) / cost * 100;
+    // The pool read on-chain every 4 s (GOLDEN POCKET's reserves, the curve) leads DexScreener by 10–30 s on a fresh
+    // pool: a fall that starts between two quotes is re-quoted at once (5 Oct: CRYPTO −31 % → −95 % in 11 s, CRASH and C2).
+    if (cap !== null && last.cap) {
+      const lastPct = p.lastValueLamports ? (exactNumber(BigInt(p.lastValueLamports)) - cost) / cost * 100 : 0;
+      const onchainPct = ((1 + lastPct / 100) * (cap / last.cap) - 1) * 100;
+      if (Math.abs(cap / last.cap - 1) * 100 >= q.movePct || onchainPct <= -(x.stopLossPct - q.nearStopPts)) return true;
+    }
     if ((x.trailing && peakPct >= x.trailing.activationPct) || (x.giveback && peakPct >= x.giveback.lockPeakPct)) return true;
     if (x.marketCap || p.stopUsd != null || p.targetUsd != null || profile.scaleIn?.length || x.holdUntilMultiple !== undefined) return true;
     const implied = (dexPrice / p.entryPriceUsd - 1) * 100;
@@ -1056,7 +1063,7 @@ export class DeskEngine {
       try {
         const q = await requestScope.run({ category: 'position' }, () => this.d.jupiter.quote({ inputMint: p.mint, outputMint: SOL_MINT, amountRaw: BigInt(p.qtyRaw), slippageBps: profile.slippageBps }));
         value = BigInt(q.outAmount);
-        this.lastQuote.set(p.mint, { at: Date.now(), dexPrice });
+        this.lastQuote.set(p.mint, { at: Date.now(), dexPrice, cap: this.liveCap(p.mint) });
       } catch (error) {
         if (refused(error)) { await this.unroutable(id, ledger, p, error); continue; }
         if (Date.now() - (this.valuationLog.get(p.mint) ?? 0) >= DESK.exits.valuationLogMs) {
@@ -1399,15 +1406,21 @@ export class DeskEngine {
    * executable quote. Null when the token was not seen in a recent scan.
    */
   private marketCapNow(p: DeskPosition): number | null {
-    // A curve token watched by the opening screen: its market cap read from the curve seconds ago.
-    const o = this.d.opening?.get(p.mint);
-    if (o?.lastUsd != null && o.lastSampleAt != null && Date.now() - o.lastSampleAt <= 15_000 && (o.status === 'SIGNAL' || o.status === 'STRONG')) return o.lastUsd;
-    // A graduated pool watched by GOLDEN POCKET: its market cap from the pool's reserves seconds ago.
-    const g = this.d.golden?.get(p.mint);
-    if (g?.lastUsd != null && g.lastSampleAt != null && Date.now() - g.lastSampleAt <= 15_000) return g.lastUsd;
+    const live = this.liveCap(p.mint);
+    if (live !== null) return live;
     const m = this.candidates.get(p.mint)?.metrics;
     if (!m?.marketCapUsd) return null;
     return m.priceUsd && p.lastPriceUsd ? m.marketCapUsd * p.lastPriceUsd / m.priceUsd : m.marketCapUsd;
+  }
+
+  /** The market cap read on-chain seconds ago (≤ 15 s), else null. */
+  private liveCap(mint: string): number | null {
+    // A curve token watched by the opening screen: its market cap read from the curve.
+    const o = this.d.opening?.get(mint);
+    if (o?.lastUsd != null && o.lastSampleAt != null && Date.now() - o.lastSampleAt <= 15_000 && (o.status === 'SIGNAL' || o.status === 'STRONG')) return o.lastUsd;
+    // A graduated pool watched by GOLDEN POCKET: its market cap from the pool's reserves.
+    const g = this.d.golden?.get(mint);
+    return g?.lastUsd != null && g.lastSampleAt != null && Date.now() - g.lastSampleAt <= 15_000 ? g.lastUsd : null;
   }
 
   /** Positions that count against a strategy's slots: a position without a sell route for longer than the write-off delay does not. */

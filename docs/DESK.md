@@ -628,7 +628,11 @@ Runs TEST on live data (both strategies; `--no-crash` / `--no-fair` to switch on
   10 s old, when that price is within 12 points of the stop or 15 of the target, when it moved 5 % since the last quote,
   and near the time stop. An active trailing stop or profit lock, market-cap and pocket levels, scale-ins and early
   warnings are quoted at every check. Every exit is still decided and booked on an executable Jupiter quote; the
-  execution path shows how many checks needed none.
+  execution path shows how many checks needed none. A pool the desk reads on-chain (GOLDEN POCKET's 4-s reserve
+  samples, which cover fresh graduations and every held pool, or the curve) is watched the same way: a 5 % move or a
+  price within 12 points of the stop re-quotes at once, because DexScreener lags 10–30 s on a fresh pool. One-block
+  rugs still fill far past any stop (5 Oct evening: CRYPTO, Catoppy and ROOMS went from flat or up to −83…−95 % between
+  two checks).
 - With Phantom, empty token accounts are not closed automatically (closing needs its own Phantom signature), so their rent stays locked. With the local key they are closed after each exit (see *Costs per trade*).
 - Token-account rent (≈ 0.0015–0.002 SOL per new token) stays locked after an exit until the account is closed; the desk reports it as reserved, not as a fee.
 - The real Phantom signature and Auto-Confirm flow can only be verified by the wallet owner.
