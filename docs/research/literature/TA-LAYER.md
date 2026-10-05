@@ -63,3 +63,26 @@ All at phone fill (+45 s) and bot fill (+2 s).
   with a test that live and backtest give the same values;
 - the two alert lines;
 - the TA1–TA3 variants in the qualification run.
+
+## Owner's case, 5 Oct: `8nPoBHiBM6pybxMws9PA2JRb9BjkppBfqcZGmot4DMBC`, a range after a run
+
+Owner: launched 4 Oct 22:30, ran to $2.1M, then from about 01:15 on 5 Oct held a **range of $500–800K** without
+breaking it. "The longer it holds, the more likely the upside." I could not check the chart: the price sources are
+blocked in this session.
+
+**Why Raven sent no INFO, from the code:**
+- the address does not end in `pump`, so it is probably not a pump.fun launch, and the observer only watches
+  pump.fun;
+- the verified-coin INFO needs ≥ $1M market cap, a Jupiter check, a place on Jupiter's trending/organic/traded lists
+  (or the watchlist), **and** +15 % in the hour. A coin ranging at $500–800K fails on market cap and on movement.
+
+A quiet range is exactly what no current alert looks for.
+
+| # | Hypothesis | Definition (point in time) | Test | Passes if |
+| --- | --- | --- | --- | --- |
+| TA4 | **A long range after a run breaks upward more often, the longer it holds.** Coins that ran ≥ 3× from launch and then traded in a band whose high is ≤ 1.8× its low (here $500–800K = 1.6×) for ≥ 4 h | hourly candles complete by T; the band is defined by the last 4 h, and it stays a band while no hourly close leaves it | on the ladder's coins (`research:fundamentals`, all chains), when the band breaks: up (a close above the band) against down. Split by how long the band held: 4–8 h, 8–24 h, > 24 h | the share of upward breaks rises with duration and is above 50 % for > 8 h, on ≥ 50 bands per bucket |
+| TA4-trade | Buy the first hourly close above the band; stop below the band's high (the old resistance, as in TA1); target the run's high | as TA4 | phone fill, costs as the gate | the standard gate on ≥ 100 trades |
+
+If TA4 holds, a **RANGE** alert ("held $500–800K for 14 h; broke out at $830K; stop $760K") follows as a separate,
+switchable phone alert for coins between $100K and $10M. Until then, coins like this one go on the watchlist by hand
+and are flagged with a date (`FLAG-LEDGER.md`).
