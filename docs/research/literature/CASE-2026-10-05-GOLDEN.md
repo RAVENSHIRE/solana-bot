@@ -55,3 +55,14 @@ not make a rule, but they point at the same split as P1. GOLDEN's −33 % backte
 | # | Hypothesis | Test | Passes if | Cost |
 | --- | --- | --- | --- | --- |
 | P2 | **GOLDEN only-up works only near the graduation value.** Shadow-trade (no money) every only-up fill with `poolJumpX` ≤ 3, at bot speed (2 s after the alert) and at phone speed (45 s), with GOLDEN's own exits | `SIG`/`RES`-style shadow records for the golden tracker, judged on the pool's minute candles | after ≥ 30 shadow trades: mean after costs > 0 at the fill speed the desk would use, and the `poolJumpX` > 3 group is worse | the golden tracker writes shadow records (it already has the pool candles); no new feed |
+
+## Third case, 5 Oct 15:45 UTC: `HpkDyHK7avch8TS3raZ6mifBjZoUHRgvWwgzRQL1RXFR` (owner: "4x")
+
+"Only up · first 2 candles only up to $98.4K → back to $83.2K, within 12 % of candle 2 ($86.4K), stop $82.0K".
+Market cap $87.6K, liquidity $25.1K, 5-minute volume $33.9K, 5 minutes +81 %. Data DEGRADED (26), oldest input 50 s.
+
+The pool's first two minutes topped at $98.4K, about 2× a typical graduation value (~$48K at $118/SOL; this coin's
+own graduation price is not in the alert). That puts it in P2's `poolJumpX` ≤ 3 group, like "Using", and far from
+the $5.25M rug. The entry was again a real dip: −15 % from the high. So far three cases, all consistent with P2:
+two sane openers ran, one 100× opener rugged. **Three known cases are still not evidence.** P2's shadow test
+(≥ 30 trades, bot and phone speed) decides.
