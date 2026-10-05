@@ -43,30 +43,26 @@ search results gave. No numbers are quoted.
 The section below cites only this repository, which was opened and read. It does not say what the literature
 recommends. Once the sources are open, each point gets checked against them.
 
-### Gate gaps, ranked
+### Gate gaps, ranked (updated 5 Oct after the CTO's gate changes)
 
-1. **The live check is judged at a lower cost than the backtest.** `research-qualify.ts:23` runs the gate with
-   `fixedUsd` 0.10. The live judge, `CallEngine` (`calls.ts:159`), falls back to `DIRECT_DEFAULTS.fixedUsd` = 0.03
-   (`direct.ts:18`), because `research-observe.ts:59` passes no `costs`. On a $2 trade that is 3.5 percentage points
-   per trade in the live judge's favour. The rule "no average loss over 30 live calls" is therefore easier to pass
-   than the backtest it is meant to confirm. This is a one-line fix for the CTO: pass the gate's costs to
-   `CallEngine`.
-2. **Many candidates, no correction for searching.** The catalog has 10 groups. Their delays give 40
-   (group, delay) pairs: 6 groups × 5 delays, 2 × 2 (`organic*` from 60 s), and 2 × 3 (`sprint*` from 30 s). Each
-   pair picks the best of 12 exits (or 6 fast exits), so the tuning period searches 34 × 12 + 6 × 6 = **444
-   configurations**. Then **40 winners** go to the later period, and any one that passes reaches the phone. The
-   later-period test is "mean > 0, n ≥ 100, hit rate ≥ break-even". It has no significance level and no adjustment
-   for the 40 parallel tries. With fat-tailed returns, one or two of 40 rules can have a positive mean on 100 trades
-   by chance alone.
-3. **Repeated looks.** The gate reruns every 6 h on a rolling 48 h (`docs/RESEARCH.md`). Each rerun is another try
-   on overlapping data. A rule that passes once becomes a CALL at once, and the 30-call live check only removes it
-   later.
-4. **One split, no gap between the periods.** The split is a single cut at 60 % of launches by creation time. A
-   15- or 60-minute hold from the last tuning launches can overlap the first validation launches, and the same
-   market hour lands on both sides. The gate has no purging, no embargo and no second fold.
-5. **Mean only.** The gate has no check on how the profit is spread: the median, the share of profit from the top
-   few trades, or the profit with the best 1–2 % of trades removed. A rule carried by one GOOP-HEAD-like spike
-   passes the same as a steady one.
+Fixed on the base branch since 3 Oct: live calls are judged at the gate's costs (`calls.ts:161`, `GATE_COSTS`). The
+gate now buys at the owner's speed (`PHONE_FILL_MS` 45 s), runs a bootstrap luck test with Holm's correction at 0.05
+over all rules in the run, and drops a rule that is carried by its best 1 % of trades. That covers old gaps 1, 2 and
+5. Still open:
+
+1. **The 48 h window is too short for the luck test it now applies.** See "What it takes to pass" below: at n ≈ 100
+   a rule needs about +11 % average after costs. A realistic edge of a few percent needs several hundred to a
+   thousand later trades, which the narrow groups only reach over weeks of data. This is not a change to the
+   criteria: it is the window the criteria are applied to. It is for the owner and the CTO to decide.
+2. **`xCaPost` has look-ahead against the live observer.** The backtest counts a CA post as known 30 s after its post
+   time (`dataset.ts`, `post.at + X_POST_LATENCY_MS <= end`). The live observer reads X only at +20 s and +6 min,
+   so a post made at +40 s is in the backtest at 120 s but unknown live until about +6 min. The catalog does not use
+   the field yet (`rules.ts`). Any rule that does must use the read time (`XT` obs ≤ T); see R3.
+3. **Repeated looks.** The gate reruns every 6 h on overlapping windows. Holm corrects within a run, not across
+   runs, so a rule can pass once by luck in one of many runs. Suggestion: require a pass in two runs whose later
+   periods do not overlap before the first CALL.
+4. **One split, no gap between the periods.** A 60-minute hold from the last tuning launches can overlap the first
+   validation launches. A one-hour embargo at the cut would remove that.
 
 ### Hypotheses (from the desk's own design, not the literature)
 
@@ -81,11 +77,60 @@ here with no look-ahead.
 | H3 | Same-slot buyers at creation (bundles) mark rugs. New feature `bundleShare`: the share of tokens bought, up to t, by wallets other than the creator whose trade sits in the creation slot or the next one (`Trade.slot`, observed ≤ t) | `bundleShare ≥ 0.2` as an exclusion | 15, 30, 60 s | as H2 | high | medium: a new feature in `dataset.ts` and a live-parity test |
 | H4 | The gate's pass rate under permutation: shuffle each launch's group labels and rerun the gate 100 times. The share of reruns where any rule qualifies is the gate's false-pass rate | none (a test of the gate itself) | all | this sets a bar, it is not a call. If it is above 5 %, tighten the gate before trusting a CALL | very high: it tells whether a future CALL means anything | low: offline script |
 
+## Next rules for the gate, ranked (5 Oct, at phone speed)
+
+Context from the main session (5 Oct, 12:05 UTC run): 48 h, 26,496 normal launches, bought 45 s after the call.
+**0 of 40 rules qualify.** The best is "organic demand and an own X account" at 120 s, with a +100 % target, a
+−20 % stop and 60 min max: later average −0.9 % (n 95, needs 100), target hit 15 % (needs 16 %), luck p 0.58 (needs
+≤ 0.0013). Every other rule is −7.5 % or worse; live calls lose 6–8 %.
+
+### What it takes to pass (my estimate, not gate output)
+
+Holm's first threshold over 40 rules is 0.05 / 40 = 0.00125, a one-sided z of about 3.0. So a rule needs a later
+average of at least **3.0 × σ / √n**.
+
+To estimate σ for the best rule's exit, I treat the outcomes as two points:
+- a winner nets about **+90 %** (2× gross, 1.25 % fee per side, $0.10 on $2);
+- with a 15 % hit rate and a −0.9 % mean, the losers then average about **−17 %**;
+- that gives **σ ≈ 38 %**.
+
+The real distribution has more spread, so these bars are optimistic:
+
+| Later trades n | Mean needed after costs | Target hit rate needed (+100 % exit, losers at −17 %) |
+| --- | --- | --- |
+| 100 | ≈ +11.5 % | ≈ 27 % |
+| 300 | ≈ +6.6 % | ≈ 22 % |
+| 1,000 | ≈ +3.6 % | ≈ 19 % |
+
+The best rule hits 15 %. **No filter on today's features is likely to lift it to 27 %.** Passing needs either a much
+stronger signal or several hundred later trades, which means more data than 48 h (gate gap 1). This shapes the
+ranking below: rules that keep their sample large and lose little to the 45 s delay come first.
+
+Pre-register **only these three**. Each new rule raises Holm's count (40 → 43, a threshold of 0.00116). All three
+use the existing exit menu, chosen on the tuning period as usual.
+
+| Rank | Rule | Decision | Definition (Features at T, no look-ahead) | Why it should beat −0.9 % | Exits | Sample needed | Data / cost |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| R1 | `steady300`: steady, broadly held curves | 300 s (a new catalog delay; 300 is already a `DECISION_S` time) | `progress` 0.15–0.60 · `velocity60` > 0 and ≤ 0.15 (rising under 15 % of the curve per minute) · `effectiveBuyers` ≥ 10 · `top1` < 0.15 · `top5` < 0.45 · `devSold` false · `sellShare` < 0.45 · not `mayhem` · not `gapInWindow` | The 45 s delay costs most on fast curves: the price runs while the owner opens FOMO. A slow, rising curve loses little in 45 s. By 300 s most sniper and bundle dumps have happened, and broad holding with the dev still in is the organic profile without the sprint. My inference: the best rule today is at the latest delay offered (120 s), which fits "later is better at phone speed" | `EXITS` menu: +40/+100 %, stop −20/−35 %/none, 15/60 min | ≥ 100 later trades, realistically 300+ (mean ≥ +6.6 %). Count the matches in the last 48 h first; under 250 means the window must grow | none new; one catalog delay |
+| R2 | `organicXClean`: the best rule minus its rug markers | 120 s | `organic` and `hasX` (today's best group), excluding `creatorLaunches` ≥ 2 with `creatorGraduations` = 0 (serial creators, H1), and excluding `top5` ≥ 0.6 (concentration, H2) | It starts closest (−0.9 %, 1 point of hit rate short of break-even). The exclusions remove launches whose losses are structural (repeat creators who never graduate, a few wallets holding the supply). It only needs to remove losers faster than winners | Fixed in advance to today's best: +100 % target, −20 % stop, 60 min (no exit search, which also removes tuning freedom) | It loses sample (95 → fewer). At ~5 later trades an hour, n ≈ 300 needs about 6 days of data and n ≈ 1,000 about 3 weeks | none new |
+| R3 | `ownCaSeen`: the project posted its own CA, as the live observer saw it | 420 s (after the +6 min X read plus fetch time) | `organic` and a new feature `xCaPostSeen`: an `XT` record by the launch's own linked handle, with `mint` = 1, **observed (obs) ≤ T** and posted ≤ T · and `xFollowers` ≥ 300 from an `XP` read with obs ≤ T | A team that posts its own address is the strongest non-chart signal in the desk's cases (AGENCY; the Sir Cat copycat had no own CA post and was rightly skipped). Using the read time removes the look-ahead in `xCaPost` (gate gap 2) | `EXITS` menu | Probably small, because own CA posts by 6 min are rare. Count them in the ledger first; likely 1–2 weeks of data for n ≥ 100 | one new feature with a live-parity test, one catalog delay |
+
+Kept out of the gate for now:
+- W1 (tracked wallets) waits for the wallet addresses.
+- E1–E3 (established coins) belong to the ladder, not this launch gate. The ladder's first numbers (5 Oct, 685 coins,
+  554 samples) argue for small targets and no MICRO tier: within 24 h, only 6 % doubled and 24 % halved first, MICRO
+  coins halved first 55 % of the time, and MID/HIGH coins doubled 1–2 % of the time.
+
+Open items: the @roundtablespace post of 4 Oct is still unread (the owner can paste its text). @massivedotgg was
+read in part ("this is massive. 10.10.26 Drop your $SOL address"). On the watchlist: SI is 83 % below its high, with
+a mass-launcher developer and holders −2.3 %/24 h; WWW is 93 % below its high, with liquidity −31 %/24 h. Neither
+fits E1 (holder growth).
+
 ## Best practice the desk most obviously lacks
 
-From the code alone: **a correction for how many rules are tried before one is called** (gap 2, measured by H4).
-The research platform's experiment pipeline already computes a deflated Sharpe ratio (`experiments/runner.ts`). The
-gate that decides what reaches the phone (`qualify.ts`) does not use it.
+Updated 5 Oct: the gate now corrects for the number of rules (Holm over a bootstrap p-value), which was the gap
+named here on 3 Oct. What the desk now most obviously lacks is **enough sample for that test**: the 48 h window
+gives the best rule 95 later trades, while a realistic edge needs several hundred (gate gap 1).
 
 See also [FLAG-LEDGER.md](FLAG-LEDGER.md): the owner's idea of scoring every flag (watchlist, INFO, known cases) as
 a research point, with three more hypotheses (F1–F3). [NARRATIVE-REGIME.md](NARRATIVE-REGIME.md): narratives, leaders
