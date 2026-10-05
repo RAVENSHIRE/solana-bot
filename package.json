@@ -53,7 +53,8 @@
     "test:research:node": "tsc -p tsconfig.research.json && node --test dist-research/tests/*.test.js",
     "test:desk": "node --import tsx --test tests/desk.test.ts",
     "research:golden-shadow": "node --import tsx src/scripts/golden-shadow-report.ts",
-    "research:rug-entry": "node --max-old-space-size=2048 --import tsx src/scripts/research-rug-entry.ts"
+    "research:rug-entry": "node --max-old-space-size=2048 --import tsx src/scripts/research-rug-entry.ts",
+    "research:w-pattern": "node --max-old-space-size=3072 --import tsx src/scripts/research-w-pattern.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",
