@@ -149,6 +149,18 @@ which is code work for the main session.
 | G1 | Fast graduate, ≤ 180 s | at graduation (the `X`/`G` record's obs), filled 45 s later | curve completed ≤ 180 s after creation · `top1` < 0.10 · `effectiveBuyers` ≥ 30 at graduation · `devSold` false · not `mayhem` | +40/+100 % targets, −30 % stop, 60 min and 24 h, on pump-amm pool prices | standard gate on pool prices |
 | G1b | Fast graduate, ≤ 300 s | as G1 | as G1, completed ≤ 300 s after creation | as G1 | as G1 |
 
+**INFO as two strategies (owner, 5 Oct: "within the first 30 min, more time is more risk"; an INFO coin needs a
+check after graduation).** These replace F1/F1′ and are pre-registered on 5 Oct before scoring any INFO data. Both
+count in the Holm family.
+
+| # | Rule | Decision | Entry | Exits (fixed) | Data |
+| --- | --- | --- | --- | --- | --- |
+| F1a | **INFO, early trade**: every `INFO` (own CA post by the project account, checkmark or ≥ 1,000 followers) | the INFO record's obs | 45 s later (phone) and 2 s later (bot), on the curve | +100 % target, −35 % stop, **30 min max**; a graduation inside the hold sells at the graduation price | the ledger as it is (curve candles, `INFO`) |
+| F1b | **INFO coin after graduation**: an INFO coin whose curve completes within 6 h of its INFO, excluding a pool that opens ≥ 10× its graduation value (P1) | the `X`/`G` record's obs (like G1) | 45 s later, on the pump-amm pool | +100 % target, −30 % stop, 60 min and 24 h | post-graduation pool prices (gate gap 5) |
+
+A coin can be traded by both: F1a in its first 30 minutes, then F1b after graduation. They are judged separately.
+CRWLR and Web are known cases and are excluded from both.
+
 Kept out of the gate for now:
 - W1 (tracked wallets) waits for the wallet addresses.
 - E1–E3 (established coins) belong to the ladder, not this launch gate. The ladder's first numbers (5 Oct, 685 coins,
