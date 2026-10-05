@@ -124,7 +124,8 @@ not simulated at all. G1 in [CASE-2026-10-05-WEB.md](CASE-2026-10-05-WEB.md) (a 
 the pool) is the candidate for that class. It needs post-graduation prices first (gate gap 5). The 5 Oct case "Using"
 ([CASE-2026-10-05-USING.md](CASE-2026-10-05-USING.md)) adds a cheap feature family, tweet coins (T1, T2), and a
 test of the dev-sold filter (D1). The GOLDEN POCKET alerts on $1M+ openers
-([CASE-2026-10-05-GOLDEN.md](CASE-2026-10-05-GOLDEN.md)) add an exclusion for G1 (P1).
+([CASE-2026-10-05-GOLDEN.md](CASE-2026-10-05-GOLDEN.md)) add an exclusion for G1 (P1). The execution path, ranked changes for the CTO:
+[EXECUTION.md](EXECUTION.md) (X1–X8).
 
 Kept out of the gate for now:
 - W1 (tracked wallets) waits for the wallet addresses.
