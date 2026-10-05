@@ -115,24 +115,32 @@ const transferTo = (ix: Ix, wallet: string): string | null => {
 };
 
 /** The holder scan over a plain Solana RPC endpoint (Helius or any other). */
-export function rpcHolders(connection: Connection): HolderRpc {
+/** Runs one RPC call: directly on a connection, or through the desk's connection manager (rate limit, failover). */
+export type RpcRun = <T>(label: string, fn: (c: Connection) => Promise<T>) => Promise<T>;
+
+/**
+ * The holder scan over the RPC. Pass the desk's runner rather than one connection: the public mainnet node refuses
+ * getTokenLargestAccounts (429), and a connection picked once at startup stays on it whenever Helius was cooling down then.
+ */
+export function rpcHolders(rpc: Connection | RpcRun): HolderRpc {
+  const run: RpcRun = typeof rpc === 'function' ? rpc : (_label, fn) => fn(rpc);
   const keys = (xs: string[]) => xs.map(x => new PublicKey(x));
   const chunks = <T>(xs: T[], n: number) => Array.from({ length: Math.ceil(xs.length / n) }, (_, i) => xs.slice(i * n, i * n + n));
   return {
-    supply: async mint => (await connection.getTokenSupply(new PublicKey(mint))).value.uiAmount ?? 0,
-    largest: async mint => (await connection.getTokenLargestAccounts(new PublicKey(mint))).value.map(a => ({ account: a.address.toBase58(), amount: a.uiAmount ?? 0 })),
-    owners: async accounts => (await Promise.all(chunks(accounts, 100).map(c => connection.getMultipleParsedAccounts(keys(c))))).flatMap(r => r.value.map(a => {
+    supply: async mint => (await run('holders:supply', c => c.getTokenSupply(new PublicKey(mint)))).value.uiAmount ?? 0,
+    largest: async mint => (await run('holders:largest', c => c.getTokenLargestAccounts(new PublicKey(mint)))).value.map(a => ({ account: a.address.toBase58(), amount: a.uiAmount ?? 0 })),
+    owners: async accounts => (await Promise.all(chunks(accounts, 100).map(ch => run('holders:owners', c => c.getMultipleParsedAccounts(keys(ch)))))).flatMap(r => r.value.map(a => {
       const data = a?.data as { parsed?: { info?: { owner?: string } } } | Buffer | undefined;
       return data && !Buffer.isBuffer(data) ? data.parsed?.info?.owner ?? null : null;
     })),
-    programs: async addresses => (await Promise.all(chunks(addresses, 100).map(c => connection.getMultipleAccountsInfo(keys(c))))).flat().map(a => a?.owner.toBase58() ?? null),
+    programs: async addresses => (await Promise.all(chunks(addresses, 100).map(ch => run('holders:programs', c => c.getMultipleAccountsInfo(keys(ch)))))).flat().map(a => a?.owner.toBase58() ?? null),
     history: async wallet => {
-      const sigs = await connection.getSignaturesForAddress(new PublicKey(wallet), { limit: HOLDERS.busyTxs });
+      const sigs = await run('holders:history', c => c.getSignaturesForAddress(new PublicKey(wallet), { limit: HOLDERS.busyTxs }));
       const last = sigs.at(-1);
       return { count: sigs.length, oldest: last ? { signature: last.signature, at: last.blockTime ? last.blockTime * 1000 : null } : null };
     },
     funder: async (wallet, signature) => {
-      const tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0 });
+      const tx = await run('holders:funder', c => c.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0 }));
       if (!tx) return null;
       const all: Ix[] = [...tx.transaction.message.instructions, ...(tx.meta?.innerInstructions ?? []).flatMap(i => i.instructions)];
       for (const ix of all) { const f = transferTo(ix, wallet); if (f) return f; }

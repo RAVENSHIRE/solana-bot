@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { Keypair } from '@solana/web3.js';
+import { Keypair, PublicKey, type Connection } from '@solana/web3.js';
 import { addToWatchlist, checkCoin, verdict, type CoinCheck } from '../src/research/coin-check';
-import type { HolderRpc } from '../src/research/holders';
+import { rpcHolders, type HolderRpc } from '../src/research/holders';
 
 const MINT = Keypair.fromSeed(new Uint8Array(32).fill(91)).publicKey.toBase58();
 const SYSTEM = '11111111111111111111111111111111';
@@ -100,4 +100,16 @@ test('watchlist: a checked coin is added once, as the observer reads it', async 
   assert.deepEqual(list, [{ mint: MINT, note: 'SI (Super Intelligence) coin check' }]);
   await assert.rejects(addToWatchlist(file, '0xabc', 'evm'), /INVALID_MINT/);
   await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('holder scan RPC: every call goes through the desk\'s runner (rate limit, failover), not one connection fixed at startup', async () => {
+  // Raven, 5 Oct: the connection picked at startup was the public node, which refuses getTokenLargestAccounts (429).
+  const labels: string[] = [];
+  const conn = { getTokenSupply: async () => ({ value: { uiAmount: 1e9 } }),
+    getTokenLargestAccounts: async () => ({ value: [{ address: new PublicKey(MINT), uiAmount: 5e7 }] }) } as unknown as Connection;
+  const h = rpcHolders(async (label, fn) => { labels.push(label); return fn(conn); });
+  assert.equal(await h.supply(MINT), 1e9);
+  assert.deepEqual(await h.largest(MINT), [{ account: MINT, amount: 5e7 }]);
+  assert.deepEqual(labels, ['holders:supply', 'holders:largest']);
+  assert.equal(await rpcHolders(conn).supply(MINT), 1e9, 'a plain connection still works (scripts, the observer)');
 });

@@ -199,7 +199,7 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
       if (!sol) throw new DeskReject('SOL_PRICE_UNAVAILABLE');
       return walletHistory({ wallet, solUsd: sol, rpc, dex: shared.dex });
     };
-    const watchFile = path.join(o.dataDir, 'research', 'watch-tokens.json'), holders = rpcHolders(rpc.primary);
+    const watchFile = path.join(o.dataDir, 'research', 'watch-tokens.json'), holders = rpcHolders((label, fn) => rpc.execute(label, fn));
     return { engines, capital, operational, liveSigner: live.signer, watch, assistant, walletHistory: history, notify: alerts.notify,
       coinCheck: mint => checkCoin(mint, { jupiterApiKey: env.JUPITER_API_KEY?.trim() || null, holders, watchFile }),
       watchlistAdd: async (mint, note) => { await fs.mkdir(path.dirname(watchFile), { recursive: true }); return addToWatchlist(watchFile, mint, note); },
