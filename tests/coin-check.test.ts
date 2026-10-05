@@ -83,6 +83,11 @@ test('coin check: four sources in one result, a source that does not answer is l
   const partial = await checkCoin(MINT, { fetcher: down, holders: null, now: () => now });
   assert.ok(partial.errors.some(e => e.startsWith('Jupiter')), partial.errors.join('; '));
   assert.equal(partial.market!.mcapUsd, 880_000); assert.equal(partial.holders.scan, null);
+  // The RPC refuses once (429: the desk and the observer use it too): the holder scan is tried again, not dropped.
+  let refused = 0;
+  const busy: HolderRpc = { ...holders, largest: async (m: string) => { if (!refused++) throw new Error('429 : Too Many Requests'); return holders.largest(m); } };
+  const retried = await checkCoin(MINT, { fetcher, holders: busy, now: () => now, retryMs: 1 });
+  assert.equal(refused, 2); assert.deepEqual(retried.errors, []); near(retried.holders.scan!.top20Pct, 11);
   await assert.rejects(checkCoin('not-a-mint'), /INVALID_MINT/);
   await fs.rm(dir, { recursive: true, force: true });
 });

@@ -48,12 +48,22 @@ export interface CoinCheckDeps {
   holders?: HolderRpc | null;
   watchFile?: string | null;
   now?: () => number;
+  /** Wait before the one retry of a holder scan the RPC refused as too many requests (429). */
+  retryMs?: number;
 }
 
 const usd = (x: number | null | undefined) => x == null ? '–' : x >= 1e9 ? `$${(x / 1e9).toFixed(2)}B` : x >= 1e6 ? `$${(x / 1e6).toFixed(2)}M` : x >= 1e3 ? `$${(x / 1e3).toFixed(1)}K` : `$${x.toFixed(0)}`;
 const pct = (x: number) => `${x >= 0 ? '+' : ''}${x.toFixed(Math.abs(x) < 10 ? 1 : 0)}%`;
 const num = (x: unknown) => typeof x === 'number' && Number.isFinite(x) ? x : null;
 const when = (ms: number) => `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+/** The holder scan shares the RPC with the desk and the observer: a 429 (too many requests) is tried once more after a pause. */
+async function scanOnce(rpc: HolderRpc, mint: string, dev: string | null, now: number, retryMs: number): ReturnType<typeof scanHolders> {
+  try { return await scanHolders(rpc, mint, { dev, now }); } catch (error) {
+    if (!/429|too many requests/i.test((error as Error).message ?? '')) throw error;
+    await new Promise(r => setTimeout(r, retryMs));
+    return scanHolders(rpc, mint, { dev, now });
+  }
+}
 export const isSolanaMint = (s: string) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s);
 
 /** The reading of the numbers: what the owner would otherwise piece together by hand. */
@@ -131,7 +141,7 @@ export async function checkCoin(mint: string, d: CoinCheckDeps = {}): Promise<Co
   const supply = m ? impliedSupply(m) : null, young = created !== null && now - created < 40 * 86_400_000;
   const [bars, holderScan] = await Promise.all([
     m?.pairAddress && supply ? readHistory('solana', m.pairAddress, mint, young ? 'hour' : 'day', supply, { fetcher: d.fetcher }).catch(fail('price history')) : Promise.resolve(null),
-    d.holders ? scanHolders(d.holders, mint, { dev: t?.dev ?? null, now }).catch(fail('holder scan')) : Promise.resolve(null),
+    d.holders ? scanOnce(d.holders, mint, t?.dev ?? null, now, d.retryMs ?? 5_000).catch(fail('holder scan')) : Promise.resolve(null),
   ]);
   const a = bars ? athSummary(bars as Bar[]) : null;
   const mcap = num(m?.marketCapUsd) ?? num(t?.mcap), lv = milestoneContext(mcap);
