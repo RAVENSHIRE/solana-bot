@@ -71,3 +71,12 @@ is excluded as a known case.
 2. `calls.ts` `xRead`: write the `INFO` record before the phone check and the hourly cap, with `sent 0/1`, as `SIG`
    already does.
 3. `watch-tokens.json`: add `addedAt`.
+4. OPEN alerts carry an empty evidence line. Owner's case of 5 Oct, Crime Pays
+   (`C6zXoVqL77p2ZLA4Bzdua1P2GGh5ngKj9GwCBupHxUdH`), alert `al_9d986b01…`: "data UNKNOWN (1) · mcap ? · liq ? · v5m ?",
+   although the opening screen knew the market cap to the second ($21.9K at the signal). The cause: the OPEN alert
+   comes from the opening tracker (`engine.ts` `openingPass`), not from a scored candidate. The evidence builder
+   (`alerts/evidence.ts`) finds no candidate, so it marks the data UNKNOWN and prints "?". Fix: pass the opening
+   state into the evidence (`signalUsd` as `marketCapUsd`, open high, low, curve progress, seconds since launch). A
+   curve has no pool, so liquidity and 5-minute volume stay "?", and the line should say "on the curve" rather than
+   "UNKNOWN". The case itself is one OPEN signal; OPEN lost all 7 of its TEST trades (`cases.ts`), so it is scored as
+   a flag, not as evidence that OPEN works.
