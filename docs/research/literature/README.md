@@ -121,7 +121,9 @@ use the existing exit menu, chosen on the tuning period as usual.
 
 **R1–R3 cannot catch fast graduates.** A coin like "Web" (5 Oct) has already graduated at 120–420 s, so it is
 not simulated at all. G1 in [CASE-2026-10-05-WEB.md](CASE-2026-10-05-WEB.md) (a decision at graduation, priced on
-the pool) is the candidate for that class. It needs post-graduation prices first (gate gap 5).
+the pool) is the candidate for that class. It needs post-graduation prices first (gate gap 5). The 5 Oct case "Using"
+([CASE-2026-10-05-USING.md](CASE-2026-10-05-USING.md)) adds a cheap feature family, tweet coins (T1, T2), and a
+test of the dev-sold filter (D1).
 
 Kept out of the gate for now:
 - W1 (tracked wallets) waits for the wallet addresses.
