@@ -138,6 +138,7 @@ test of the dev-sold filter (D1). The GOLDEN POCKET alerts on $1M+ openers
 ([CASE-2026-10-05-GOLDEN.md](CASE-2026-10-05-GOLDEN.md)) add an exclusion for G1 (P1). CRWLR ([CASE-2026-10-05-CRWLR.md](CASE-2026-10-05-CRWLR.md)): an OPEN alert at $13.5K, then an INFO at $12K, that
 ran 4× to graduation through a −47 % dip; a CA-detection bug (`xCaPost` misses a CA on its own line); F1′, I2.
 The insider-exit "RUG" that sold a runner: [CASE-2026-10-05-INSIDER-EXIT.md](CASE-2026-10-05-INSIDER-EXIT.md) (X9).
+MAYHEM strategy (M1, M2, trade-price based): [MAYHEM.md](MAYHEM.md). W1 replaced by W1′ (wallets from the ledger).
 The execution path, ranked changes for the CTO:
 [EXECUTION.md](EXECUTION.md) (X1–X8).
 

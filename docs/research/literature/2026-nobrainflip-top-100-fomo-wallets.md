@@ -75,3 +75,17 @@
 For W1, the **wallet addresses** behind the nine quiet profiles and the top 10. FOMO profiles need a login for the
 API (`docs/RESEARCH.md`: the FOMO token expired), so the owner copies them from the app into
 `data-desk/research/wallets.json` as `[{ "wallet", "fomo", "followers", "addedAt" }]`.
+
+## Update, 5 Oct: W1 as written is blocked
+
+The owner reports that FOMO shows profile names only, not wallet addresses, so the list of quiet wallets cannot be
+built from the article. **W1′ replaces it, with wallets discovered from the desk's own ledger** (every `T` record
+carries the buying wallet):
+
+1. Rank wallets by their early buys (≤ 60 s after creation) on launches created before date D. A wallet is ranked by
+   the share of its buys whose launch later reached 2× or graduated. It needs ≥ 20 such buys to be ranked.
+2. Freeze the top 50 at D.
+3. Judge `trackedBuyers(T) ≥ 1` with that frozen list **only on launches created after D**, at 30–120 s, phone fill,
+   on the standard gate.
+
+No outside data is needed. The danger is ranking and testing on the same launches, which the freeze at D prevents.
