@@ -414,8 +414,8 @@ export class LaunchFeed implements LaunchSource {
       // A failed read is retried twice, 20 s apart; after that the insiders stay unknown (null), which does not block.
       this.track(readInsidersFor(l).catch(() => null).then(v => {
         const tries = (l.insidersTries ?? 0) + 1;
-        if (v === null && tries < 3) { l.insidersTries = tries; l.insidersRetryAt = Date.now() + 20_000; return; }
-        l.insiders = v; this.rate(l, Date.now());
+        if (v === null && tries < 3) { l.insidersTries = tries; l.insidersRetryAt = now + 20_000; return; }
+        l.insiders = v; this.rate(l, now);
       }).finally(() => this.insiderBusy.delete(l.mint)));
     }
     const review = this.o.review;
@@ -423,7 +423,7 @@ export class LaunchFeed implements LaunchSource {
       if (this.reviewBusy.size >= LAUNCH.reviewConcurrency || (this.o.reviewAvailable && !this.o.reviewAvailable(now))) break;
       if (l.review !== undefined || this.reviewBusy.has(l.mint) || l.score < LAUNCH.minScore || !l.xCheckedAt) continue;
       this.reviewBusy.add(l.mint);
-      this.track(review(this.reviewInput(l, now), now).catch(() => null).then(v => { l.review = v; this.rate(l, Date.now()); }).finally(() => this.reviewBusy.delete(l.mint)));
+      this.track(review(this.reviewInput(l, now), now).catch(() => null).then(v => { l.review = v; this.rate(l, now); }).finally(() => this.reviewBusy.delete(l.mint)));
     }
   }
 
