@@ -14,8 +14,20 @@ import type { Dataset, LaunchFacts } from './dataset';
  */
 /** `trailPct`: sell once the price falls this far below its peak since the fill (keeps most of a fast spike). */
 export interface ExitRule { tpPct: number; slPct: number | null; maxHoldMin: number; trailPct?: number | null }
-export interface DirectOptions { delayS: number; latencyMs: number; feePct: number; fixedUsd: number; sizeUsd: number; solUsd: number }
+/**
+ * `fill`: how the buy is priced. `bot` (default): a program buying at once pays the highest price seen between the
+ * decision and `latencyMs` later (the trades already in flight land first). `phone`: a person reads the call on the
+ * phone and taps buy in FOMO `latencyMs` later, at the price of that moment; the hold and the exits start from there.
+ */
+export interface DirectOptions { delayS: number; latencyMs: number; feePct: number; fixedUsd: number; sizeUsd: number; solUsd: number; fill?: 'bot' | 'phone' }
 export const DIRECT_DEFAULTS: Omit<DirectOptions, 'delayS'> = { latencyMs: 2_000, feePct: 1.25, fixedUsd: 0.03, sizeUsd: 2, solUsd: 118 };
+/** From the call leaving the observer to the owner's buy landing: ntfy delivery, reading, opening FOMO, confirming. */
+export const PHONE_FILL_MS = 45_000;
+/**
+ * The qualification gate's costs, and so the judging of its live calls too: $0.10 network/priority per round trip and a
+ * buy at the owner's speed (the phone fill), because every qualified call goes to a person, not a bot.
+ */
+export const GATE_COSTS: Omit<DirectOptions, 'delayS'> = Object.freeze({ ...DIRECT_DEFAULTS, fixedUsd: 0.10, latencyMs: PHONE_FILL_MS, fill: 'phone' as const });
 export interface DirectTrade { mint: string; symbol: string | null; createdObs: number; entryAt: number; entryMcap: number; exitAt: number; exitMcap: number; reason: string; netPct: number; peakPct: number }
 
 interface Point { at: number; h: number; l: number; c: number; trade: boolean }
@@ -39,7 +51,8 @@ export function simulate(l: LaunchFacts, rule: ExitRule, o: DirectOptions, dataE
   const inFlight = path.filter(p => p.trade && p.at > decide && p.at <= fillBy);
   // Nothing traded yet: the launch is not known to be alive, so it is not bought.
   if (!before && !inFlight.length) return null;
-  const entry = Math.max(before?.c ?? 0, ...inFlight.map(p => p.h));
+  // A phone fill pays the last trade before the tap (or, with none in between, the price at the decision).
+  const entry = o.fill === 'phone' ? (inFlight.at(-1)?.c ?? before!.c) : Math.max(before?.c ?? 0, ...inFlight.map(p => p.h));
   const tp = entry * (1 + rule.tpPct / 100), sl = rule.slPct === null ? null : entry * (1 - rule.slPct / 100);
   let exitAt = until, exit: number | null = null, reason = 'TIME', peak = entry;
   const trail = rule.trailPct ? 1 - rule.trailPct / 100 : null;

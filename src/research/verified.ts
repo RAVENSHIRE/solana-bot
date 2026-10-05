@@ -24,13 +24,18 @@ export const VERIFIED = Object.freeze({
   againAfterMs: 12 * 3_600_000, againRisePct: 25, minGapMs: 60 * 60_000,
 });
 
-interface Stats { priceChange?: number; buyVolume?: number; sellVolume?: number; numTraders?: number; numNetBuyers?: number; numOrganicBuyers?: number }
-/** The fields of Jupiter's token API (v2) this module reads. */
+interface Stats {
+  priceChange?: number; buyVolume?: number; sellVolume?: number; numTraders?: number; numNetBuyers?: number; numOrganicBuyers?: number;
+  numBuys?: number; numSells?: number; holderChange?: number; buyOrganicVolume?: number; sellOrganicVolume?: number; liquidityChange?: number;
+}
+/** The fields of Jupiter's token API (v2) this module and the ladder (ladder.ts) read. */
 export interface JupToken {
   id: string; name?: string; symbol?: string; usdPrice?: number; mcap?: number; liquidity?: number; holderCount?: number;
   organicScore?: number; organicScoreLabel?: string; isVerified?: boolean; tags?: string[]; launchpad?: string;
   mintAuthority?: string | null; freezeAuthority?: string | null; firstPool?: { createdAt?: string };
   stats5m?: Stats; stats1h?: Stats; stats6h?: Stats; stats24h?: Stats;
+  dev?: string; audit?: { topHoldersPercentage?: number; devBalancePercentage?: number; devMints?: number; devMigrations?: number };
+  twitter?: string; website?: string;
 }
 export interface WatchToken { mint: string; note?: string }
 export interface VerifiedDeps {
@@ -58,14 +63,36 @@ export function moving(t: JupToken): string | null {
   return `up ${pct(h1)} in 1h`;
 }
 
+/** Jupiter's token API (v2): the free keyless host, and once it refuses, the keyed host (api.jup.ag) from then on. */
+export class JupiterTokens {
+  private keyless = true;
+  constructor(private readonly o: { fetcher?: typeof fetch; apiKey?: string | null } = {}) {}
+
+  async get(path: string): Promise<JupToken[]> {
+    const fetcher = this.o.fetcher ?? fetch;
+    const hosts: Array<[string, Record<string, string>]> = [];
+    if (this.keyless) hosts.push(['https://lite-api.jup.ag', {}]);
+    if (this.o.apiKey) hosts.push(['https://api.jup.ag', { 'x-api-key': this.o.apiKey }]);
+    let last = 'no Jupiter host';
+    for (const [host, headers] of hosts) {
+      const res = await fetcher(`${host}/tokens/v2/${path}`, { headers, signal: AbortSignal.timeout(15_000) }).catch((e: Error) => { last = e.name; return null; });
+      if (res?.ok) { const j = await res.json() as unknown; return Array.isArray(j) ? j as JupToken[] : []; }
+      if (res) last = `HTTP ${res.status}`;
+      // The keyless host is being retired: once it refuses, use the key from then on.
+      if (res && host.includes('lite-api') && [401, 403, 404, 410].includes(res.status) && this.o.apiKey) this.keyless = false;
+    }
+    throw new Error(last);
+  }
+}
+
 export class VerifiedWatch {
   private readonly sent = new Map<string, { at: number; price: number }>();
   private readonly hour: number[] = [];
+  private readonly jupiter: JupiterTokens;
   private timer: NodeJS.Timeout | null = null;
   private busy = false;
-  private keyless = true;
   stats = { checks: 0, tokens: 0, info: 0, errors: 0, lastError: null as string | null };
-  constructor(private readonly d: VerifiedDeps) {}
+  constructor(private readonly d: VerifiedDeps) { this.jupiter = new JupiterTokens({ fetcher: d.fetcher, apiKey: d.jupiterApiKey }); }
 
   private get now(): number { return (this.d.now ?? Date.now)(); }
 
@@ -87,31 +114,15 @@ export class VerifiedWatch {
     } catch { return []; }
   }
 
-  private async jup(path: string): Promise<JupToken[]> {
-    const fetcher = this.d.fetcher ?? fetch;
-    const hosts: Array<[string, Record<string, string>]> = [];
-    if (this.keyless) hosts.push(['https://lite-api.jup.ag', {}]);
-    if (this.d.jupiterApiKey) hosts.push(['https://api.jup.ag', { 'x-api-key': this.d.jupiterApiKey }]);
-    let last = 'no Jupiter host';
-    for (const [host, headers] of hosts) {
-      const res = await fetcher(`${host}/tokens/v2/${path}`, { headers, signal: AbortSignal.timeout(15_000) }).catch((e: Error) => { last = e.name; return null; });
-      if (res?.ok) { const j = await res.json() as unknown; return Array.isArray(j) ? j as JupToken[] : []; }
-      if (res) last = `HTTP ${res.status}`;
-      // The keyless host is being retired: once it refuses, use the key from then on.
-      if (res && host.includes('lite-api') && [401, 403, 404, 410].includes(res.status) && this.d.jupiterApiKey) this.keyless = false;
-    }
-    throw new Error(last);
-  }
-
   async check(): Promise<void> {
     if (this.busy) return;
     this.busy = true;
     try {
       const now = this.now, watch = new Map(this.watchlist().map(w => [w.mint, w] as const));
       const all = new Map<string, JupToken>();
-      for (const list of VERIFIED.lists) for (const t of await this.jup(`${list}?limit=100`)) all.set(t.id, t);
+      for (const list of VERIFIED.lists) for (const t of await this.jupiter.get(`${list}?limit=100`)) all.set(t.id, t);
       const missing = [...watch.keys()].filter(m => !all.has(m));
-      for (let i = 0; i < missing.length; i += 50) for (const t of await this.jup(`search?query=${missing.slice(i, i + 50).join(',')}`)) if (watch.has(t.id)) all.set(t.id, t);
+      for (let i = 0; i < missing.length; i += 50) for (const t of await this.jupiter.get(`search?query=${missing.slice(i, i + 50).join(',')}`)) if (watch.has(t.id)) all.set(t.id, t);
       let n = 0;
       for (const t of all.values()) {
         const w = watch.get(t.id), checks = [t.isVerified ? 'Jupiter' : null, t.tags?.includes('moonshot-verified') ? 'Moonshot' : null].filter(Boolean) as string[];

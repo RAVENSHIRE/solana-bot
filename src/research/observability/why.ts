@@ -5,14 +5,14 @@ import type { ResearchEvent } from '../events/types';
  * the first stage where the token was lost is the verdict:
  *
  *   SYSTEM_NOT_RUNNING → NEVER_OBSERVED → FILTERED → NO_SIGNAL → SIGNAL_WITHOUT_ALERT → SUPPRESSED_BY_CONFIG
- *   → NO_CHANNEL → DELIVERY_FAILED → DELIVERED
+ *   → SUPPRESSED_BY_LIMIT → NO_CHANNEL → DELIVERY_FAILED → DELIVERED
  *
  * Inputs are whatever was recorded: pipeline stage events and scan decisions (imported from the desk's event log),
  * signal evaluations (tape), AlertGenerated / AlertDelivered (alert evidence) and health snapshots.
  */
 
 export type MissingAlertVerdict = 'SYSTEM_NOT_RUNNING' | 'NEVER_OBSERVED' | 'FILTERED' | 'NO_SIGNAL' | 'SIGNAL_WITHOUT_ALERT' |
-  'SUPPRESSED_BY_CONFIG' | 'NO_CHANNEL' | 'DELIVERY_FAILED' | 'DELIVERED';
+  'SUPPRESSED_BY_CONFIG' | 'SUPPRESSED_BY_LIMIT' | 'NO_CHANNEL' | 'DELIVERY_FAILED' | 'DELIVERED';
 
 export interface MissingAlertReport {
   token: string; window: { from: number; to: number };
@@ -50,6 +50,8 @@ export function explainMissingAlert(events: readonly ResearchEvent[], q: { token
     const delivered = inWindow.filter(e => e.event_type === 'AlertDelivered' && e.payload.alert_id === a.payload.alert_id);
     if (d.decision === 'SUPPRESSED_BY_CONFIG')
       return report('SUPPRESSED_BY_CONFIG', `A ${text(a.payload.kind)} alert was generated at ${iso(a.timestamp)} but DESK_ALERTS selects only ${(d.selectedKinds ?? []).join(', ') || 'the default'}; it went to the dashboard and the event log only.`);
+    if (d.decision === 'SUPPRESSED_BY_LIMIT')
+      return report('SUPPRESSED_BY_LIMIT', `A ${text(a.payload.kind)} alert was generated at ${iso(a.timestamp)} but it was outside the phone's limit for its kind (OPEN: only breakouts within 2 minutes of launch, a few an hour); it went to the dashboard and the event log only.`);
     if (d.decision === 'NO_CHANNEL') return report('NO_CHANNEL', `An alert was generated at ${iso(a.timestamp)} but no phone channel is configured (DESK_NTFY_TOPIC or Telegram).`);
     const failed = delivered.find(e => e.payload.status === 'FAILED' || e.payload.status === 'PARTIAL');
     if (failed) return report('DELIVERY_FAILED', `The alert was sent at ${iso(a.timestamp)} and delivery ${text(failed.payload.status)}: ${text(failed.payload.results)}`);

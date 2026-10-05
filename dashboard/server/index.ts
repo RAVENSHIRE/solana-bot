@@ -31,7 +31,9 @@ await store.start();
 const repo = path.resolve(root, '..');
 const planned = await tradingEnvironment(repo).then(env => deskCapital(env).plannedStartingCapitalUsd).catch(() => null);
 const walletReader = await createWalletReader(repo, planned).catch(() => null);
-const trading = new TradingService(deskFactory(repo));
+// The running session is saved, so a restart (crash, reboot, deploy) brings TEST back, and LIVE back with exits only.
+const trading = new TradingService(deskFactory(repo), { sessionFile: path.join(repo, "data-desk", "desk-session.json"),
+  log: (line) => console.log(`${new Date().toISOString()} ${line}`) });
 const dev = process.argv.includes("--dev");
 const vite = dev
   ? await (
@@ -192,6 +194,7 @@ server.listen(port, "127.0.0.1", () => {
   console.log(
     `Dashboard: http://localhost:${port}\nCheckpoint: ${statePath}${store instanceof DashboardStore ? `\nRuntime telemetry: ${telemetryPath}` : ""}`,
   );
+  void trading.restoreSession();
 });
 server.on("error", (error) => {
   console.error(error.message);

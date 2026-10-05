@@ -151,6 +151,8 @@ export class DeskEngine {
   private pumpUsd: { value: number; at: number } | null = null;
   private copycatSearches = new Map<string, { at: number; pairs: DexPair[] }>();
   private launchAlerts = new Set<string>();
+  /** When the last hour's OPEN alerts went to the phone (the hourly cap). */
+  private readonly openPhoneSent: number[] = [];
   private launchPoll: Promise<void> | null = null;
   /** Every priced token seen, by lower-case ticker and name: the original a copycat imitates is usually among them. */
   private names = new Map<string, Map<string, { mint: string; symbol: string | null; marketCapUsd: number; createdAt: number | null; volume1hUsd?: number | null; at: number }>>();
@@ -160,6 +162,7 @@ export class DeskEngine {
   private loggedSkips = new Map<string, string>();
   /** TEST: sleeves that ran dry and were re-funded; their trades still count in the strategy stats. */
   private cycles = new Map<StrategyId, LedgerState[]>();
+  private readonly damagedCycles: string[] = [];
   private currentScanAt = 0;
   private readonly graduations: GraduationFeed;
   private lastCompletedScanAt = 0;
@@ -227,6 +230,9 @@ export class DeskEngine {
     for (const error of custom.errors) engine.event('FAILED', `Custom strategy not loaded: ${error}`);
     if (d.operational?.deploymentMode !== 'LOCKED') await engine.loadSettings();
     if (d.mode === 'PAPER') for (const id of engine.ids()) { await engine.ledgerFor(id, null); await engine.loadCycles(id); }
+    // Files a power cut left unreadable were moved aside (events.ts, ledger.ts): said once, so a fresh TEST is explained.
+    const damaged = [engine.events.damaged, ...[...engine.ledgers.values()].map(l => l.damaged), ...engine.damagedCycles].filter((f): f is string => !!f);
+    if (damaged.length) engine.event('FAILED', `Unreadable files moved aside (power cut?); ${d.mode === 'PAPER' ? 'TEST starts fresh' : 'the event log starts empty'}: ${damaged.map(f => path.basename(f)).join(', ')}`);
     return engine;
   }
 
@@ -497,7 +503,7 @@ export class DeskEngine {
       this.lastOpeningAt = Date.now();
       this.openingWork = this.openingPass().then(() => undefined).catch(error => this.note('opening', 'FAILED', `Opening screen: ${errorMessage(error)}`)).finally(() => { this.openingWork = null; });
     }
-    if (this.d.golden && !this.goldenWork && Date.now() - this.lastGoldenAt >= GOLDEN.pollMs) {
+    if (this.d.golden && !this.goldenWork && Date.now() - this.lastGoldenAt >= GOLDEN.pollMs && this.goldenWanted()) {
       this.lastGoldenAt = Date.now();
       this.goldenWork = this.goldenPass().then(() => undefined).catch(error => this.note('golden', 'FAILED', `Golden pocket: ${errorMessage(error)}`)).finally(() => { this.goldenWork = null; });
     }
@@ -588,7 +594,8 @@ export class DeskEngine {
     }
     if (d.launches) this.sources['Launch radar (pump.fun, on-chain)'] = `${this.launchList.size} shortlisted · ${d.pumpStream?.healthy(Date.now()) ? 'launches from the research live stream' : 'launches polled from the RPC'} · X pages read without a key · ${d.aiReview ? d.aiReview() : 'Claude review off'}`;
     if (d.opening) { const o = d.opening.counts(); this.sources['Opening screen (curves, every 4 s)'] = `${o.OPENING} in their first minute · ${o.STRONG} strong opens watched · ${o.SIGNAL} breakouts · ${o.RUG} fell below the floor${d.opening.source ? ` · curves ${d.opening.source === 'stream' ? 'from the research live stream' : 'read from the RPC'}` : ''}`; }
-    if (d.golden) { const g = d.golden.counts(); this.sources['Golden pocket (graduated pools, every 4 s)'] = `${g.watched} pools watched · ${g.DIP} dipped · ${g.BROKEN_OUT} broke out, waiting for the retest · ${g.ENTRY} filled`; }
+    if (d.golden) { const g = d.golden.counts(); this.sources['Golden pocket (graduated pools, every 4 s)'] = !this.goldenWanted() ? 'paused: GOLDEN is off and golden alerts do not go to the phone'
+      : `${g.watched} pools watched · ${g.DIP} dipped · ${g.BROKEN_OUT} broke out, waiting for the retest · ${g.ENTRY} filled`; }
     if (d.xfeed) { const x = d.xfeed.status(); this.sources['X feed (X API search)'] = x.configured ? (x.lastError ?? `${x.signals} token posts from ${x.posts} posts`) : 'off — set X_BEARER_TOKEN in .env'; }
     const staged = await this.stage(found.tokens);
     // CRASH is time-critical: safety evidence for pumping young pools first, entries right after, and only then
@@ -1054,7 +1061,8 @@ export class DeskEngine {
       const secs = Math.max(0, Math.round(((state.signalAt ?? now) - state.at) / 1000));
       this.alertOnce(`open:${state.mint}`, `OPEN ${state.symbol}: $${((state.signalUsd ?? 0) / 1000).toFixed(1)}K, ${secs < 120 ? `${secs} s` : `${Math.round(secs / 60)} min`} after launch`,
         [`${state.name}${speed ? ` · ${speed.text}` : ''}`, state.detail, launch?.insiders?.detail ?? '',
-          'Not a qualified call. Fast openers often rug within minutes: take profit early.', fomoUrl(state.mint)].filter(Boolean).join('\n'), 'open');
+          'Not a qualified call. Fast openers often rug within minutes: take profit early.', fomoUrl(state.mint)].filter(Boolean).join('\n'), 'open',
+        secs * 1000 <= OPENING.phoneWithinMs && this.openPhoneSlot(now));
     }
     // A breakout is traded fresh: start a scan now instead of waiting for the next one.
     if (fresh.length && this.strategies.OPEN.enabled && !this.work) this.nextScanAt = Date.now();
@@ -1073,6 +1081,14 @@ export class DeskEngine {
    * and a fill of a pattern GOLDEN buys is alerted at once and queued for the GOLDEN strategy (a scan is started right
    * away). Rugs, impersonators and copycats are never alerted.
    */
+  /**
+   * The golden pocket reads every fresh graduation's pool every 4 s: only while GOLDEN is on in this mode, golden alerts
+   * reach the phone, or GOLDEN still holds a position.
+   */
+  goldenWanted(): boolean {
+    return this.strategies.GOLDEN.enabled || (this.d.alerts ?? DEFAULT_ALERTS).has('golden') || (this.ledgerOf('GOLDEN')?.state.positions.length ?? 0) > 0;
+  }
+
   async goldenPass(now = Date.now()): Promise<GoldenSignal[]> {
     const d = this.d, tracker = d.golden;
     if (!tracker) return [];
@@ -1183,14 +1199,24 @@ export class DeskEngine {
   }
 
   /** One phone alert per key, for the kinds DESK_ALERTS selects (default: none). */
-  private alertOnce(key: string, title: string, body: string, kind: AlertKind): void {
+  /** An OPEN alert may go to the phone: OPEN alerts are switched on and fewer than `OPENING.phonePerHour` went out in the last hour. */
+  private openPhoneSlot(now: number): boolean {
+    if (!(this.d.alerts ?? DEFAULT_ALERTS).has('open')) return false;
+    while (this.openPhoneSent.length && now - this.openPhoneSent[0]! > 3_600_000) this.openPhoneSent.shift();
+    if (this.openPhoneSent.length >= OPENING.phonePerHour) return false;
+    this.openPhoneSent.push(now);
+    return true;
+  }
+
+  /** `phone` false: recorded (and on the dashboard) like any alert, but not sent. */
+  private alertOnce(key: string, title: string, body: string, kind: AlertKind, phone = true): void {
     if (this.launchAlerts.has(key) || !this.d.notify) return;
     this.launchAlerts.add(key);
     if (this.launchAlerts.size > 5_000) this.launchAlerts.delete(this.launchAlerts.values().next().value!);
     const selected = this.d.alerts ?? DEFAULT_ALERTS;
     // Every first alert per key is recorded with what the desk knew at this moment, whether or not it reaches the phone.
-    const record = this.recordAlert(key, title, body, kind, selected);
-    if (!selected.has(kind)) return;
+    const record = this.recordAlert(key, title, body, kind, selected, phone);
+    if (!selected.has(kind) || !phone) return;
     // Tapping the notification opens the coin in FOMO.
     const mint = key.slice(key.indexOf(':') + 1), options: NotifyOptions = { click: /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint) ? fomoUrl(mint) : null, tags: [kind] };
     const text = record?.body ?? body, evidence = record?.evidence, research = this.d.research;
@@ -1199,14 +1225,14 @@ export class DeskEngine {
   }
 
   /** The research record of an alert (evidence snapshot + the message to send); null without a recorder or on any error. */
-  private recordAlert(key: string, title: string, body: string, kind: AlertKind, selected: ReadonlySet<AlertKind>): ReturnType<DeskResearchHooks['alert']> | null {
+  private recordAlert(key: string, title: string, body: string, kind: AlertKind, selected: ReadonlySet<AlertKind>, phone = true): ReturnType<DeskResearchHooks['alert']> | null {
     if (!this.d.research) return null;
     try {
       const mint = key.slice(key.indexOf(':') + 1), token = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint) ? mint : null;
       const candidate = token ? this.candidates.get(token) ?? null : null, channels = [...(this.d.alertChannels ?? [])];
       return this.d.research.alert({ key, kind, title, body, at: Date.now(), mode: this.d.mode, token, symbol: candidate?.symbol ?? null, candidate,
         heldBy: token ? this.heldBy(token) : null, solUsd: this.solUsd,
-        delivery: { decision: !selected.has(kind) ? 'SUPPRESSED_BY_CONFIG' : channels.length ? 'SENT' : 'NO_CHANNEL', channels, selectedKinds: [...selected] } });
+        delivery: { decision: !selected.has(kind) ? 'SUPPRESSED_BY_CONFIG' : !phone ? 'SUPPRESSED_BY_LIMIT' : channels.length ? 'SENT' : 'NO_CHANNEL', channels, selectedKinds: [...selected] } });
     } catch { return null; }
   }
 
@@ -1403,7 +1429,10 @@ export class DeskEngine {
   }
   private async loadCycles(id: StrategyId): Promise<void> {
     const states: LedgerState[] = [];
-    for (const name of await this.cycleFiles(id)) states.push((await DeskLedger.open(path.join(this.d.dir, name), 'PAPER', null, Date.now())).state);
+    for (const name of await this.cycleFiles(id)) {
+      const cycle = await DeskLedger.open(path.join(this.d.dir, name), 'PAPER', null, Date.now());
+      if (cycle.damaged) this.damagedCycles.push(cycle.damaged); else states.push(cycle.state);
+    }
     this.cycles.set(id, states);
   }
 

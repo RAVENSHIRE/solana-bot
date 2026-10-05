@@ -22,6 +22,34 @@ Get-Content data-desk\dashboard.log -Wait
 
 A console window that is clicked, or has text selected, pauses every program that writes to it (Windows QuickEdit). A dashboard started with `npm start` in a visible window can therefore freeze until the window gets a key press. On 1 Oct it stopped answering for minutes. With the output in a file this cannot happen.
 
+### Auto-start and restart (unattended)
+
+Run `ops\install-autostart.cmd` once (no admin rights needed). From then on a supervisor (`ops\supervise.mjs`) keeps the
+research observer and the dashboard running:
+
+- **A process that stops is started again**, after 3 s, doubling up to 5 min while it keeps crashing. The phone is told
+  (at most once per half hour per process), and again when the PC comes back after the desk was down (reboot, sleep).
+- **The supervisor itself comes back**: a Startup-folder shortcut starts it at logon, and a Task Scheduler task
+  ("Solana desk watchdog") every 5 minutes. Only one runs at a time (`data-desk\supervisor.lock`).
+- **The session comes back** (`data-desk\desk-session.json`, written by the dashboard whenever it changes): a running
+  TEST resumes as it was. LIVE with the local key comes back **with exits only**: holdings are reconciled as at every
+  LIVE start, then stops, targets and rug exits run for the open positions, and new entries stay paused until you
+  press *Resume*. If the reconciliation fails it is retried every 30 s for 5 minutes, then the phone is told. LIVE with
+  Phantom cannot sign by itself and is never resumed; the phone is told that its positions have no exits.
+- Logs over 50 MB are moved to `.1` at a restart. The supervisor's own log is `data-desk\supervisor.log`.
+- **A power cut or hard shutdown does not keep the desk down.** The desk's files are written to disk before they replace
+  the old ones. A lock file that holds no process number and is older than a minute counts as left over. An unreadable TEST
+  ledger or event file (on Raven on 3 Oct, every file written in the last second held only zero bytes) is moved aside
+  as `<name>.damaged-<time>`, and TEST starts fresh; the desk log says which files it moved. An unreadable LIVE ledger
+  still stops the desk (`LEDGER_INVALID`), because it is a record of real money: look at it before you remove it.
+
+Commands: `node ops\supervise.mjs --status` (last heartbeat), `--restart` (after a `git pull`: restarts the supervisor too, so its own new code applies; no phone message),
+`--stop` (stops everything and keeps the watchdog off), `--start`. `ops\uninstall-autostart.cmd` removes it. While it
+is installed, `dashboard\start-background.cmd` and `start-research.cmd` refuse to start a second copy.
+
+Limits: after a Windows Update reboot the desk starts when you log in (sign-in without a password, or auto-logon,
+avoids the wait). A PC that sleeps stops everything: set *Sleep* to *Never* while plugged in.
+
 ## Operational controls and restart
 
 Strategy toggles, TEST drill and TEST reset are switched in the dashboard and saved per mode (`DESK_DEPLOYMENT_MODE=EDITABLE`, the default). For an unattended deployment set `DESK_DEPLOYMENT_MODE=LOCKED` in `.env`: they are then fixed at startup by the flags below and rejected by the server; Pause, Stop and EXIT NOW remain available. The startup flags are `DESK_PAPER_FAIR_ENABLED`, `DESK_PAPER_CRASH_ENABLED`, `DESK_LIVE_FAIR_ENABLED`, `DESK_LIVE_CRASH_ENABLED`; LIVE CRASH defaults to false. All keys are allowlisted and validated at startup.
@@ -195,6 +223,8 @@ How it works:
 - A fill is alerted at once ("GOLDEN POCKET: ABC at $112.0K") and starts a scan; GOLDEN buys while the fill is under 3 minutes old, the pool is above the pattern stop and not more than 8 % above the zone's top, no rug sign is known, the largest wallet holds at most 20 % when known, and the safety gates pass. A retest that is not bought is listed in the panel and the event log, never alerted.
 - The pattern's stop (and a retest's take profit) are stored on the position as market caps and checked against the pool's reserves every 3 s: `POCKET_STOP` / `RESISTANCE_TARGET`. A 40 % stop loss stays as a backstop.
 - Sizing: base entry ($2), TEST sleeve `GOLDEN_CAPITAL_USD` (default $15), at most 2 positions, no re-entry for 4 h. ON in TEST, OFF in LIVE until you switch it on.
+- The pools are read only while they are used: GOLDEN switched on in the running mode, golden alerts going to the
+  phone, or a GOLDEN position still open. Otherwise the sources line says *paused* and no RPC is spent on them.
 - The *Golden pocket* panel shows every watched pool: minutes since graduation, high → dip → breakout, now, peak, pattern state, fill and stop, and GOLDEN's verdict.
 
 ### LAUNCH: the launch radar (the @glabuz pattern)
@@ -302,6 +332,23 @@ FOMO has no public API: its token pages are share links into the app. What the d
 - *Learn from wallet* in the strategy assistant reads your FOMO wallet's trades.
 - FOMO's *Migrated* list is pump.fun graduations, which the desk reads directly from the chain.
 
+### Coin check: paste an address, get the reading
+
+*Coin check* (sidebar, under Overview) answers "is this coin worth a look?" for any Solana token. Paste the contract
+address, or a FOMO, pump.fun or Jupiter link: the check starts at once and takes 20–40 s. Read-only, never a trade.
+
+- **Four sources:** Jupiter (holders and their change, real "organic" buying and selling, the developer wallet's
+  history), DexScreener and GeckoTerminal (market cap, liquidity, the all-time high and how far below it, the decade
+  levels), GoPlus and RugCheck (the contract), and the chain (the 20 largest holders, where each wallet got its first
+  SOL, clusters of wallets funded by one source, the team's share, fresh wallets).
+- **The reading on top:** a headline and the lines behind it, as for WWW and SI on 3 Oct: price and high, contract,
+  holders, demand, and what would make it interesting. Green: holders rising and real buyers leading. Red: a blocked
+  contract, or demand fading (holders falling or real sellers leading). It is not a qualified call.
+- **All numbers** unfold below; a source that did not answer is listed, the rest still shows.
+- **Add to watchlist** puts the coin on the research watchlist (`data-desk/research/watch-tokens.json`): the phone gets
+  INFO when it rises 15 %+ in an hour with buyers leading, and the ladder records it every day.
+- One check at a time; the same coin again within 2 minutes comes from the last check.
+
 ### Watch: exit rules for tokens you hold yourself
 
 The *Watch* section (sidebar: Watch) guards tokens you bought outside the desk, on FOMO, in Phantom or anywhere else. Add the token's CA and the wallet that holds it, then set any of these levels:
@@ -325,7 +372,7 @@ How it runs:
   - `DESK_NTFY_TOPIC=<long random name>`, then subscribe to that topic in the free ntfy app;
   - `DESK_TELEGRAM_BOT_TOKEN` and `DESK_TELEGRAM_CHAT_ID` for Telegram.
 
-Which desk alerts reach the phone: the **Phone** switches on the opening screen (OPEN breakouts, GOLDEN fills, rug sales, LAUNCH entry-ready, radar finds) — saved in `data-desk/phone-alerts.json`, applied at once and winning over `.env` — or else `DESK_ALERTS` in `.env`, a comma list of `golden` (GOLDEN POCKET fills), `rug` (a held position sold as a rug), `open` (OPEN breakouts), `launch` (LAUNCH entry-ready) and `radar` (a launch shortlisted, a radar rug, an impersonator), or `all`. The default is **none** (owner, 2 Oct: no rug confirmations on the phone, only qualified calls). Qualified calls, interesting coins (checkmarked project accounts that post their CA) and research updates come from the research observer, not the desk: see [RESEARCH.md](RESEARCH.md#what-reaches-the-phone-qualified-calls-interesting-coins-research-updates). Tapping an ntfy notification opens the coin in FOMO. OPEN calls say how fast the launch grew ("$3.4K → $28.9K in 68 s (×8.5)") and that fast openers often rug within minutes. Everything still shows in the dashboard and the event log.
+Which desk alerts reach the phone: the **Phone** switches on the opening screen (OPEN breakouts, GOLDEN fills, rug sales, LAUNCH entry-ready, radar finds) — saved in `data-desk/phone-alerts.json`, applied at once and winning over `.env` — or else `DESK_ALERTS` in `.env`, a comma list of `golden` (GOLDEN POCKET fills), `rug` (a held position sold as a rug), `open` (OPEN breakouts), `launch` (LAUNCH entry-ready) and `radar` (a launch shortlisted, a radar rug, an impersonator), or `all`. The default is **none** (owner, 2 Oct: no rug confirmations on the phone, only qualified calls). Qualified calls, interesting coins (checkmarked project accounts that post their CA) and research updates come from the research observer, not the desk: see [RESEARCH.md](RESEARCH.md#what-reaches-the-phone-qualified-calls-interesting-coins-research-updates). Tapping an ntfy notification opens the coin in FOMO. OPEN calls say how fast the launch grew ("$3.4K → $28.9K in 68 s (×8.5)") and that fast openers often rug within minutes. Only **sprints** go to the phone, a breakout within 2 minutes of launch, at most 4 an hour: on 3 Oct every breakout went out (about 12 an hour, 159 by the afternoon) and the free ntfy quota ran out, so ntfy answered HTTP 429 and no alert of any kind reached the phone. Everything still shows in the dashboard and the event log (an OPEN alert held back by the limit is recorded as `SUPPRESSED_BY_LIMIT`). The observer's status line counts phone deliveries and failures.
 
 Why that default — the alert audit of 1–2 Oct (175 phone alerts in 5 h, what each token did in the hour after its alert, Birdeye minute candles):
 

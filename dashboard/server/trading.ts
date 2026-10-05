@@ -1,4 +1,5 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { PublicKey } from '@solana/web3.js';
@@ -11,6 +12,7 @@ import { historyText, type WalletHistory } from '../../src/desk/wallet-history';
 import { createDesk, deskEnvironment, type DeskContext, type DeskHandle } from '../../src/desk/runtime';
 import type { DeskMode, DeskStatus } from '../../src/desk/types';
 import type { WatchView } from '../../src/desk/watch';
+import type { CoinCheck } from '../../src/research/coin-check';
 
 export { deskEnvironment as tradingEnvironment, type DeskHandle };
 export type DeskFactory = (context: DeskContext) => Promise<DeskHandle>;
@@ -28,14 +30,35 @@ function rejectCode(error: unknown): string | null {
   const code: unknown = (error as Error & { code?: unknown }).code;
   return typeof code === 'string' ? code : null;
 }
+/** Why the desk did not open, for the log and the page: a reject code, or a plain error whose message is a code (LEDGER_INVALID). */
+function openCode(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : '';
+  return rejectCode(error) ?? (/^[A-Z][A-Z0-9_]{2,63}$/.test(message) ? message : null);
+}
 /** The human-readable part of a rejection (`CODE: detail`), e.g. which field of a strategy spec is invalid. */
 function rejectDetail(error: unknown, code: string): string | undefined {
   const message = error instanceof Error ? error.message : '';
   return message.startsWith(`${code}: `) ? message.slice(code.length + 2) : undefined;
 }
 
+/** The running session as last seen, so a restart (crash, reboot, deploy) can bring it back. */
+export interface SavedSession { mode: DeskMode; running: boolean; paused: boolean; at: string }
+export interface TradingOptions {
+  /** data-desk/desk-session.json; none: sessions are never saved or restored. */
+  sessionFile?: string | null;
+  /** A LIVE restore that fails is retried this often, this many times (the RPC may still be starting). */
+  restoreRetryMs?: number; restoreAttempts?: number;
+  log?: (line: string) => void;
+}
+
 export class TradingService {
   readonly broker = new SigningBroker({ sessionTtlMs: 900_000 });
+  /** Nothing is saved until the restore has run (or been given up), so the idle start-up never overwrites the saved session. */
+  private restoring = true;
+  private savedText: string | null = null;
+  private restoreTimer: ReturnType<typeof setTimeout> | null = null;
+  private coinCheckBusy = false;
+  private readonly coinChecks = new Map<string, { at: number; value: CoinCheck }>();
   private capability = randomBytes(32).toString('base64url');
   private sessionId: string | null = null;
   private heartbeat = 0;
@@ -45,7 +68,8 @@ export class TradingService {
   private deskError: string | null = null;
   private closed = false;
   private timer: ReturnType<typeof setInterval>;
-  constructor(private readonly factory: DeskFactory) {
+  constructor(private readonly factory: DeskFactory, private readonly o: TradingOptions = {}) {
+    if (!o.sessionFile) this.restoring = false;
     this.timer = setInterval(() => {
       if (this.closed || !this.desk) return;
       const live = this.desk.engines.LIVE;
@@ -54,8 +78,90 @@ export class TradingService {
       for (const engine of Object.values(this.desk.engines)) engine.tick();
       // Watch rules run whether the desk scans or not: a floor can break while TEST and LIVE are stopped.
       this.desk.watch?.tick();
+      void this.saveSession();
     }, 1000);
     this.timer.unref();
+  }
+
+  /** Writes the running session when it changed: TEST or LIVE, scanning or not, entries paused or not. */
+  private async saveSession(): Promise<void> {
+    if (!this.o.sessionFile || this.restoring || !this.desk) return;
+    const e = this.desk.engines[this.mode], state = { mode: this.mode, running: e.scanner, paused: e.scanner && !e.execution };
+    const text = JSON.stringify(state);
+    if (text === this.savedText) return;
+    this.savedText = text;
+    const tmp = `${this.o.sessionFile}.tmp`;
+    await fs.writeFile(tmp, `${JSON.stringify({ ...state, at: new Date().toISOString() } satisfies SavedSession)}\n`)
+      .then(() => fs.rename(tmp, this.o.sessionFile!)).catch(() => { this.savedText = null; });
+  }
+
+  /**
+   * After a restart, brings back the session that was running. TEST resumes as it was. LIVE with the local key comes
+   * back with **exits only** (entries paused until the owner presses Resume), after the usual reconciliation of
+   * holdings; with Phantom it cannot sign by itself, so the owner is told instead. Returns what was done.
+   */
+  async restoreSession(attempt = 1): Promise<string | null> {
+    try { return await this.restoreOnce(attempt); } catch (error) {
+      this.restoring = false; this.o.log?.(`session restore failed: ${rejectCode(error) ?? (error as Error).message}`); return null;
+    }
+  }
+
+  private async restoreOnce(attempt: number): Promise<string | null> {
+    const file = this.o.sessionFile, log = this.o.log ?? (() => undefined);
+    if (!file || this.closed) { this.restoring = false; return null; }
+    let saved: SavedSession | null = null;
+    try { saved = JSON.parse(await fs.readFile(file, 'utf8')) as SavedSession; } catch { /* nothing saved yet */ }
+    if (!saved?.running || (saved.mode !== 'PAPER' && saved.mode !== 'LIVE')) { this.restoring = false; return null; }
+    let handle: DeskHandle;
+    try { handle = await this.ensureDesk(); } catch (error) { return this.retryRestore(saved.mode, attempt, `desk unavailable: ${openCode(error) ?? 'error'}`); }
+    const tell = (title: string, body: string) => { log(`${title}: ${body}`); void handle.notify?.(title, body).catch(() => undefined); };
+    if (saved.mode === 'PAPER') {
+      const paper = handle.engines.PAPER;
+      this.restoring = false;
+      try {
+        this.mode = 'PAPER';
+        if (!paper.scanner) paper.start();
+        if (saved.paused) paper.pause();
+      } catch (error) {
+        // Never thrown on: a start-up that fails the same way at every restart would loop under the supervisor.
+        log(`TEST not restored after a restart: ${rejectCode(error) ?? 'error'}`);
+        return null;
+      }
+      log(`TEST restored after a restart${saved.paused ? ' (entries paused, as before)' : ''}`);
+      return 'TEST';
+    }
+    if (!this.localKey()) {
+      this.restoring = false;
+      tell('LIVE stopped by a restart', 'The desk restarted while LIVE was running. LIVE with Phantom is never resumed by itself: open LIVE positions have no exits until you start LIVE again.');
+      return 'LIVE_NOT_RESUMED';
+    }
+    const live = handle.engines.LIVE;
+    try {
+      await live.prepareStart?.();
+      this.mode = 'LIVE';
+      if (!live.scanner) live.start();
+      live.pause();
+    } catch (error) { return this.retryRestore('LIVE', attempt, rejectCode(error) ?? 'error', tell); }
+    this.restoring = false;
+    tell('LIVE restored: exits only', 'The desk restarted while LIVE was running. LIVE is back for its open positions (stops, targets, rug exits); new entries stay paused until you press Resume.');
+    return 'LIVE_EXITS_ONLY';
+  }
+
+  private retryRestore(mode: DeskMode, attempt: number, why: string, tell?: (title: string, body: string) => void): null {
+    const attempts = this.o.restoreAttempts ?? 10;
+    if (attempt < attempts && !this.closed) {
+      this.o.log?.(`session restore failed (${why}), retry ${attempt + 1}/${attempts}`);
+      this.restoreTimer = setTimeout(() => { this.restoreTimer = null; void this.restoreSession(attempt + 1); }, this.o.restoreRetryMs ?? 30_000);
+      this.restoreTimer.unref?.();
+      return null;
+    }
+    this.restoring = false;
+    const body = mode === 'LIVE'
+      ? `The desk restarted while LIVE was running and could not bring it back (${why}). Open LIVE positions have no exits until you start LIVE again.`
+      : `The desk restarted while TEST was running and could not bring it back (${why}). Start TEST in the dashboard once the desk is available.`;
+    const title = `${mode === 'LIVE' ? 'LIVE' : 'TEST'} NOT restored`;
+    if (tell) tell(title, body); else this.o.log?.(`${title}: ${body}`);
+    return null;
   }
   private authorized = () => this.broker.connection().connected && Date.now() - this.heartbeat < 12_000;
   /** LIVE signs with WALLET_PRIVATE_KEY (DESK_LIVE_SIGNER=local-key): no Phantom session is involved. */
@@ -73,7 +179,7 @@ export class TradingService {
       if (this.closed) return handle.close().then(() => { throw new DeskReject('SERVICE_CLOSED'); });
       this.desk = handle; this.deskError = null; return handle;
     }).catch(error => {
-      this.deskError = rejectCode(error) ?? 'DESK_UNAVAILABLE';
+      this.deskError = openCode(error) ?? 'DESK_UNAVAILABLE';
       throw error;
     }).finally(() => { this.opening = null; });
     return this.opening;
@@ -81,7 +187,8 @@ export class TradingService {
 
   async close(): Promise<void> {
     if (this.closed) return;
-    this.closed = true; clearInterval(this.timer); this.broker.cancel();
+    // The saved session stays as it was: a deliberate shutdown (deploy, reboot) restores it at the next start.
+    this.closed = true; clearInterval(this.timer); if (this.restoreTimer) clearTimeout(this.restoreTimer); this.broker.cancel();
     const handle = this.desk ?? await this.opening?.catch(() => null) ?? null;
     this.desk = null;
     await handle?.close();
@@ -141,6 +248,10 @@ export class TradingService {
 
   private async deskAction(action: string, body: Record<string, unknown>, handle: DeskHandle): Promise<void> {
     const { PAPER: paper, LIVE: live } = handle.engines;
+    if (['start-test', 'stop-test', 'start-live', 'stop-live', 'pause', 'resume', 'select-mode'].includes(action) && this.restoring) {
+      if (this.restoreTimer) clearTimeout(this.restoreTimer);
+      this.restoreTimer = null; this.restoring = false;
+    }
     if (handle.operational?.deploymentMode === 'LOCKED' && ['strategy', 'strategy-save', 'strategy-delete', 'drill-on', 'drill-off', 'reset-test'].includes(action))
       throw new DeskReject('CONFIG_LOCKED');
     const requireSession = () => {
@@ -275,6 +386,32 @@ export class TradingService {
         if (!handle.holdings) throw new DeskReject('WATCH_UNAVAILABLE');
         const holdings = await handle.holdings(wallet).catch(() => { throw new DeskReject('HOLDINGS_UNAVAILABLE'); });
         this.json(res, 200, { wallet, holdings }); return true;
+      }
+      if (action === 'coin-check') {
+        // Read-only: one coin from four sources (about 20–40 s); one check at a time, the same coin again within 2 min from the cache.
+        const handle = await this.ensureDesk(), mint = String(body.mint ?? '').trim();
+        if (!handle.coinCheck) throw new DeskReject('COIN_CHECK_UNAVAILABLE');
+        if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) throw new DeskReject('INVALID_MINT', 'paste a Solana token address (contract address, CA)');
+        const cached = this.coinChecks.get(mint);
+        if (cached && Date.now() - cached.at < 120_000) { this.json(res, 200, cached.value); return true; }
+        if (this.coinCheckBusy) throw new DeskReject('COIN_CHECK_BUSY', 'another check is still running');
+        this.coinCheckBusy = true;
+        try {
+          const value = await handle.coinCheck(mint);
+          this.coinChecks.set(mint, { at: Date.now(), value });
+          if (this.coinChecks.size > 50) this.coinChecks.delete(this.coinChecks.keys().next().value!);
+          this.json(res, 200, value); return true;
+        } catch (error) { throw error instanceof DeskReject ? error : new DeskReject('COIN_CHECK_FAILED', (error as Error).message.slice(0, 120)); }
+        finally { this.coinCheckBusy = false; }
+      }
+      if (action === 'watchlist-add') {
+        // Only adds a coin to the research watchlist (phone INFO when it moves, daily ladder records); never trades.
+        const handle = await this.ensureDesk(), mint = String(body.mint ?? '').trim();
+        if (!handle.watchlistAdd) throw new DeskReject('WATCHLIST_UNAVAILABLE');
+        if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) throw new DeskReject('INVALID_MINT');
+        const added = await handle.watchlistAdd(mint, typeof body.note === 'string' ? body.note : '');
+        for (const [k, v] of this.coinChecks) if (k === mint) v.value = { ...v.value, watched: true };
+        this.json(res, 200, { added }); return true;
       }
       if (action === 'connect') {
         if (typeof body.address !== 'string') throw new DeskReject('INVALID_ADDRESS');

@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import { z } from 'zod';
-import { atomicWriteFile } from '../utils/fs';
+import { atomicWriteFile, setAside } from '../utils/fs';
 import { exactNumber } from '../data/core/data-validator';
 import type { DeskMode, DeskPosition, LedgerEntry } from './types';
 
@@ -45,18 +45,31 @@ const lamportsUsd = (lamports: bigint, solUsd: number) => exactNumber(lamports <
 
 /** One persistent ledger per mode (and, for LIVE, per wallet). TEST and LIVE records never share a file. */
 export class DeskLedger {
+  /** Where an unreadable TEST ledger was moved before this one started fresh (null: it was read, or there was none). */
+  damaged: string | null = null;
   private constructor(readonly file: string, public state: LedgerState) {}
 
+  /**
+   * An unreadable LIVE ledger stops the desk (LEDGER_INVALID): it records real money. An unreadable TEST ledger (paper
+   * money only; e.g. all zero bytes after a power cut) is moved aside and TEST starts fresh, so the desk still opens.
+   */
   static async open(file: string, mode: DeskMode, wallet: string | null, now: number): Promise<DeskLedger> {
+    let damaged: string | null = null;
     try {
       const state = stateSchema.parse(JSON.parse(await fs.readFile(file, 'utf8')));
       if (state.mode !== mode || (mode === 'LIVE' && state.wallet !== wallet)) throw new Error('LEDGER_IDENTITY_MISMATCH');
       return new DeskLedger(file, state);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error instanceof Error && error.message === 'LEDGER_IDENTITY_MISMATCH' ? error : new Error('LEDGER_INVALID');
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        if (error instanceof Error && error.message === 'LEDGER_IDENTITY_MISMATCH') throw error;
+        if (mode !== 'PAPER') throw new Error('LEDGER_INVALID');
+        damaged = await setAside(file, now);
+      }
     }
-    return new DeskLedger(file, { version: 1, mode, wallet, createdAt: now, paperCashLamports: null, paperStartUsd: null, positions: [], entries: [],
+    const fresh = new DeskLedger(file, { version: 1, mode, wallet, createdAt: now, paperCashLamports: null, paperStartUsd: null, positions: [], entries: [],
       pending: null, halted: null, realizedPnlUsd: 0, feesUsd: 0, feesLamports: '0', updatedAt: now });
+    fresh.damaged = damaged;
+    return fresh;
   }
 
   async save(): Promise<void> {

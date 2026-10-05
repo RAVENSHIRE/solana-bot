@@ -1,5 +1,5 @@
 import { features, type LaunchFacts } from './dataset';
-import { simulate, DIRECT_DEFAULTS, type DirectOptions } from './direct';
+import { simulate, GATE_COSTS, PHONE_FILL_MS, type DirectOptions } from './direct';
 import { GROUPS, describeExit } from './rules';
 import type { Qualification, RuleEvidence } from './qualify';
 import type { ResearchLedger } from './ledger';
@@ -30,6 +30,7 @@ export interface CallDeps {
   /** The phone (ntfy/Telegram); null: nothing is sent. */
   notify?: ((title: string, body: string) => Promise<void>) | null;
   solUsd?: () => number | null;
+  /** Defaults to the gate's costs, so live calls are judged exactly as the gate judged their rule. */
   costs?: Omit<DirectOptions, 'delayS'>;
   link?: (mint: string) => string;
   log?: (line: string) => void;
@@ -149,14 +150,15 @@ export class CallEngine {
     const body = [
       `Buy now at ${mc(mcapSol)} market cap, ${rule.delayS} s after launch.`,
       `Sell at ${mc(mcapSol * (1 + x.tpPct / 100))} (+${x.tpPct}%)${x.slPct !== null ? `, stop ${mc(mcapSol * (1 - x.slPct / 100))} (−${x.slPct}%)` : ''}${x.trailPct ? `, or once it falls ${x.trailPct}% from its peak` : ''}, after ${x.maxHoldMin} min at the latest.`,
-      `Rule: ${rule.groupLabel} · ${describeExit(x)}. On ${v.n} launches it was not tuned on: ${v.meanPct >= 0 ? '+' : ''}${v.meanPct.toFixed(1)}% average after costs, target hit ${v.tpPct.toFixed(0)}%.`,
+      `Rule: ${rule.groupLabel} · ${describeExit(x)}. On ${v.n} launches it was not tuned on: ${v.meanPct >= 0 ? '+' : ''}${v.meanPct.toFixed(1)}% average after costs, target hit ${v.tpPct.toFixed(0)}%` +
+        `${rule.pValue !== null && rule.pValue !== undefined ? `, luck p = ${rule.pValue.toFixed(4)}` : ''}. Judged as if you buy about ${Math.round(PHONE_FILL_MS / 1000)} s after this message.`,
       this.d.link ? this.d.link(l.mint) : `https://pump.fun/coin/${l.mint}`,
     ].join('\n');
     return [title, body];
   }
 
   private judge(now: number): void {
-    const costs = this.d.costs ?? DIRECT_DEFAULTS, keep: Signal[] = [];
+    const costs = this.d.costs ?? GATE_COSTS, keep: Signal[] = [];
     for (const s of this.open) {
       const endsAt = s.decisionAt + costs.latencyMs + s.rule.exit.maxHoldMin * 60_000;
       if (now < endsAt + CALLS.judgeAfterMs) { keep.push(s); continue; }
