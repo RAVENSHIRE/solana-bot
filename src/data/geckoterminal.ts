@@ -101,6 +101,20 @@ export class GeckoTerminalClient {
       () => this.http.get(`/networks/solana/pools/${pool}/ohlcv/${timeframe}`, { aggregate, limit, currency: 'usd', token, include_empty_intervals: false }),
       (raw, at) => normalizeOhlcv(raw, pool, token, interval, at));
   }
+  /** Every pool of a token (launch curve and migrated pools), for launch-history checks. */
+  getTokenPools(mint: string): Promise<GeckoPool[]> {
+    parse(address, mint, 'geckoterminal');
+    return this.data.read('geckoterminal', `token-pools:${mint}`, 'analysis', () => this.http.get(`/networks/solana/tokens/${mint}/pools`, { page: 1 }), (raw, at) =>
+      parse(z.object({ data: z.array(z.unknown()) }), raw, 'geckoterminal').data.map(p => normalizeGeckoPool(p, at)));
+  }
+  /** One-minute candles ending at `beforeSeconds` (e.g. a pool's first minutes after creation). */
+  getCandlesBefore(pool: string, mint: string, beforeSeconds: number, limit: number): Promise<OHLCVSeries> {
+    parse(address, pool, 'geckoterminal'); parse(address, mint, 'geckoterminal');
+    if (!Number.isSafeInteger(beforeSeconds) || beforeSeconds <= 0 || !Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error('Invalid OHLCV request');
+    return this.data.read('geckoterminal', `ohlcv-before:${pool}:${mint}:${beforeSeconds}:${limit}`, 'analysis',
+      () => this.http.get(`/networks/solana/pools/${pool}/ohlcv/minute`, { aggregate: 1, limit, currency: 'usd', token: mint, before_timestamp: beforeSeconds, include_empty_intervals: false }),
+      (raw, at) => normalizeOhlcv(raw, pool, mint, 60_000, at));
+  }
   async getOhlcv(pool: string, timeframe: 'minute' | 'hour' | 'day', aggregate: number, limit: number): Promise<Candle[]> { return (await this.getOhlcvSeries(pool, timeframe, aggregate, limit)).candles; }
   async getTradeEvents(pool: string, mint?: string, minVolume = 0): Promise<TradeEvent[]> {
     parse(address, pool, 'geckoterminal'); const token = mint ?? (await this.getPool(pool)).baseTokenMint; parse(address, token, 'geckoterminal');

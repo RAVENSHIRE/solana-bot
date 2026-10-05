@@ -7,7 +7,8 @@ import { DashboardStore } from "./dashboard-store";
 import { adaptTelemetry } from "./telemetry-adapter";
 import type { StreamSnapshot } from "../shared/state";
 import { createWalletReader } from "./wallet";
-import { TradingService, engineFactory } from './trading';
+import { TradingService, deskFactory, tradingEnvironment } from './trading';
+import { deskCapital } from '../../src/desk/config';
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const port = Number(process.env.DASHBOARD_PORT || 3000);
@@ -27,8 +28,12 @@ const store =
         new StateStore(telemetryPath, 250, adaptTelemetry),
       );
 await store.start();
-const walletReader = await createWalletReader(path.resolve(root, '..')).catch(() => null);
-const trading = new TradingService(engineFactory(path.resolve(root, '..')));
+const repo = path.resolve(root, '..');
+const planned = await tradingEnvironment(repo).then(env => deskCapital(env).plannedStartingCapitalUsd).catch(() => null);
+const walletReader = await createWalletReader(repo, planned).catch(() => null);
+// The running session is saved, so a restart (crash, reboot, deploy) brings TEST back, and LIVE back with exits only.
+const trading = new TradingService(deskFactory(repo), { sessionFile: path.join(repo, "data-desk", "desk-session.json"),
+  log: (line) => console.log(`${new Date().toISOString()} ${line}`) });
 const dev = process.argv.includes("--dev");
 const vite = dev
   ? await (
@@ -189,6 +194,7 @@ server.listen(port, "127.0.0.1", () => {
   console.log(
     `Dashboard: http://localhost:${port}\nCheckpoint: ${statePath}${store instanceof DashboardStore ? `\nRuntime telemetry: ${telemetryPath}` : ""}`,
   );
+  void trading.restoreSession();
 });
 server.on("error", (error) => {
   console.error(error.message);

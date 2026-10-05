@@ -7,7 +7,9 @@ import { MicroGuard } from '../src/micro/guard';
 import { book, recordFailure, options } from '../src/micro/runtime';
 import { dashboard } from '../src/micro/dashboard';
 import { BotStateSchema } from '../dashboard/shared/state';
-import { SOL_MINT, USDC_MINT } from '../src/core/types';
+import { SOL_MINT, USDC_MINT, USDT_MINT } from '../src/core/types';
+import { MicroMarket } from '../src/micro/market';
+import { normalizeDexPairs } from '../src/data/dexscreener';
 import { SwapError, type SwapFill, type SwapRequest } from '../src/execution/executor';
 import { LiveExecutor } from '../src/execution/live-executor';
 import { JupiterClient, type JupiterQuote } from '../src/execution/jupiter-client';
@@ -17,8 +19,10 @@ import { Logger, configureLogger } from '../src/utils/logger';
 configureLogger({level:'error',color:false});
 const wallet=Keypair.fromSeed(new Uint8Array(32).fill(41)),owner=wallet.publicKey;
 const log=new Logger('micro-test');
-const snap=(patch:Partial<Snapshot>={}):Snapshot=>({native:50_000_000n,usdc:0n,solUsd:100,usdcUsd:1,
-  at:Date.now(),receivedAt:Date.now(),ataExists:true,ataRent:0n,tempRent:4_000_000n,...patch});
+// One clock reading for both times: equityUsd() validates prices as of `at`, so a receivedAt read 1 ms later (two
+// Date.now() calls straddling a millisecond) was "from the future" and made these tests flake now and then.
+const snap=(patch:Partial<Snapshot>={},now=Date.now()):Snapshot=>({native:50_000_000n,usdc:0n,solUsd:100,usdcUsd:1,
+  at:now,receivedAt:now,ataExists:true,ataRent:0n,tempRent:4_000_000n,...patch});
 const state=()=>freshState(owner.toBase58(),'LIVE',snap(),createProfile(5));
 const req=():SwapRequest=>({side:'BUY',mint:USDC_MINT,amountRaw:10_000_000n,slippageBps:30});
 const quote=(side='BUY'):JupiterQuote=>({inputMint:side==='BUY'?SOL_MINT:USDC_MINT,outputMint:side==='BUY'?USDC_MINT:SOL_MINT,
@@ -49,7 +53,7 @@ function fixture(patch:Partial<Snapshot>={}) {
   const rpc={execute:async(_label:string,fn:(c:typeof connection)=>unknown)=>fn(connection)};
   const jupiter={quote:async()=>reverse,assertFresh:()=>{}};
   const guard=new MicroGuard({rpc:rpc as any,jupiter:jupiter as any,owner,state:st,
-    snapshot:async()=>({...s,at:Date.now(),receivedAt:Date.now()}),priority:async()=>priority,
+    snapshot:async()=>{const now=Date.now();return {...s,at:now,receivedAt:now};},priority:async()=>priority,
     persist:async()=>{persisted++;},configuredPriorityCap:100_000n});
   const tx=new VersionedTransaction(new TransactionMessage({payerKey:owner,recentBlockhash:SystemProgram.programId.toBase58(),instructions:[]}).compileToV0Message());
   const built={swapTransaction:'AA==',lastValidBlockHeight:1,prioritizationFeeLamports:1000};
@@ -227,6 +231,15 @@ test('holdings outside SOL/USDC must be unchanged by the simulated swap',async()
   await untouched.guard.beforeBuild(r,q);await untouched.guard.beforeSign(r,q,untouched.tx,untouched.built);
   const drained=fixture(),r2=req();drained.unscoped(Buffer.alloc(165,7),Buffer.alloc(165,8));
   await drained.guard.beforeBuild(r2,q);await assert.rejects(drained.guard.beforeSign(r2,q,drained.tx,drained.built),/UNSCOPED_HOLDING_CHANGED/);
+});
+test('micro snapshot prices USDC from the USDC/USDT pool DexScreener actually returns',async()=>{
+  const raw=(base:string,quote:string,price:string)=>({chainId:'solana',dexId:'fixture',pairAddress:base,baseToken:{address:base,symbol:'X'},
+    quoteToken:{address:quote},priceUsd:price,liquidity:{usd:1_000_000},pairCreatedAt:Date.now()-86_400_000,txns:{h1:{buys:1,sells:1}}});
+  const dex={data:{cache:{invalidate:()=>{}}},getPairsForTokens:async()=>normalizeDexPairs([raw(SOL_MINT,USDC_MINT,'118'),raw(USDC_MINT,USDT_MINT,'1.0003')],Date.now())};
+  const rpc={execute:async(_label:string,fn:(c:unknown)=>unknown)=>fn({getParsedTokenAccountsByOwner:async()=>({value:[]}),
+    getBalance:async()=>50_000_000,getMinimumBalanceForRentExemption:async()=>2_039_280})};
+  const s=await new MicroMarket(rpc as any,dex as any,owner).snapshot();
+  assert.equal(s.solUsd,118);assert.equal(s.usdcUsd,1.0003);assert.equal(s.native,50_000_000n);
 });
 test('unexpected fee payer is rejected before simulation or signing',async()=>{
   const f=fixture(),r=req(),q=quote();await f.guard.beforeBuild(r,q);

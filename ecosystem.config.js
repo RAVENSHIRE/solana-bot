@@ -1,4 +1,8 @@
 /**
+ * LEGACY: only the old bot (dist/index.js) and its dashboard. The live system is the trading desk on the Windows PC
+ * "Raven": it is kept running by ops/supervise.mjs (auto-start, restart, session restore), see docs/DESK.md. This file
+ * does not start the desk or the research observer.
+ *
  * PM2-Konfiguration für den 24/7-Betrieb auf einem Ubuntu-VPS.
  *
  *   npm run build && pm2 start ecosystem.config.js

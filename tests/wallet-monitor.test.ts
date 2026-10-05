@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { PublicKey } from '@solana/web3.js';
 import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
 import { WalletMonitor, decimalAmount } from '../src/data/wallet-monitor';
-import { SOL_MINT, USDC_MINT } from '../src/core/types';
+import { SOL_MINT, USDC_MINT, USDT_MINT } from '../src/core/types';
 import { normalizeDexPairs } from '../src/data/dexscreener';
 
 // Synthetic fixtures: never imported by runtime.
@@ -13,8 +13,9 @@ const account=(mint=USDC_MINT,amount='1000000',decimals=6,program=TOKEN_PROGRAM_
   owner:program,lamports:2000000,executable:false,data:{program:'spl-token',parsed:{type:'account',info:{
     mint,owner:owner.toBase58(),state:'initialized',tokenAmount:{amount,decimals},
   }}}}});
+// Mirrors DexScreener: SOL is quoted in USDC, while USDC itself is listed only as the base of a USDC/USDT pool.
 const pair=(mint:string,price:string,symbol:string)=>({chainId:'solana',dexId:'fixture',pairAddress:mint,
-  baseToken:{address:mint,symbol},quoteToken:{address:mint===SOL_MINT?USDC_MINT:SOL_MINT},priceUsd:price,
+  baseToken:{address:mint,symbol},quoteToken:{address:mint===SOL_MINT?USDC_MINT:mint===USDC_MINT?USDT_MINT:SOL_MINT},priceUsd:price,
   liquidity:{usd:1000000},pairCreatedAt:Date.now()-86400000,txns:{h1:{buys:1,sells:1}}});
 function fixture(options:{native?:number;tokens?:ReturnType<typeof account>[];missingProgram?:boolean;badPrice?:boolean;genesis?:string}={}) {
   const rpc={execute:async(_label:string,fn:(c:any)=>Promise<unknown>)=>fn({

@@ -19,3 +19,11 @@ solana-playbook-update/
 
 /data-micro/
 /data-live-test/
+
+/data-desk/
+
+# Local Claude Code settings
+/.claude/settings.local.json
+
+/dist-research/
+/data-research/

@@ -1,0 +1,54 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { atomicWriteFile } from '../utils/fs';
+
+/**
+ * A dead-man message: once a day, at or after `hourUtc`, the observer tells the phone it is alive and how the desk and
+ * the phone have been. If the message does not come, something is down (the observer, the PC, the network or ntfy),
+ * and the owner learns it from the missing message instead of from a missed coin. The day it was sent is saved, so a
+ * restart never sends it twice.
+ */
+export const ALIVE = Object.freeze({ hourUtc: 7 });
+export interface AliveDeps {
+  file: string;
+  notify: (title: string, body: string) => Promise<void>;
+  /** The lines of the message: uptime, desk last seen, phone deliveries, write errors… */
+  lines: (now: number) => string[];
+  hourUtc?: number;
+  now?: () => number;
+}
+
+export class AliveReporter {
+  private lastDay: string | null | undefined;
+  private busy = false;
+  constructor(private readonly d: AliveDeps) {}
+
+  /** Sends the day's message when it is due; true when it was sent now. Never throws. */
+  async tick(): Promise<boolean> {
+    if (this.busy) return false;
+    this.busy = true;
+    try {
+      const now = (this.d.now ?? Date.now)(), day = new Date(now).toISOString().slice(0, 10);
+      if (new Date(now).getUTCHours() < (this.d.hourUtc ?? ALIVE.hourUtc)) return false;
+      // A missing, empty or damaged file (power cut) means "not sent today yet".
+      if (this.lastDay === undefined) this.lastDay = await savedDay(this.d.file);
+      if (this.lastDay === day) return false;
+      this.lastDay = day;
+      await atomicWriteFile(this.d.file, `${JSON.stringify({ day, at: now })}\n`).catch(() => undefined);
+      let lines: string[];
+      try { lines = this.d.lines(now); } catch (error) { lines = [`(status unavailable: ${error instanceof Error ? error.message : String(error)})`]; }
+      await this.d.notify('ALIVE: research observer', lines.join('\n')).catch(() => undefined);
+      return true;
+    } catch { return false; } finally { this.busy = false; }
+  }
+}
+
+export const aliveFile = (dir: string) => path.join(dir, 'alive.json');
+
+async function savedDay(file: string): Promise<string | null> {
+  try {
+    const saved = JSON.parse(await fs.readFile(file, 'utf8')) as unknown;
+    const day = saved && typeof saved === 'object' ? (saved as { day?: unknown }).day : null;
+    return typeof day === 'string' ? day : null;
+  } catch { return null; }
+}
