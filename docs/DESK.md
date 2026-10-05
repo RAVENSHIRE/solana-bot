@@ -523,6 +523,16 @@ With TEST stopped, **RESET TEST** archives both paper ledgers and their cycles (
 - **Evidence**: OBSERVED / DERIVED / INFERRED; missing data is shown as UNKNOWN or UNVERIFIED, never filled in.
 - **Exits** (FAIR; CRASH above): checked every 5 seconds, independent of the discovery scan. Early warnings first — pool liquidity 30 % below its level at entry, or the known pump.fun creator selling — then `RS_STOP_LOSS_PCT`, `RS_TAKE_PROFIT_PCT`, trailing stop and `RS_MAX_HOLD_MIN`, valued with an executable Jupiter quote. Exits are never blocked by TEST cash or the max-drag cap; a TEST exit that cannot be simulated is booked at the executable quote.
 - **History**: besides the on-screen window, every event is appended to `data-desk/events-<MODE>.log.jsonl` (rotated at 20 MB).
+- **Order timing (EXEC)**: every order that reached a quote writes one `EXEC` event: milliseconds from the decision to
+  the quote, the built transaction, the simulation, the pre-flight and, LIVE only, the signature request, the signature
+  and the broadcast, then the end; the amount filled (or simulated) against the quote, the priority fee, and whether
+  it reverted on chain. TEST stops where a signature would be asked. Shown under *Execution* in the telemetry.
+- **One simulation per order**: the guard simulates the built transaction with its account checks; the executor no
+  longer simulates it a second time. The rent-exempt minimums are read once per run, and the wallet is read while the
+  quote is requested, not after it.
+- **GeckoTerminal** allows about 30 calls a minute per PC. The desk (8 a minute), its coin check and the research
+  observer's ladder (at most 10 a minute) share it: a refusal (HTTP 429) rests every caller on the PC for at least a
+  minute (`data-desk/geckoterminal-rest.json`), and a request never sleeps through a long rest.
 
 ## TEST without Phantom and the TEST drill
 

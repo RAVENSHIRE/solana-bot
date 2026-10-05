@@ -374,3 +374,27 @@ test('pair selection: a pool quoted in another token wins when it holds the real
   const m = pairMetrics(selectPair(pairs, mint, now)!, now, t);
   assert.equal(Math.round(m.tokenAgeMin!), 60); assert.equal(m.quote, 'AMC');
 });
+
+test('GeckoTerminal rest shared on the PC: a 429 in one process rests every caller at least a minute, and nobody sleeps through it inside a request', async () => {
+  const { SharedRest, GECKO_REST_MS } = await import('../src/data/shared-rest');
+  const os = await import('node:os'), fsp = await import('node:fs/promises'), path = await import('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'gecko-rest-')), file = path.join(dir, 'geckoterminal-rest.json');
+  let now = 1_000_000;
+  const desk = new SharedRest(file, () => now), ladder = new SharedRest(file, () => now);
+  let calls = 0;
+  const limited = http((async () => { calls++; return new Response('', { status: 429 }); }) as typeof fetch, { sharedRest: desk, minRateLimitPauseMs: GECKO_REST_MS, clock: () => now, retries: 2 });
+  await assert.rejects(limited.get('/x'), (e: DataError) => e.kind === 'rate-limited' && e.retryAfterMs === GECKO_REST_MS);
+  assert.equal(calls, 1, 'a minute-long rate limit is not retried inside the request');
+  // The other process (the ladder) sees the rest from the file after its 2 s read interval, and stops until it ends.
+  now += 2_500;
+  assert.equal(ladder.resting(), true); assert.equal(ladder.until(), 1_000_000 + GECKO_REST_MS);
+  const other = http((async () => { calls++; return new Response('{}'); }) as typeof fetch, { sharedRest: ladder, clock: () => now });
+  await assert.rejects(other.get('/y'), (e: DataError) => e.kind === 'unavailable-provider');
+  assert.equal(calls, 1, 'no request while the PC rests');
+  now = 1_000_000 + GECKO_REST_MS + 2_500;
+  assert.deepEqual(await other.get('/y'), {}); assert.equal(calls, 2);
+  // A shorter rest never cuts a longer one another process set.
+  ladder.rest(5 * 60_000); desk.rest(1_000);
+  now += 2_500; assert.equal(desk.until(), ladder.until());
+  await fsp.rm(dir, { recursive: true, force: true });
+});

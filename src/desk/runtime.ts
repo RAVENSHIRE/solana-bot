@@ -33,6 +33,7 @@ import { localKeySigner } from './local-signer';
 import { DeskResearchRecorder } from '../research/integration/desk-recorder';
 import { addToWatchlist, checkCoin, type CoinCheck } from '../research/coin-check';
 import { rpcHolders } from '../research/holders';
+import { GECKO_REST_MS, SharedRest, geckoRestFile } from '../data/shared-rest';
 import { PublicKey } from '@solana/web3.js';
 import type { DeskMode } from './types';
 
@@ -123,6 +124,9 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
   if (await rpc.execute('desk:genesis', c => c.getGenesisHash()) !== '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d') throw new DeskReject('MAINNET_REQUIRED');
   const data = new DataRuntime(logger, cfg.data);
   await fs.mkdir(o.dataDir, { recursive: true });
+  // GeckoTerminal's free limit is per PC: the desk, its coin check and the research observer's ladder share one rest.
+  const geckoRest = new SharedRest(geckoRestFile(o.dataDir));
+  data.shareRest('geckoterminal', geckoRest, GECKO_REST_MS);
   const lockPath = path.join(o.dataDir, 'desk.lock');
   const lock = await acquireProcessLock(lockPath).catch(() => { throw new DeskReject('INSTANCE_LOCK'); });
   let research: DeskResearchRecorder | null = null;
@@ -201,7 +205,7 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
     };
     const watchFile = path.join(o.dataDir, 'research', 'watch-tokens.json'), holders = rpcHolders((label, fn) => rpc.execute(label, fn));
     return { engines, capital, operational, liveSigner: live.signer, watch, assistant, walletHistory: history, notify: alerts.notify,
-      coinCheck: mint => checkCoin(mint, { jupiterApiKey: env.JUPITER_API_KEY?.trim() || null, holders, watchFile }),
+      coinCheck: mint => checkCoin(mint, { jupiterApiKey: env.JUPITER_API_KEY?.trim() || null, holders, watchFile, geckoRest }),
       watchlistAdd: async (mint, note) => { await fs.mkdir(path.dirname(watchFile), { recursive: true }); return addToWatchlist(watchFile, mint, note); },
       phoneAlerts: { kinds: () => ALERT_KINDS.filter(k => phoneAlerts.has(k)), set: async kinds => {
         phoneAlerts.clear();

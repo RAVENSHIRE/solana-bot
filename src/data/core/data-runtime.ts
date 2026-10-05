@@ -1,4 +1,5 @@
 import type { Logger } from '../../utils/logger';
+import type { SharedRest } from '../shared-rest';
 import { TokenBucket } from '../../utils/rate-limiter';
 import { HttpClient } from '../http-client';
 import type { MarketDataStore } from '../storage/market-data-store';
@@ -22,10 +23,14 @@ export class DataRuntime {
   constructor(readonly log: Logger, readonly settings: DataSettings = defaultDataSettings, readonly history?: MarketDataStore, private readonly fetcher?: typeof fetch) {
     this.gate = new RequestGate(settings.maxConcurrent);
   }
+  private readonly rests = new Map<Source, { rest: SharedRest; minPauseMs: number }>();
+  /** Before the source's client is created: a rest shared with other processes, and the least pause after a 429. */
+  shareRest(source: Source, rest: SharedRest, minPauseMs: number): void { this.rests.set(source, { rest, minPauseMs }); }
   http(source: Source, baseUrl: string, rps: number): HttpClient {
     let client = this.clients.get(source);
-    if (!client) { client = new HttpClient({ name: source, baseUrl, limiter: new TokenBucket(1, rps), logger: this.log,
-      timeoutMs: this.settings.timeoutMs, retries: this.settings.retries, source, health: this.health, gate: this.gate, fetch: this.fetcher }); this.clients.set(source, client); }
+    if (!client) { const shared = this.rests.get(source); client = new HttpClient({ name: source, baseUrl, limiter: new TokenBucket(1, rps), logger: this.log,
+      timeoutMs: this.settings.timeoutMs, retries: this.settings.retries, source, health: this.health, gate: this.gate, fetch: this.fetcher,
+      sharedRest: shared?.rest, minRateLimitPauseMs: shared?.minPauseMs }); this.clients.set(source, client); }
     return client;
   }
   async read<T>(source: Source, key: string, category: Category, request: () => Promise<unknown>, normalize: (raw: unknown, receivedAt: number) => T): Promise<T> {

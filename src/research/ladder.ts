@@ -1,3 +1,4 @@
+import type { SharedRest } from '../data/shared-rest';
 import fs from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import type { Field, ResearchLedger } from './ledger';
@@ -29,8 +30,11 @@ export const LADDER = Object.freeze({
   majors: ['SOL', 'WSOL', 'ETH', 'WETH', 'BTC', 'WBTC', 'CBBTC', 'USDC', 'USDT', 'DAI', 'BNB', 'WBNB', 'USD1', 'USDE', 'PYUSD'],
   trackDays: 7, maxTracked: 1_200,
   jupiterBatch: 50, jupiterRefreshCalls: 24, gtMultiBatch: 30, gtMultiCalls: 4,
-  /** GeckoTerminal's free API allows about 30 calls a minute per machine, shared with the desk: space them, back off on 429. */
-  gtGapMs: 2_500, birdeyeGapMs: 1_200, cooldownMs: 5 * 60_000,
+  /**
+   * GeckoTerminal's free API allows about 30 calls a minute per machine, shared with the desk (8 a minute) and the coin
+   * check: the ladder takes at most 10 a minute, and a 429 rests every caller on the PC (data-desk/geckoterminal-rest.json).
+   */
+  gtGapMs: 6_000, birdeyeGapMs: 1_200, cooldownMs: 5 * 60_000,
   historyPerCycle: 4, historyRefreshMs: 24 * 3_600_000, hourCandlesBelowDays: 10,
   holderScansPerCycle: 2, holderMinMcapUsd: 1_000_000, holderRefreshMs: 24 * 3_600_000,
 });
@@ -144,6 +148,8 @@ export interface LadderDeps {
   birdeyeApiKey?: string | null;
   /** Holder scans over this Solana RPC; none without it. */
   holders?: HolderRpc | null;
+  /** GeckoTerminal's rest shared with the desk on this PC. */
+  geckoRest?: SharedRest | null;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   log?: (line: string) => void;
@@ -153,16 +159,16 @@ export interface LadderDeps {
 class Spaced {
   private last = 0;
   private restUntil = 0;
-  constructor(private readonly gapMs: number, private readonly d: LadderDeps) {}
+  constructor(private readonly gapMs: number, private readonly d: LadderDeps, private readonly shared: SharedRest | null = null) {}
   private get now() { return (this.d.now ?? Date.now)(); }
-  resting(): boolean { return this.now < this.restUntil; }
+  resting(): boolean { return this.now < this.restUntil || !!this.shared?.resting(); }
   async json<T>(url: string, headers: Record<string, string> = {}): Promise<T | null> {
     if (this.resting()) return null;
     const wait = this.last + this.gapMs - Date.now();
     if (wait > 0) await (this.d.sleep ?? (ms => new Promise(r => setTimeout(r, ms))))(wait);
     this.last = Date.now();
     const res = await (this.d.fetcher ?? fetch)(url, { headers: { accept: 'application/json', ...headers }, signal: AbortSignal.timeout(20_000) }).catch(() => null);
-    if (res?.status === 429) { this.restUntil = this.now + LADDER.cooldownMs; return null; }
+    if (res?.status === 429) { this.restUntil = this.now + LADDER.cooldownMs; this.shared?.rest(LADDER.cooldownMs); return null; }
     return res?.ok ? await res.json() as T : null;
   }
 }
@@ -179,7 +185,7 @@ export class LadderWatch {
 
   constructor(private readonly d: LadderDeps) {
     this.jupiter = new JupiterTokens({ fetcher: d.fetcher, apiKey: d.jupiterApiKey });
-    this.gecko = new Spaced(LADDER.gtGapMs, d);
+    this.gecko = new Spaced(LADDER.gtGapMs, d, d.geckoRest ?? null);
     this.birdeye = new Spaced(LADDER.birdeyeGapMs, d);
     this.load();
   }

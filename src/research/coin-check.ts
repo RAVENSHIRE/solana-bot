@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import { JupiterTokens, type JupToken, type WatchToken } from './verified';
 import { scanHolders, type HolderRpc } from './holders';
+import { GECKO_REST_MS, type SharedRest } from '../data/shared-rest';
 import { milestoneContext, tierOf } from './fundamentals/levels';
 import { athSummary, type Bar } from './fundamentals/history';
 import { impliedSupply, readHistory, readMarket, type TokenMarket } from './fundamentals/market';
@@ -50,6 +51,8 @@ export interface CoinCheckDeps {
   now?: () => number;
   /** Wait before the one retry of a holder scan the RPC refused as too many requests (429). */
   retryMs?: number;
+  /** GeckoTerminal's rest shared with the desk and the ladder: while it rests, the price history is skipped (and listed). */
+  geckoRest?: SharedRest | null;
 }
 
 const usd = (x: number | null | undefined) => x == null ? '–' : x >= 1e9 ? `$${(x / 1e9).toFixed(2)}B` : x >= 1e6 ? `$${(x / 1e6).toFixed(2)}M` : x >= 1e3 ? `$${(x / 1e3).toFixed(1)}K` : `$${x.toFixed(0)}`;
@@ -140,7 +143,11 @@ export async function checkCoin(mint: string, d: CoinCheckDeps = {}): Promise<Co
   // History and holders need the pair and the developer from the first round.
   const supply = m ? impliedSupply(m) : null, young = created !== null && now - created < 40 * 86_400_000;
   const [bars, holderScan] = await Promise.all([
-    m?.pairAddress && supply ? readHistory('solana', m.pairAddress, mint, young ? 'hour' : 'day', supply, { fetcher: d.fetcher }).catch(fail('price history')) : Promise.resolve(null),
+    m?.pairAddress && supply ? (d.geckoRest?.resting() ? Promise.reject(new Error(`GeckoTerminal resting after a rate limit until ${new Date(d.geckoRest.until()).toISOString().slice(11, 16)} UTC`))
+      : readHistory('solana', m.pairAddress, mint, young ? 'hour' : 'day', supply, { fetcher: d.fetcher }).catch((e: Error) => {
+        if (/HTTP 429/.test(e.message)) d.geckoRest?.rest(GECKO_REST_MS);
+        throw e;
+      })).catch(fail('price history')) : Promise.resolve(null),
     d.holders ? scanOnce(d.holders, mint, t?.dev ?? null, now, d.retryMs ?? 5_000).catch(fail('holder scan')) : Promise.resolve(null),
   ]);
   const a = bars ? athSummary(bars as Bar[]) : null;

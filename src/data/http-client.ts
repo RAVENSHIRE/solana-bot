@@ -4,11 +4,16 @@ import { withRetry } from '../utils/retry';
 import { DataError, type Source } from './core/data-types';
 import type { DataHealth } from './core/data-health';
 import { checkTask, priority, requestScope, RequestGate } from './core/request-scope';
+import type { SharedRest } from './shared-rest';
 
 export interface HttpOptions {
   name: string; baseUrl: string; limiter: TokenBucket; logger: Logger; timeoutMs: number; retries: number;
   headers?: Record<string, string>; gate?: RequestGate; health?: DataHealth; source?: Source;
   fetch?: typeof fetch; clock?: () => number; maxBodyBytes?: number;
+  /** A rest shared with other processes on this PC (GeckoTerminal's limit is per machine). */
+  sharedRest?: SharedRest;
+  /** A 429 pauses at least this long (a provider that sends no Retry-After would otherwise be retried after 1 s). */
+  minRateLimitPauseMs?: number;
 }
 const defaultGate = new RequestGate(4);
 export function retryAfter(value: string | null, now = Date.now()): number {
@@ -42,6 +47,7 @@ export class HttpClient {
     checkTask();
     const clock = this.o.clock ?? Date.now;
     if (clock() < this.cooldownUntil) throw new DataError('unavailable-provider', this.o.name, 'provider cooldown', this.cooldownUntil - clock());
+    if (this.o.sharedRest?.resting()) throw new DataError('unavailable-provider', this.o.name, 'provider resting (rate limit shared on this PC)', this.o.sharedRest.until() - clock());
     const url = new URL(this.o.baseUrl.replace(/\/$/, '') + route);
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, String(value));
     const source = this.o.source;
@@ -64,8 +70,9 @@ export class HttpClient {
               if (status >= 400 && status < 500 && ![401, 403, 408, 429].includes(status)) throw new DataError('rejected', this.o.name, `HTTP ${status}${await errorCode(res)}`);
               await res.body?.cancel();
               if (res.status === 429) {
-                const pause = retryAfter(res.headers.get('retry-after'), clock());
+                const pause = Math.max(retryAfter(res.headers.get('retry-after'), clock()), this.o.minRateLimitPauseMs ?? 0);
                 this.o.limiter.pause(pause);
+                this.o.sharedRest?.rest(pause);
                 if (health) health.cooldownUntil = clock() + pause;
                 throw new DataError('rate-limited', this.o.name, 'HTTP 429', pause);
               }
@@ -95,7 +102,8 @@ export class HttpClient {
           }
         }, priority());
       }, { retries: this.o.retries, baseDelayMs: 250, maxDelayMs: 5000,
-        isRetryable: e => e instanceof DataError && ['transient', 'rate-limited'].includes(e.kind),
+        // A short rate limit is retried; a long one is not slept through inside a request (a scan has seconds, not minutes).
+        isRetryable: e => e instanceof DataError && (e.kind === 'transient' || (e.kind === 'rate-limited' && e.retryAfterMs <= 5_000)),
         onRetry: (_e, attempt) => { if (health) health.retries++; this.o.logger.debug('Data request retry', { source: this.o.name, attempt }); } });
       this.failures = 0; return result;
     } catch (err) {

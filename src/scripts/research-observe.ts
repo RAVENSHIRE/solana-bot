@@ -28,6 +28,7 @@ import { VerifiedWatch } from '../research/verified';
 import { AliveReporter, aliveFile } from '../research/alive';
 import { LadderWatch } from '../research/ladder';
 import { rpcHolders } from '../research/holders';
+import { SharedRest, geckoRestFile } from '../data/shared-rest';
 import { QUALIFY_MEMORY, qualifyHeapMb, type Qualification } from '../research/qualify';
 
 const arg = (name: string) => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : undefined; };
@@ -120,7 +121,8 @@ async function main(): Promise<void> {
     const rpcUrl = endpoints.find(e => /helius/i.test(e)) ?? endpoints[0] ?? null;
     ladder = new LadderWatch({ ledger: ladderLedger, stateFile: path.join(ladderDir, 'ladder-state.json'), watchFile: path.join(dir, 'watch-tokens.json'),
       jupiterApiKey: env.JUPITER_API_KEY?.trim() || null, birdeyeApiKey: env.BIRDEYE_API_KEY?.trim() || null,
-      holders: rpcUrl ? rpcHolders(new Connection(rpcUrl, 'confirmed')) : null, log: line => console.log(`${new Date().toISOString().slice(0, 19)} ${line}`) });
+      holders: rpcUrl ? rpcHolders(new Connection(rpcUrl, 'confirmed')) : null, geckoRest: new SharedRest(geckoRestFile(path.dirname(dir))),
+      log: line => console.log(`${new Date().toISOString().slice(0, 19)} ${line}`) });
     ladder.start();
   }
 
