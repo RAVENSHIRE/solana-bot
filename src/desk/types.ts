@@ -126,6 +126,8 @@ export interface DeskPosition {
   entryLiquidityUsd?: number | null; creator?: string | null; creatorPctAtEntry?: number | null;
   /** LAUNCH: the creator and creation-slot buyers, their share at entry, and whether the token was still on its curve. */
   insiders?: string[] | null; insiderPctAtEntry?: number | null; onCurve?: boolean | null;
+  /** When the first check after the entry re-measured the insiders' and the creator's share (the baselines above). */
+  insidersMeasuredAt?: number | null; creatorMeasuredAt?: number | null;
   /** Scale-ins so far, and the first entry's price (multiples are measured from it). */
   adds?: number; firstEntryPriceUsd?: number | null; peakMultiple?: number;
   /** GOLDEN POCKET: the pattern's stop and take-profit as market caps (per position, not per strategy). */

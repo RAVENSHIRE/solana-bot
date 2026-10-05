@@ -137,6 +137,10 @@ Mint and freeze authority revoked and no dangerous token extensions always apply
 - Custom strategies see every priced token, including those above FAIR's $1M band. A token kept only for them shows the tier **Custom only** and is never a FAIR entry.
 - The **Custom** column in *Candidates* shows each strategy's verdict: entry-ready, or the first rule not met. The token's detail lists every check.
 - Holders are counted first for tokens a custom strategy is interested in.
+- Custom strategies enter after the scan has ranked its tokens. The desk keeps 60 tokens in memory; a token that is
+  entry-ready for any strategy is never among the ones dropped. Until 5 Oct the drop went by FAIR's verdict, so half
+  the custom-strategy signals were dropped before the custom strategies looked (5 Oct, 13:30–17:00 UTC: 26 of 52 coins,
+  MIGRATION2 16 of 28); MIGRATION2 was entry-ready on SOLBORN for 20 minutes at $57K–$298K and never bought.
 - Each strategy has its own ledger (`ledger-PAPER-<ID>.json`, `ledger-LIVE-<ID>-<wallet>.json`) and, in TEST, its own sleeve.
 - A new strategy starts **ON in TEST and OFF in LIVE**.
 - An edit applies to new entries at once, and to the exits of open positions.
@@ -312,7 +316,10 @@ The signal is the quality of the launch itself. Only a few of the ~50 pump.fun l
 
   A bundled creation alone does not mark a rug (ETF was the best trade). What both had in common is the insiders — the creator and every wallet that bought in the creation slot — selling into the migration, when Jupiter cannot route the token for a minute or two. So:
   - the insiders are read from the chain seconds after the launch is seen and shown in the radar (pump.fun's CreateV2 / Token-2022 launches included; the curve's own token account is not an insider; an unreadable creation is retried twice and then stays unknown, which does not block); a launch where they hold ≥ 50 % is never bought;
-  - a held position sells as soon as the insiders sold 25 % of their bag and at least 1 % of supply (**RUG insiders sold**), checked every 8 s;
+  - a held position sells as soon as the insiders sold 25 % of their bag and at least 1 % of supply (**RUG insiders sold**), checked every 8 s.
+    Their bag is measured again at the first check after the entry, and so is the creator's (DEV_SELLING): what they
+    sold before the desk bought is not a sale. Until 5 Oct the share from the launch was used, so a CRASH entry 30 min
+    after the launch of SOLBORN (insiders 63 % at launch, 1.4 % by then) was sold 10 s later as a RUG; the coin went 9×;
   - a position bought on the curve sells **before graduation** when the curve is 90 % full and the insiders still hold ≥ 8 % (**PRE_GRADUATION**); insiders with a small bag are ridden through graduation;
   - a held launch's X account is re-read every minute: gone on two reads in a row after it existed → **RUG**, sold;
   - every rug is remembered in `data-desk/rugs.json` with its creator, X account and website: a later launch by the same creator, account or site scores 0 (**RUG HISTORY**). Potato is on the list from the start.

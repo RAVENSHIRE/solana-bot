@@ -869,8 +869,11 @@ export class DeskEngine {
       }
     }
     if (this.candidates.size > DESK.maxCandidates) {
-      const held = new Set(this.books().flatMap(b => b.ledger.state.positions.map(p => p.mint)));
-      const drop = [...this.candidates.values()].filter(c => !held.has(c.mint)).sort((a, b) => rank(a) - rank(b) || a.updatedAt - b.updatedAt)
+      // Held tokens and this scan's entry signals stay: custom strategies enter after this trim, and the rank below is
+      // FAIR's status (SOLBORN, 5 Oct: MIGRATION2 entry-ready for 20 min at $57K–$298K, trimmed before every entry pass).
+      const keep = new Set(this.books().flatMap(b => b.ledger.state.positions.map(p => p.mint)));
+      for (const c of this.candidates.values()) if (c.updatedAt >= now && this.verdicts(c).some(v => v.signal)) keep.add(c.mint);
+      const drop = [...this.candidates.values()].filter(c => !keep.has(c.mint)).sort((a, b) => rank(a) - rank(b) || a.updatedAt - b.updatedAt)
         .slice(0, this.candidates.size - DESK.maxCandidates);
       for (const c of drop) { this.candidates.delete(c.mint); this.watch.delete(c.mint); this.deep.delete(c.mint); this.holderInfo.delete(c.mint); }
     }
@@ -979,6 +982,10 @@ export class DeskEngine {
       try {
         // OPEN holds through graduation ("stay in for at least 6×"): insiders dumping still sells it, the curve level does not.
         const [now, curve] = await Promise.all([insiderHolding(this.d.rpc, p.mint, p.insiders), p.onCurve && preGraduation ? curveState(this.d.rpc, p.mint) : Promise.resolve(null)]);
+        // The radar measured the insiders at launch, possibly long before the entry: the first check after the entry sets
+        // the baseline, so what they sold before we bought is not a sale (SOLBORN, 5 Oct: 63 % at launch, 1.4 % at a
+        // CRASH entry 30 min later, sold as a RUG; the coin then went 9×).
+        if (p.insidersMeasuredAt == null) { p.insiderPctAtEntry = now; p.insidersMeasuredAt = Date.now(); }
         const exit = insiderExit(p.insiderPctAtEntry, now, curve);
         if (exit) return exit;
       } catch { /* RPC outage: retried on the next check */ }
@@ -990,6 +997,8 @@ export class DeskEngine {
       this.creatorChecks.set(p.mint, Date.now());
       try {
         const pct = await creatorHolding(this.d.rpc, p.creator, p.mint);
+        // Same for the creator: the radar's share is from the launch; the first check after the entry is the baseline.
+        if (p.creatorMeasuredAt == null) { p.creatorPctAtEntry = pct; p.creatorMeasuredAt = Date.now(); }
         if (pct < p.creatorPctAtEntry - x.creatorSellExitPts) return `DEV_SELLING creator holds ${pct.toFixed(2)}% (was ${p.creatorPctAtEntry.toFixed(2)}% at entry)`;
       } catch { /* RPC outage: retried on the next check */ }
     }

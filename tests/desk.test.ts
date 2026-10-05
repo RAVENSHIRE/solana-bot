@@ -899,6 +899,28 @@ const BIG: RuleSpecInput = { id: 'BIG', label: 'BIG RUNNER', summary: 'test',
   exits: { takeProfitPct: null, stopLossPct: 25, trailingActivationPct: 30, trailingStopPct: 25, maxHoldMin: 10_080, marketCapTargetUsd: 9_000_000 },
   sizing: { capitalUsd: 5, entryUsd: 2, maxOpenPositions: 2, slippageBps: 300, exitSlippageBps: 500, maxDragPct: 8 } };
 
+test('the candidate trim keeps this scan\'s entry signals: a custom strategy still enters when the desk holds more tokens than it keeps', async () => {
+  const patch = { marketCap: 5_000_000, fdv: 5_000_000, priceChange: { m5: 3, h1: 10 }, volume: { m5: 30_000, h1: 300_000 } };
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-trim-')), seedDir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-trim-seed-'));
+  type Inner = { candidates: Map<string, { mint: string; status: string; updatedAt: number; rules?: unknown }> };
+  try {
+    // A real candidate as the template for the filler tokens.
+    const seeder = await DeskEngine.create({ ...world(patch).shared, mode: 'PAPER', dir: seedDir, sender: null, wallet: () => ({ owner, signer: null }) });
+    await seeder.defineStrategy(parseRuleSpec(BIG)); seeder.start(); await seeder.pulse();
+    const seed = structuredClone((seeder as unknown as Inner).candidates.get(MINT)!);
+    assert.ok(seed, 'template candidate');
+    const engine = await DeskEngine.create({ ...world(patch).shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    engine.start();
+    // More tokens than the desk keeps, all ranked above this one by FAIR's status (FAIR filters a $5M token).
+    const inner = engine as unknown as Inner;
+    for (let i = 0; i < DESK.maxCandidates + 10; i++) inner.candidates.set(tokenKey(300 + i), { ...structuredClone(seed), mint: tokenKey(300 + i), status: 'WATCHLIST', rules: undefined, updatedAt: Date.now() + 3_600_000 });
+    await engine.defineStrategy(parseRuleSpec(BIG)); await engine.pulse();
+    const view = engine.status({ connected: false, address: null });
+    assert.deepEqual(view.positions.map(p => p.strategy), ['BIG'], 'trimmed before the custom strategies looked, it was never bought');
+    assert.ok(inner.candidates.has(MINT)); assert.ok(inner.candidates.size <= DESK.maxCandidates + 1);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); await fs.rm(seedDir, { recursive: true, force: true }); }
+});
+
 test('a custom strategy trades a $5M token FAIR filters out: holders and safety checked, own ledger, market-cap target exit, saved for restarts', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-custom-')), { w, shared } = world({ marketCap: 5_000_000, fdv: 5_000_000, priceChange: { m5: 3, h1: 10 }, volume: { m5: 30_000, h1: 300_000 } });
   try {
@@ -1036,13 +1058,14 @@ test('LAUNCH: the project posting the CA on X allows an entry from 1 min; unconf
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-test('LAUNCH rug defence: insiders selling is a RUG exit (remembered); insiders still holding at 92% curve progress means selling before graduation', async () => {
+test('LAUNCH rug defence: insiders selling is a RUG exit (remembered); insiders still holding at 92% curve progress means selling before graduation; what they sold before the entry is not a sale', async () => {
   const curve = { dexId: 'pumpfun', liquidity: null, marketCap: 20_000, fdv: 20_000, pairCreatedAt: NOW - 5 * 60_000, priceChange: { m5: 12, h1: 40 } };
   const INS = key(77).toBase58();
-  for (const scenario of ['dump', 'graduation'] as const) {
+  for (const scenario of ['dump', 'graduation', 'sold-before'] as const) {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), `desk-rug-${scenario}-`)), { w, shared } = world(curve);
     try {
-      w.insider = INS; w.insiderRaw = 147_000_000_000_000n;
+      // The radar measured 14.7 % at launch; in 'sold-before' the insiders already hold only 9 % when the desk buys.
+      w.insider = INS; w.insiderRaw = scenario === 'sold-before' ? 90_000_000_000_000n : 147_000_000_000_000n;
       const launch = { mint: MINT, name: 'Pot Potato', symbol: 'ABC', uri: 'https://meta/1', creator: INS, at: Date.now() - 5 * 60_000, signature: 'S',
         meta: { description: null, twitter: 'https://x.com/alphaproj', website: 'https://alpha.example', telegram: null }, x: parseXLink('https://x.com/alphaproj'), site,
         score: 8, reasons: ['own X account @alphaproj'], shortlistedAt: null, xPage: null, xCheckedAt: null, siteCheckedAt: null, clone: null,
@@ -1056,7 +1079,19 @@ test('LAUNCH rug defence: insiders selling is a RUG exit (remembered); insiders 
       assert.equal(view.positions.length, 1, view.candidates[0]?.launch?.signal.summary);
       const held = (await fs.readFile(path.join(dir, 'ledger-PAPER-LAUNCH.json'), 'utf8'));
       assert.match(held, /"insiders": \[\s*"[^"]+"\s*\]/); assert.match(held, /"insiderPctAtEntry": 14\.7/); assert.match(held, /"onCurve": true/);
-      if (scenario === 'dump') w.insiderRaw = 90_000_000_000_000n;
+      const inner = engine as unknown as { insiderChecks: Map<string, number>; creatorChecks: Map<string, number>; ledgerOf(id: string): { position(m: string): { insiderPctAtEntry?: number | null; creatorPctAtEntry?: number | null } | null } };
+      if (scenario === 'sold-before') {
+        await engine.pulse(); inner.insiderChecks.clear(); inner.creatorChecks.clear(); await engine.pulse();
+        view = engine.status({ connected: false, address: null });
+        assert.equal(view.positions.length, 1, 'held: the insiders sold before the entry, not after it');
+        assert.equal(engine.events.list().filter(e => e.stage === 'EXIT').length, 0);
+        const p = inner.ledgerOf('LAUNCH').position(MINT)!;
+        assert.equal(p.insiderPctAtEntry, 9, 'the baseline is what they held at the first check after the entry');
+        assert.equal(p.creatorPctAtEntry, 9);
+        assert.equal(rugs.length, 0);
+        continue;
+      }
+      if (scenario === 'dump') { await engine.pulse(); inner.insiderChecks.clear(); w.insiderRaw = 90_000_000_000_000n; }
       else { const b = Buffer.alloc(151); b.writeBigUInt64LE(63_448_000_000_000n, 24); w.curve = b; }
       await engine.pulse();
       view = engine.status({ connected: false, address: null });

@@ -12,6 +12,7 @@ const position = z.object({ id: z.string(), mint: z.string(), symbol: z.string()
   rentLamports: raw, pairAddress: z.string(), entryLiquidityUsd: finite.nullable().optional(), creator: z.string().nullable().optional(),
   creatorPctAtEntry: finite.nullable().optional(), noRouteSince: z.number().int().nonnegative().nullable().optional(),
   insiders: z.array(z.string()).max(16).nullable().optional(), insiderPctAtEntry: finite.nullable().optional(), onCurve: z.boolean().nullable().optional(),
+  insidersMeasuredAt: z.number().int().nullable().optional(), creatorMeasuredAt: z.number().int().nullable().optional(),
   adds: z.number().int().min(0).max(20).optional(), firstEntryPriceUsd: finite.nullable().optional(), peakMultiple: finite.optional(),
   stopUsd: finite.nullable().optional(), targetUsd: finite.nullable().optional() }).strict();
 const entry = z.object({ id: z.string(), at: z.number().int(), mode: z.enum(['PAPER', 'LIVE']), txSignature: z.string().nullable(), mint: z.string(),
