@@ -28,6 +28,7 @@ import { BaseStrategy } from '../src/strategies/base-strategy';
 import { ReversalSniperStrategy } from '../src/strategies/reversal-sniper';
 import { SuckUpTheRentStrategy } from '../src/strategies/suck-up-the-rent';
 import { Engine } from '../src/core/engine';
+import { PRICE_QUOTE_MINTS, USDC_MINT, USDT_MINT } from '../src/core/types';
 import { TokenBucket } from '../src/utils/rate-limiter';
 import { Logger, configureLogger } from '../src/utils/logger';
 import { redact } from '../src/utils/redact';
@@ -76,6 +77,12 @@ test('analytical pool selection records rejected alternatives and never keys by 
   assert.equal(choice.selected.get(MINT)?.pairAddress, POOL); assert.equal(choice.rejected[0]?.pool, WALLET);
   assert.equal(DexScreenerClient.selectPairs(rows, NOW + 90001).selected.size, 0);
   assert.equal(DexScreenerClient.selectPairs([{ ...rows[0]!, liquidity: { usd: null } }], NOW).selected.size, 0);
+});
+test('USD valuation prices USDC from its USDC/USDT pool; discovery still rejects USDT quotes', () => {
+  // DexScreener lists USDC only as the base of a USDC/USDT pool; without it every micro scan was USD_PRICE_MISSING.
+  const rows = normalizeDexPairs([{ ...dexRaw(), baseToken: { address: USDC_MINT, symbol: 'USDC' }, quoteToken: { address: USDT_MINT }, priceUsd: '1.0003' }], NOW);
+  assert.equal(DexScreenerClient.selectPairs(rows, NOW).rejected[0]?.reason, 'UNSUPPORTED_QUOTE');
+  assert.equal(DexScreenerClient.selectPairs(rows, NOW, 90_000, PRICE_QUOTE_MINTS).selected.get(USDC_MINT)?.priceUsd, 1.0003);
 });
 test('Dex client batches 31 distinct mints into <=30 and shares concurrent discovery', async () => {
   const paths: string[] = []; const runtime = new DataRuntime(log, settings, undefined, async input => {
@@ -178,6 +185,13 @@ test('source cooldown rejects requests until expiry; another provider remains us
   const runtime = new DataRuntime(log, settings, undefined, async input => String(input).includes('geckoterminal') ? reply({}, 503) : reply([dexRaw()]));
   const results = await Promise.allSettled([new GeckoTerminalClient(log, runtime).getTrendingPools(), new DexScreenerClient(log, runtime).getPairsForTokens([MINT])]);
   assert.equal(results[0]!.status, 'rejected'); assert.equal(results[1]!.status, 'fulfilled');
+});
+test('a refused request (HTTP 4xx such as no route) is not an outage: no retry, no cooldown, provider error code kept', async () => {
+  let calls = 0; const client = http(async () => { calls++; return reply({ error: 'Could not find any route', errorCode: 'COULD_NOT_FIND_ANY_ROUTE' }, 400); }, { retries: 2 });
+  for (let n = 0; n < 5; n++) await assert.rejects(client.get('/quote'), (e: unknown) => e instanceof DataError && e.kind === 'rejected' && /HTTP 400 COULD_NOT_FIND_ANY_ROUTE$/.test(e.message));
+  assert.equal(calls, 5, 'every request reaches the provider: one unroutable token never pauses the others');
+  const bad = http(async () => reply({ errorCode: 'x'.repeat(200) }, 422));
+  await assert.rejects(bad.get('/quote'), /HTTP 422$/);
 });
 test('priority gate reserves execution capacity and preserves originating request scope', async () => {
   const gate = new RequestGate(2); const first = deferred(); const order: string[] = [];
@@ -340,4 +354,23 @@ test('LP outage retains paper position without inventing current APR or a pool-g
     raydium: { getPoolsByIds: async () => [] }, portfolio: { lpPositions: () => [{ id: 'p', poolId: POOL, missedUpdates: 20 }],
       updateLp: (_id: string, patch: any) => { updated = patch; }, closeLp: () => { closed++; } } } as any);
   await sutr.updateLpPositions(); assert.equal(updated.missedUpdates, 21); assert.equal(updated.accruedFeesLamports, undefined); assert.equal(closed, 0);
+});
+
+test('pair selection: a pool quoted in another token wins when it holds the real liquidity (COMMIE/AMC); token age comes from the oldest pool', async () => {
+  const { selectPair, tokenTimes, pairMetrics } = await import('../src/desk/discovery');
+  const { normalizeDexPairs } = await import('../src/data/dexscreener');
+  const now = Date.now(), mint = 'So11111111111111111111111111111111111111112'.replace('So1', 'Co1');
+  const raw = (pairAddress: string, quote: { address: string; symbol: string }, liq: number, created: number, dexId = 'raydium') => ({ chainId: 'solana', dexId, pairAddress,
+    baseToken: { address: mint, symbol: 'COMMIE' }, quoteToken: quote, priceUsd: '0.0012', liquidity: { usd: liq }, marketCap: 1_200_000, pairCreatedAt: created });
+  const SOL = { address: 'So11111111111111111111111111111111111111112', symbol: 'SOL' }, AMC = { address: 'AMC1qwR9KhiyrQBRPrxnfo4JfMeMZqEBvt5tgTytNNoc', symbol: 'AMC' };
+  const pairs = normalizeDexPairs([raw('Cmcfrs6r6dsCyXvhooFbwvbvNDqe3vDHeXcKmfWGAzrr', AMC, 116_050, now - 60 * 60_000), raw('9j9UhKT8N27F3hZC1kjYMG6i9gL59qB3kdJM7hKozL6P', SOL, 5_874, now - 58 * 60_000, 'meteora')], now);
+  assert.equal(selectPair(pairs, mint, now)!.quoteToken.symbol, 'AMC');
+  const solDeep = normalizeDexPairs([raw('Cmcfrs6r6dsCyXvhooFbwvbvNDqe3vDHeXcKmfWGAzrr', AMC, 116_050, now), raw('9j9UhKT8N27F3hZC1kjYMG6i9gL59qB3kdJM7hKozL6P', SOL, 40_000, now, 'meteora')], now);
+  assert.equal(selectPair(solDeep, mint, now)!.quoteToken.symbol, 'SOL', 'a SOL pool with a fair share of the liquidity is preferred');
+  const thin = normalizeDexPairs([raw('Cmcfrs6r6dsCyXvhooFbwvbvNDqe3vDHeXcKmfWGAzrr', AMC, 9_000, now)], now);
+  assert.equal(selectPair(thin, mint, now), null, 'a thin pool in an odd quote token is not a market');
+  const t = tokenTimes(pairs, mint);
+  assert.equal(t.createdAt, now - 60 * 60_000);
+  const m = pairMetrics(selectPair(pairs, mint, now)!, now, t);
+  assert.equal(Math.round(m.tokenAgeMin!), 60); assert.equal(m.quote, 'AMC');
 });

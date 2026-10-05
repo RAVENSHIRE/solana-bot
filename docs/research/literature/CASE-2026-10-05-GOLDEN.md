@@ -1,0 +1,90 @@
+# Case, 5 Oct: GOLDEN POCKET alerts on rugs that open at $1M+ (`CTi9vcLMLZ8vVHgavYKkg61t6sRieaQE2dXVPsVpump`)
+
+Owner, 5 Oct: "Golden pocket always sends rug tokens with 1mio plus first candle." The alert:
+"Only up · first 2 candles only up to $5.25M → back to $5.26M, within 12 % of candle 2 ($5.25M), stop $4.99M",
+known at 13:07:57 UTC, evidence `al_1302f2d0…`, data UNKNOWN, with no market cap, liquidity or volume.
+
+## What the code shows (base branch, read 5 Oct)
+
+1. **GOLDEN POCKET is OFF as a strategy for good reason.** `config.ts` records −33 % per trade in the backtest once
+   gapped stops sell at the minute's close, and **−57 % on its first 5 live TEST trades** ("rugs fall through the stop
+   in seconds"). Its alerts still reach the phone because the `golden` switch is on: the phone switches or
+   `DESK_ALERTS`. The default is none (`engine.ts`, `DEFAULT_ALERTS`).
+2. **The alert does not say it is not a call.** OPEN alerts carry "Not a qualified call…". The GOLDEN alert
+   (`engine.ts`, `alertOnce('golden:…')`) does not, so a strategy that lost 57 % live reads like a buy signal.
+3. **No market-cap sanity check.** `GOLDEN_RULES.floorUsd` is 0 and there is no ceiling. A pump.fun curve graduates
+   near 411 SOL (the 5 Oct ledger cases), about $48K at the desk's default $118/SOL. A pool printing **$5.25M in its
+   first two minutes is about 100× the graduation value**. That is either a manipulated pool or a wrong supply or
+   quote in the candle source. Neither should reach the phone.
+4. **"Back to" is not a pullback.** In `onlyUpStep` (`golden-pocket.ts`) the entry fills when any later minute's
+   *low* is within 12 % above candle 2's close, at `min(limit, open)`. A third minute that opens at the close of
+   candle 2 fills at once, which is what happened here ($5.25M → "back to" $5.26M). The pattern buys the third minute
+   of a vertical move with no dip, the exact spot where a rug team sells.
+5. **The evidence line is empty here too**, as for OPEN (`FLAG-LEDGER.md`, quick win 4): the alert comes from the
+   golden tracker, not a scored candidate.
+
+## Recommendations
+
+- **Now (owner):** switch GOLDEN off the phone (dashboard Phone switches, or remove `golden` from `DESK_ALERTS`).
+  It is a strategy that is off and lost live; its alerts are noise until something qualifies it.
+- **For the CTO, if GOLDEN alerts are kept:**
+  - a ceiling: no alert when the first pool candle's market cap exceeds 10× the graduation market cap (≈ $500K);
+  - the "Not a qualified call" line;
+  - the market cap and liquidity in the evidence.
+
+  None of this makes GOLDEN profitable. It only stops the worst alerts.
+
+## Hypothesis
+
+| # | Hypothesis | Feature (no look-ahead) | Decision | Passes if | Cost |
+| --- | --- | --- | --- | --- | --- |
+| P1 | **A pool that opens far above its graduation value is a rug.** New feature `poolJumpX`: the high of the first pool minute divided by the graduation market cap (the last curve state before the `X` record) | at the G1 decision point, after the first pool minute | as an exclusion on G1: G1 with `poolJumpX` ≥ 10 removed beats G1, and the excluded group's +1 h mean is below −50 % on ≥ 30 cases | needs pool prices (gate gap 5), like G1 |
+
+## The contrasting case, the same day: GOLDEN on "Using" (`6MLPGnAi…dpump`, `CASE-2026-10-05-USING.md`)
+
+Alert at 12:54:27 UTC, 75 s after graduation (12:53:12): "first 2 candles only up to $42.7K → back to $37.2K, within
+12 % of candle 2 ($36.7K), stop $34.8K". Market cap $42.0K, liquidity $16.7K, 5-minute volume $22.8K, 5 minutes −16 %.
+Data DEGRADED (15 issues), oldest input 66 s. The owner: no rug, and "would have been a great play if a bot entered
+right when sent to ntfy". The outcome is not in the ledger (pool prices are not observed, gate gap 5).
+
+What separates it from the $5.25M alert: **its pool opened near its graduation value** (about $42K against
+411 SOL at graduation), not 100× above it, and the entry was a real dip (−13 % from the $42.7K high). Two cases do
+not make a rule, but they point at the same split as P1. GOLDEN's −33 % backtest already used bot-speed fills, so
+"a bot would have made it" has to be measured, not assumed.
+
+| # | Hypothesis | Test | Passes if | Cost |
+| --- | --- | --- | --- | --- |
+| P2 | **GOLDEN only-up works only near the graduation value.** Shadow-trade (no money) every only-up fill with `poolJumpX` ≤ 3, at bot speed (2 s after the alert) and at phone speed (45 s), with GOLDEN's own exits | `SIG`/`RES`-style shadow records for the golden tracker, judged on the pool's minute candles | after ≥ 30 shadow trades: mean after costs > 0 at the fill speed the desk would use, and the `poolJumpX` > 3 group is worse | the golden tracker writes shadow records (it already has the pool candles); no new feed |
+
+## Third case, 5 Oct 15:45 UTC: `HpkDyHK7avch8TS3raZ6mifBjZoUHRgvWwgzRQL1RXFR` (owner: "4x")
+
+"Only up · first 2 candles only up to $98.4K → back to $83.2K, within 12 % of candle 2 ($86.4K), stop $82.0K".
+Market cap $87.6K, liquidity $25.1K, 5-minute volume $33.9K, 5 minutes +81 %. Data DEGRADED (26), oldest input 50 s.
+
+The pool's first two minutes topped at $98.4K, about 2× a typical graduation value (~$48K at $118/SOL; this coin's
+own graduation price is not in the alert). That puts it in P2's `poolJumpX` ≤ 3 group, like "Using", and far from
+the $5.25M rug. The entry was again a real dip: −15 % from the high. So far three cases, all consistent with P2:
+two sane openers ran, one 100× opener rugged. **Three known cases are still not evidence.** P2's shadow test
+(≥ 30 trades, bot and phone speed) decides.
+
+## TEST trade, 5 Oct 16:53 UTC (18:53 local): `7PUJBf…ipump` ("fomocoin"), a winner sold at −91 %
+
+Owner: GOLDEN's paper position showed a large unrealised gain ("4.9"), then sold for −$1.83 on about $2 (the sell
+line: Jupiter via the Pump.fun AMM, PAPER FILLED). "Why didn't it close at +100 %?"
+
+- **By design GOLDEN has no take profit.** `config.ts` sets `takeProfitPct: Infinity`, with a 25 % trailing stop
+  after +50 %, a 40 % stop and 60 min at most. `strategies.ts` describes it: "No take profit: the trailing stop rides
+  the move".
+- **The trailing stop should have sold about 25 % under the peak.** It sold at about −91 %. The position is checked
+  every 3 s (`positionCheckMs` 3,000), and once the trail is active every check takes a Jupiter quote
+  (`engine.ts`, `quoteDue`). A fall from a large gain to −91 % between two checks means the price gapped, most
+  likely a rug in one or a few transactions. That is the failure `config.ts` already records for GOLDEN: "rugs fall
+  through the stop in seconds". It could also be a gap in the quotes (an outage). The desk's event log for this
+  position (QUOTE and EXIT lines with times) would tell which.
+- **Confirmed (CTO):** +281 % at one check, −88 % three seconds later. A one-block rug.
+- **Lesson:** a trailing stop cannot protect a position against a one-block rug. Only an exit taken *before* the rug
+  protects it. For coins this volatile that means taking part of the profit at a fixed level.
+
+**Added to P2's shadow test (pre-registered 5 Oct, before any P2 data): three exits on the same entries.**
+(a) as now: trail 25 % after +50 %, stop −40 %, 60 min; (b) a +100 % take profit plus (a); (c) sell half at +100 %,
+the rest as (a). Judged together at bot and phone speed. The gate picks none of them unless it passes on its own.

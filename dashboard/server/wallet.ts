@@ -10,7 +10,8 @@ import { DataRuntime } from '../../src/data/core/data-runtime';
 import { WalletMonitor, type WalletBalance } from '../../src/data/wallet-monitor';
 import { Logger } from '../../src/utils/logger';
 
-export async function createWalletReader(repo:string) {
+/** plannedStartUsd comes from the desk's single capital setting; a local planning file never overrides it. */
+export async function createWalletReader(repo:string,plannedStartUsd:number|null=null) {
   // Read only the two settings needed by this public-account monitor. Never parse wallet secrets.
   const env:Record<string,string|undefined>={};
   try {
@@ -22,11 +23,11 @@ export async function createWalletReader(repo:string) {
   for(const key of ['RPC_ENDPOINTS','WALLET_PUBLIC_KEY'])if(process.env[key])env[key]=process.env[key];
   const local=JSON.parse(await readFile(path.join(repo,'data','wallet-monitor.json'),'utf8').catch(error=>{
     if(error.code==='ENOENT')return '{}';throw error;
-  })) as {address?:unknown;plannedStartUsd?:unknown};
+  })) as {address?:unknown};
   const configured=local.address??env.WALLET_PUBLIC_KEY??null;
   const address=typeof configured==='string'&&configured.trim()?new PublicKey(configured.trim()).toBase58():null;
-  const planned=local.plannedStartUsd??null;
-  if(planned!==null&&(typeof planned!=='number'||!Number.isFinite(planned)||planned<=0))throw new Error('Invalid planned start budget');
+  const planned=plannedStartUsd;
+  if(planned!==null&&(!Number.isFinite(planned)||planned<=0))throw new Error('Invalid planned start budget');
   const endpoints=(env.RPC_ENDPOINTS??'').split(',').map(v=>v.trim()).filter(Boolean);
   const logger=new Logger('WalletMonitor');
   const monitor=endpoints.length?new WalletMonitor(new ConnectionManager(endpoints,{commitment:'confirmed',maxRps:4,timeoutMs:10000,logger}),new DexScreenerClient(logger,new DataRuntime(logger))):null;

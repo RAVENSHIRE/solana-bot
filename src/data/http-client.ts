@@ -18,6 +18,18 @@ export function retryAfter(value: string | null, now = Date.now()): number {
   const date = Date.parse(value);
   return Number.isFinite(date) ? Math.max(0, date - now) : 1000;
 }
+/** The provider's machine-readable error code from a small 4xx body (Jupiter: `errorCode`), e.g. ` COULD_NOT_FIND_ANY_ROUTE`. */
+async function errorCode(res: Response): Promise<string> {
+  const reader = res.body?.getReader();
+  if (!reader) return '';
+  try {
+    const chunks: Uint8Array[] = []; let size = 0;
+    while (size < 4096) { const part = await reader.read(); if (part.done) break; chunks.push(part.value); size += part.value.byteLength; }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { errorCode?: unknown; code?: unknown };
+    const code = typeof body.errorCode === 'string' ? body.errorCode : typeof body.code === 'string' ? body.code : null;
+    return code && /^[A-Za-z0-9_.-]{1,64}$/.test(code) ? ` ${code}` : '';
+  } catch { return ''; } finally { await reader.cancel().catch(() => {}); }
+}
 export class HttpClient {
   private failures = 0; private cooldownUntil = 0;
   constructor(private readonly o: HttpOptions) {
@@ -48,6 +60,8 @@ export class HttpClient {
               headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...this.o.headers },
               body: body === undefined ? undefined : JSON.stringify(body), signal });
             if (!res.ok) {
+              const status = res.status;
+              if (status >= 400 && status < 500 && ![401, 403, 408, 429].includes(status)) throw new DataError('rejected', this.o.name, `HTTP ${status}${await errorCode(res)}`);
               await res.body?.cancel();
               if (res.status === 429) {
                 const pause = retryAfter(res.headers.get('retry-after'), clock());
@@ -85,6 +99,8 @@ export class HttpClient {
         onRetry: (_e, attempt) => { if (health) health.retries++; this.o.logger.debug('Data request retry', { source: this.o.name, attempt }); } });
       this.failures = 0; return result;
     } catch (err) {
+      // A refused request (HTTP 4xx) means the provider is up: one token without a route must never pause every other call.
+      if (err instanceof DataError && err.kind === 'rejected') { this.failures = 0; throw err; }
       this.failures++;
       if (err instanceof DataError && err.kind === 'rate-limited') this.cooldownUntil = clock() + err.retryAfterMs;
       else if (this.failures >= 3) this.cooldownUntil = clock() + 30_000;

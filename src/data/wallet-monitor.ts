@@ -3,7 +3,7 @@ import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
 import type { ConnectionManager } from '../rpc/connection-manager';
 import { DexScreenerClient } from './dexscreener';
 import { parseOwnedTokenAccount } from '../execution/token-accounts';
-import { SOL_MINT } from '../core/types';
+import { PRICE_QUOTE_MINTS, SOL_MINT } from '../core/types';
 import { parse, safeInteger } from './core/data-validator';
 
 export interface WalletToken {
@@ -54,7 +54,7 @@ export class WalletMonitor {
     const observedAt=new Date().toISOString();
     let prices=new Map<string,Awaited<ReturnType<DexScreenerClient['getPairsForTokens']>>[number]>();
     try {
-      prices=DexScreenerClient.selectPairs(await this.dex.getPairsForTokens([...new Set([SOL_MINT,...amounts.keys()])]),Date.now(),30000).selected;
+      prices=DexScreenerClient.selectPairs(await this.dex.getPairsForTokens([...new Set([SOL_MINT,...amounts.keys()])]),Date.now(),30000,PRICE_QUOTE_MINTS).selected;
     } catch { /* Token quantities remain valid when price service is unavailable. */ }
     const priceFor=(mint:string):number|null=>{
       const value=prices.get(mint)?.priceUsd;

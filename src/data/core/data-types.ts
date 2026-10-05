@@ -2,7 +2,8 @@ import type { Candle, PoolTrade } from '../../core/types';
 
 export type Source = 'dexscreener' | 'geckoterminal' | 'raydium' | 'solana-rpc' | 'jupiter';
 export type Category = 'discovery' | 'analysis' | 'position' | 'execution' | 'history';
-export type FailureKind = 'transient' | 'rate-limited' | 'invalid-response' | 'stale-data' | 'unavailable-provider' | 'configuration' | 'on-chain-verification' | 'critical-execution-data';
+/** `rejected`: the provider answered and refused this one request (HTTP 4xx, e.g. no route for a token); it says nothing about the provider's health. */
+export type FailureKind = 'transient' | 'rate-limited' | 'rejected' | 'invalid-response' | 'stale-data' | 'unavailable-provider' | 'configuration' | 'on-chain-verification' | 'critical-execution-data';
 export interface Observation {
   schemaVersion: 1; source: Source; network: 'solana-mainnet';
   sourceAt: number | null; receivedAt: number; tokenMint: string | null; poolAddress: string | null;
