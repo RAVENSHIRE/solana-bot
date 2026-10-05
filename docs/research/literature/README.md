@@ -139,6 +139,7 @@ test of the dev-sold filter (D1). The GOLDEN POCKET alerts on $1M+ openers
 ran 4× to graduation through a −47 % dip; a CA-detection bug (`xCaPost` misses a CA on its own line); F1′, I2.
 The insider-exit "RUG" that sold a runner: [CASE-2026-10-05-INSIDER-EXIT.md](CASE-2026-10-05-INSIDER-EXIT.md) (X9).
 MAYHEM strategy (M1, M2, trade-price based): [MAYHEM.md](MAYHEM.md). W1 replaced by W1′ (wallets from the ledger).
+Verified-coin INFO: launch-size filter and a pool check (V-L, PL): [VERIFIED-LAUNCH-AND-POOL.md](VERIFIED-LAUNCH-AND-POOL.md).
 The execution path, ranked changes for the CTO:
 [EXECUTION.md](EXECUTION.md) (X1–X8).
 
