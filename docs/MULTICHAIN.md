@@ -1,52 +1,54 @@
-# Trading beyond Solana: plan (5 Oct)
+# Beyond Solana: one level at a time (owner, 5 Oct)
 
-Owner, 5 Oct: "find ways that the desk not only trades Solana". Two missed coins prompted it: **CLAUS** (Ethereum,
-Uniswap v4, $0 → $6.9M in 24 h; never seen) and **BONER** (Robinhood Chain, Uniswap; recorded by the research ladder
-since 3 Oct at ~$50M, $75M two days later; nothing turned the record into a call).
+Owner, 5 Oct: "find ways that the desk not only trades Solana", then: **"first master SOL"**, "not all at once",
+"look at it like levels", Monad and Arc last, and two separate keys (the Solana key stays; the EVM chains get their
+own key, which works on all of them).
 
-## What is Solana-only today
+Two missed coins prompted it: **CLAUS** (Ethereum, $0 → $6.9M in 24 h; never seen) and **BONER** (Robinhood Chain;
+recorded by the research ladder since 3 Oct at about $50M, $75M two days later; nothing turned it into a call).
 
-| Layer | Today | What another chain needs |
-| --- | --- | --- |
-| Discovery, market data | DexScreener (filtered to `solana`), GeckoTerminal, pump.fun | the same APIs for other chains (DexScreener and GeckoTerminal cover them; the ladder already reads every chain) plus each chain's launchpads |
-| Quote and route | Jupiter | an EVM aggregator (0x, 1inch, KyberSwap, Odos, LI.FI or Uniswap's router); which ones route Robinhood Chain is to be checked |
-| Transaction | Jupiter `/swap`, Solana RPC, simulation, priority fee | EVM transaction, gas, token approval (Permit2), simulation (`eth_call`), one RPC per chain |
-| Wallet and signer | address only (TEST), Phantom or a local Solana key (LIVE) | Phantom also signs on Ethereum, Base and Polygon; or a separate local EVM key |
-| Safety | mint and freeze authority, Token-2022 extensions, insiders, rug list | honeypot and sell-tax checks (GoPlus, honeypot.is, or a simulated buy and sell), owner and mint rights, liquidity lock |
-| Ledger and costs | lamports, rent, priority fee | wei, gas in the native coin, approval cost |
-| Research | the observer records pump.fun | the ladder already records every chain's trending pools |
+## The levels
 
-About 24 desk and execution files are Solana-specific. The strategies, gates, exits, ledger logic, research gate,
-alerts and dashboard are not, so the work is an adapter per chain family, not a rewrite.
+A level is **mastered** when all four hold on that chain:
 
-## Costs decide the chains
+1. **TEST:** one strategy with at least 100 trades, positive on average after the measured costs, and the gate's
+   luck test passing (the same bar as the research gate).
+2. **Stops hold:** the average stop fill lies within about 10 points of the stop level (CRASH's −35 % stop filled at
+   −56 % before the 5 Oct fixes).
+3. **LIVE, smallest size:** about 20 trades with that chain's key, results inside the TEST range, no stuck or failed
+   orders, nothing left behind (token accounts closed, approvals revoked).
+4. **The owner says go.**
 
-Gas is a fixed cost per swap, like Solana's fees but larger and different on every chain. At $2 entries:
-- **Ethereum mainnet:** gas can cost a large share of a $2 trade (a Uniswap swap is about 150K gas), so trades need
-  a much larger size there. CLAUS-type coins are for larger entries.
-- **Base, BNB Chain, Arbitrum-style L2s (Robinhood Chain is one):** gas of cents, so $2–10 entries are possible.
-- These are estimates. Phase 0 measures them: aggregator quotes return the gas, and every TEST trade records it, the
-  same way the desk measured $0.03 per Solana round trip (owner: costs change per provider; nothing is hard-coded).
+Only then does the next level open, starting in TEST again.
 
-## Phases
+| Level | Chain | Swap cost (measured 5 Oct, per swap) | Prices / routes | Safety check | Notes |
+| --- | --- | --- | --- | --- | --- |
+| **1 (now)** | **Solana** | about $0.01–0.02 (round trip about $0.03) | Jupiter | on-chain gates, insiders, rug list | pump.fun first; Meteora launches (also Solana) after that |
+| 2 | BNB Chain | $0.018 | KyberSwap, LI.FI | GoPlus | |
+| 3 | Robinhood Chain | $0.018 buy, $0.034 sell | KyberSwap, LI.FI | GoPlus | BONER's chain; pools mostly against USDG |
+| 4 | Base | $0.005 (+ $0.0003 L1 fee) | KyberSwap, LI.FI | GoPlus | cheapest measured |
+| 5 | Hyperliquid (HyperEVM) | $0.005 | KyberSwap, LI.FI | **none yet**: GoPlus and honeypot.is do not cover it | needs its own sell check (a simulated buy and sell) before any entry |
+| 6 | Ethereum | **$2.31** | KyberSwap, LI.FI | GoPlus | a round trip costs about $4.6 + approval: entries of about $100 to keep costs near 5 % |
+| 7 | Monad | to measure | LI.FI | GoPlus | last, owner's order |
+| 8 | Arc | to measure | LI.FI | GoPlus | last, owner's order |
 
-**Phase 0: see and paper-trade, no money (first).**
-- Discovery on chosen EVM chains: DexScreener and GeckoTerminal new and trending pools, plus each chain's launchpads.
-- Quotes from an EVM aggregator for entries and valuation, gas included.
-- Honeypot and tax checks before any TEST entry.
-- TEST ledgers per chain, with the existing strategies' rules and exits. Research rules on the ladder's multi-chain
-  data (for example a decade-level breakout) go through the gate first.
-- Alerts only for rules that pass the gate, as today.
+The swap costs are KyberSwap's gas estimates on 5 Oct, for one swap; they change with each chain's gas price and
+are measured again on every TEST trade (costs change per provider: nothing is hard-coded). All services above
+answered without an API key.
 
-**Phase 1: LIVE on one cheap chain.** One signer (Phantom's EVM account, or a separate local key that never enters
-TEST), Permit2 approvals, a simulated buy and sell before every order, private submission where MEV matters. Small
-size, the same guards and opt-in as Solana LIVE.
+## What each new level needs (built only when it opens)
 
-**Phase 2: more chains,** one adapter each, once Phase 1 has run cleanly.
+The strategies, gates, exits, ledger logic, research gate, alerts and dashboard are chain-independent. A new chain
+family needs:
+- **Discovery:** DexScreener and GeckoTerminal already cover every chain above; plus that chain's launchpads.
+- **Quotes and routing:** an EVM aggregator (KyberSwap returns the dollar amounts and the gas of every route).
+- **Safety:** GoPlus token security (honeypot, buy and sell tax, owner rights), or a simulated sell where GoPlus
+  has no coverage.
+- **TEST ledger** per chain, with costs in dollars.
+- **LIVE (after TEST):** the separate EVM key, Permit2 approvals, a simulated buy and sell before every order,
+  private submission on Ethereum.
 
-## Decisions for the owner
+## Meanwhile
 
-1. Which chains first. Suggested: Base and BNB Chain (cheap gas, busy meme markets), then Robinhood Chain if an
-   aggregator routes it; Ethereum only with larger entries.
-2. Which wallet for LIVE later: Phantom's EVM account, or a separate local key.
-3. API keys: some aggregators and safety services need a free key; RPC per chain (public, or a provider).
+The research ladder keeps recording every chain's trending coins (it already does). When a level opens there is
+history to test its rules on, before TEST trades start.
