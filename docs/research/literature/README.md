@@ -127,6 +127,15 @@ test of the dev-sold filter (D1). The GOLDEN POCKET alerts on $1M+ openers
 ([CASE-2026-10-05-GOLDEN.md](CASE-2026-10-05-GOLDEN.md)) add an exclusion for G1 (P1). The execution path, ranked changes for the CTO:
 [EXECUTION.md](EXECUTION.md) (X1–X8).
 
+**Pre-registered 5 Oct 13:05 UTC (fast graduates).** Both rules count in the Holm family when tested, and neither
+threshold moves after this date. Neither can be tested until the gate has post-graduation pool prices (gate gap 5),
+which is code work for the main session.
+
+| # | Rule | Decision | Definition (no look-ahead) | Exits | Gate |
+| --- | --- | --- | --- | --- | --- |
+| G1 | Fast graduate, ≤ 180 s | at graduation (the `X`/`G` record's obs), filled 45 s later | curve completed ≤ 180 s after creation · `top1` < 0.10 · `effectiveBuyers` ≥ 30 at graduation · `devSold` false · not `mayhem` | +40/+100 % targets, −30 % stop, 60 min and 24 h, on pump-amm pool prices | standard gate on pool prices |
+| G1b | Fast graduate, ≤ 300 s | as G1 | as G1, completed ≤ 300 s after creation | as G1 | as G1 |
+
 Kept out of the gate for now:
 - W1 (tracked wallets) waits for the wallet addresses.
 - E1–E3 (established coins) belong to the ladder, not this launch gate. The ladder's first numbers (5 Oct, 685 coins,

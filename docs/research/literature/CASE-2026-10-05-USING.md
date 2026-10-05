@@ -53,5 +53,5 @@ Over the extract: 675 buys and 531 sells.
 | D1 | **An early dev sell is not a rug sign when the crowd is already broad**: among `broad15` at 60 s, `devSold` true (sold by T) against false | 60 s | as `broad15` | if the dev-sold half is not worse, relax the `devSold` filter in `organic` (pre-registered as a new group, not an edit) | none new |
 
 Graduation timing: Web graduated in 56 s and Using in 271 s. G1's "≤ 180 s" would include Web and exclude Using.
-I am not moving the threshold because of one case. If the CTO wants both, pre-register G1 at ≤ 300 s as a separate
-rule (Holm count +1) **before** looking at more data.
+Decision (main session, 5 Oct): both were pre-registered at 13:05 UTC, G1 (≤ 180 s) and G1b (≤ 300 s), as separate
+rules in the Holm family. See the README.
