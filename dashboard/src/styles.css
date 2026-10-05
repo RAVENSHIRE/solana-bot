@@ -1374,6 +1374,9 @@ table.gates td{padding:4px 6px;border-bottom:1px solid #eef0f2;text-align:left!i
 
 /* Sidebar targets: keep the section heading visible below the top bar when jumping. */
 .desk-anchor{scroll-margin-top:72px}
+.strategy-dashboard{display:grid;gap:14px}
+.show-all{margin-top:8px;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer}
+.show-all:hover{color:inherit;border-color:var(--muted)}
 tr.launch-ready td{background:#eef8f0}
 tr.launch-fake td{color:#8f1f1f;text-decoration:line-through;text-decoration-color:rgba(143,31,31,.35)}
 tr.launch-fake td:nth-child(4){text-decoration:none;font-weight:600}

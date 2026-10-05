@@ -58,6 +58,12 @@ function Icon({ name, size = 20 }: { name: string; size?: number }) {
       </>
     ),
     list: <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />,
+    search: (
+      <>
+        <circle cx="11" cy="11" r="7" />
+        <path d="m20 20-4-4" />
+      </>
+    ),
     copy: (
       <>
         <rect x="8" y="8" width="12" height="13" rx="2" />
@@ -82,19 +88,16 @@ function Icon({ name, size = 20 }: { name: string; size?: number }) {
   );
 }
 
-/** Sidebar targets: sections of the trading desk (ids set in Desk.tsx). */
+/** Sidebar targets, in page order (ids set in Desk.tsx); one icon each, no icon used twice. */
 const SECTIONS = [
   { id: 'desk-overview', label: 'Overview', icon: 'grid' },
-  { id: 'desk-coin-check', label: 'Coin check', icon: 'target' },
-  { id: 'desk-strategies', label: 'Strategies', icon: 'target' },
-  { id: 'desk-opening', label: 'Opening screen', icon: 'chart' },
-  { id: 'desk-golden', label: 'Golden pocket', icon: 'target' },
-  { id: 'desk-launches', label: 'Launches', icon: 'chart' },
-  { id: 'desk-candidates', label: 'Candidates', icon: 'list' },
+  { id: 'desk-telemetry', label: 'Telemetry', icon: 'activity' },
+  { id: 'desk-coin-check', label: 'Coin check', icon: 'search' },
+  { id: 'desk-strategies', label: 'Strategy dashboard: strategies, opening screen, golden pocket, launch radar, candidates', icon: 'target' },
   { id: 'desk-positions', label: 'Positions', icon: 'wallet' },
   { id: 'desk-watch', label: 'Watch', icon: 'clock' },
-  { id: 'desk-trades', label: 'Trades', icon: 'layers' },
-  { id: 'desk-telemetry', label: 'Telemetry', icon: 'activity' },
+  { id: 'desk-trades', label: 'Trades', icon: 'list' },
+  { id: 'desk-path', label: 'Execution path', icon: 'layers' },
 ] as const;
 
 function App() {

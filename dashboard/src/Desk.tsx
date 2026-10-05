@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import type { Candidate, DeskEvent, DeskStatus, Evidence, Preflight, Stage, StrategyView } from '../../src/desk/types';
 import type { RuleSpecInput } from '../../src/desk/custom';
 import type { Holding, WatchRule, WatchView } from '../../src/desk/watch';
@@ -45,6 +45,15 @@ const ago = (at: number | null | undefined) => at ? new Date(at).toLocaleTimeStr
 const pct = (v: number | null | undefined, d = 1) => v === null || v === undefined ? 'UNKNOWN' : `${v.toFixed(d)}%`;
 const usdOrUnknown = (v: number | null | undefined) => v === null || v === undefined ? 'UNKNOWN' : money(v);
 
+/** Every list shows its top rows; "+ Show all" opens the rest (owner, 5 Oct: the page stays short, one screen per area). */
+export const TOP_ROWS = 3;
+export function useTop<T>(rows: T[], n = TOP_ROWS): [T[], ReactElement | null] {
+  const [all, setAll] = useState(false);
+  const toggle = rows.length > n ? <button type="button" className="show-all" aria-expanded={all} onClick={() => setAll(!all)}>
+    {all ? `− Show top ${n}` : `+ Show all ${rows.length}`}</button> : null;
+  return [all ? rows : rows.slice(0, n), toggle];
+}
+
 export function DeskPanel({ t }: { t: TradingSession }) {
   const v = t.view, d = v?.desk ?? null, live = v?.mode === 'LIVE', localKey = live && d?.signer === 'LOCAL_KEY';
   return <section className={`desk ${live ? 'desk-live' : 'desk-test'}`} aria-label="Trading desk">
@@ -67,17 +76,19 @@ export function DeskPanel({ t }: { t: TradingSession }) {
     </div>}
     {d && <>
       <div id="desk-overview" className="desk-anchor"><Capital d={d} /></div>
-      <div id="desk-coin-check" className="desk-anchor"><CoinCheckPanel t={t} /></div>
-      <div id="desk-strategies" className="desk-anchor"><Strategies d={d} t={t} /></div>
-      <Stages events={d.events} />
-      <div id="desk-telemetry" className="desk-grid desk-anchor">
-        <Telemetry events={d.events} />
-        <PreflightCard p={d.preflights[0] ?? null} live={live} />
+      <div id="desk-telemetry" className="desk-anchor">
+        <Stages events={d.events} />
+        <div className="desk-grid"><Telemetry events={d.events} /><PreflightCard p={d.preflights[0] ?? null} live={live} /></div>
       </div>
-      <div id="desk-opening" className="desk-anchor"><OpeningScreen d={d} t={t} /></div>
-      <div id="desk-golden" className="desk-anchor"><GoldenPocket d={d} /></div>
-      <div id="desk-launches" className="desk-anchor"><LaunchRadar d={d} /></div>
-      <div id="desk-candidates" className="desk-anchor"><Candidates list={d.candidates} probe={live ? null : mint => void t.desk('probe', { mint })} busy={!!t.busy} /></div>
+      <div id="desk-coin-check" className="desk-anchor"><CoinCheckPanel t={t} /></div>
+      {/* The strategy dashboard: the strategies and every screen that feeds them, each showing its top rows. */}
+      <div id="desk-strategies" className="desk-anchor strategy-dashboard">
+        <Strategies d={d} t={t} />
+        <OpeningScreen d={d} t={t} />
+        <GoldenPocket d={d} />
+        <LaunchRadar d={d} />
+        <Candidates list={d.candidates} probe={live ? null : mint => void t.desk('probe', { mint })} busy={!!t.busy} />
+      </div>
       <div id="desk-positions" className="desk-anchor"><Positions d={d} busy={!!t.busy || !t.online} exit={p => {
         const how = !live ? 'This is a TEST position: the sale is paper only.' : localKey ? 'The local key signs the sale immediately (REAL FUNDS).'
           : 'Phantom will ask you to approve the sale within 15 s (REAL FUNDS).';
@@ -85,7 +96,7 @@ export function DeskPanel({ t }: { t: TradingSession }) {
       }} /></div>
       <div id="desk-watch" className="desk-anchor"><Watch t={t} d={d} /></div>
       <div id="desk-trades" className="desk-anchor"><Ledger d={d} /></div>
-      <PathAudit d={d} />
+      <div id="desk-path" className="desk-anchor"><PathAudit d={d} /></div>
     </>}
     {!d && !v?.deskError && <p className="trading-intro">Starting the local desk…</p>}
   </section>;
@@ -389,14 +400,16 @@ function Telemetry({ events }: { events: DeskEvent[] }) {
   const [filter, setFilter] = useState<'ALL' | 'EXEC' | 'REJECTED'>('ALL');
   const shown = events.filter(e => filter === 'ALL' || (filter === 'REJECTED' ? ['FILTERED', 'WAITING', 'FAILED'].includes(e.stage)
     : !['FILTERED', 'WATCHLIST', 'WAITING', 'SCANNING'].includes(e.stage))).slice(0, 150);
+  const [top, more] = useTop(shown);
   return <section className="panel desk-card" aria-label="Live scanner telemetry">
     <div className="card-head"><h3>Live scanner telemetry</h3>
       <div className="filters">{(['ALL', 'EXEC', 'REJECTED'] as const).map(f => <button key={f} aria-pressed={filter === f} onClick={() => setFilter(f)}>
         {f === 'ALL' ? 'All' : f === 'EXEC' ? 'Execution' : 'Rejections'}</button>)}</div></div>
-    <ul className="events">{shown.map(e => <li key={e.id}>
+    <ul className="events">{top.map(e => <li key={e.id}>
       <time>{ago(e.at)}</time><span className={`tag tag-${e.stage.toLowerCase()}`}>[{e.stage.replace('_', ' ')}]</span>
       <span className="event-token" title={e.mint ?? undefined}>{e.symbol ?? (e.mint ? short(e.mint) : '')}</span><span>{e.message}</span></li>)}
       {!shown.length && <li>{events.length ? 'No events of this kind in the current window.' : 'No events yet. Start TEST or a LIVE session.'}</li>}</ul>
+    {more}
   </section>;
 }
 
@@ -427,6 +440,7 @@ function Candidates({ list, probe, busy }: { list: Candidate[]; probe: ((mint: s
   const [open, setOpen] = useState<string | null>(null);
   const age = (m: number | null | undefined) => m == null ? '?' : m < 60 ? `${Math.round(m)}m` : m < 2_880 ? `${(m / 60).toFixed(m < 600 ? 1 : 0)}h` : `${Math.round(m / 1_440)}d`;
   const change = (v: number | null | undefined) => v == null ? '--' : <span className={v >= 0 ? 'chg-up' : 'chg-down'}>{v >= 0 ? '+' : ''}{v >= 1000 ? Math.round(v).toLocaleString('en-US') : v.toFixed(1)}%</span>;
+  const [rows, more] = useTop(list);
   return <section className="panel desk-card" aria-label="Candidates">
     <div className="card-head"><h3>Candidates · market data, and what each enabled strategy says</h3><small>{list.length} shown · age = since the token appeared, not the pool</small></div>
     <div className="wallet-table"><table className="cand"><thead><tr>
@@ -434,7 +448,7 @@ function Candidates({ list, probe, busy }: { list: Candidate[]; probe: ((mint: s
       <th>Vol 5m / 1h</th><th title="Buys / sells in the last hour">Txns 1h</th><th>5m</th><th>1h</th><th>6h</th><th>Buy/sell 5m</th>
       <th title="Owners with a balance · share of the 10 largest wallets (pools and curves excluded)">Holders</th><th>X</th>
       <th title="Every enabled strategy: entry-ready, or the first rule it misses">Strategies</th><th>Mint / freeze</th><th>Risk flags</th></tr></thead>
-      <tbody>{list.map(c => { const m = c.metrics, v = c.verdicts ?? []; return <Fragment key={c.mint}>
+      <tbody>{rows.map(c => { const m = c.metrics, v = c.verdicts ?? []; return <Fragment key={c.mint}>
         <tr className={`${v.some(x => x.signal) ? 'status-qualified' : 'status-watchlist'}${c.stale ? ' stale' : ''}`} onClick={() => setOpen(open === c.mint ? null : c.mint)} aria-expanded={open === c.mint}>
           <td title={c.mint}><strong>{c.symbol ?? '?'}</strong> <Fomo mint={c.mint} /><br /><small>{short(c.mint)}{c.sources.includes('launch-radar') ? ' · radar' : ''}{c.sources.includes('x-feed') ? ' · X feed' : ''}</small></td>
           <td>{age(m.tokenAgeMin ?? m.poolAgeMin)}<br /><small>{m.migration === 'BONDING_CURVE' ? 'on curve' : m.firstPoolAgeMin != null ? `grad. ${age(m.firstPoolAgeMin)}` : ''}</small></td>
@@ -456,6 +470,7 @@ function Candidates({ list, probe, busy }: { list: Candidate[]; probe: ((mint: s
         {open === c.mint && <tr className="detail-row"><td colSpan={15}><CandidateDetail c={c} probe={probe} busy={busy} /></td></tr>}
       </Fragment>; })}
       {!list.length && <tr><td colSpan={15}>No candidates yet. The first scan starts with TEST or a LIVE session.</td></tr>}</tbody></table></div>
+    {more}
   </section>;
 }
 
@@ -511,32 +526,36 @@ function CandidateDetail({ c, probe, busy }: { c: Candidate; probe: ((mint: stri
 
 function Positions({ d, busy, exit }: { d: DeskStatus; busy: boolean; exit: (p: DeskStatus['positions'][number]) => void }) {
   const solUsd = d.capital.solUsd;
+  const [rows, more] = useTop(d.positions);
   return <section className="panel desk-card" aria-label="Open positions">
     <div className="card-head"><h3>Open positions · {d.mode === 'PAPER' ? 'TEST' : 'LIVE'}</h3>
       <small>Exits run by rule every few seconds while the desk runs. EXIT NOW sells a position immediately through the same guarded path.</small></div>
     <div className="wallet-table"><table><thead><tr><th>Strategy</th><th>Token</th><th>Quantity (raw)</th><th>Entry price</th><th>Current price</th><th>Cost</th><th>Value</th><th>Unrealized</th><th>Route</th><th>Opened</th><th></th></tr></thead>
-      <tbody>{d.positions.map(p => {
+      <tbody>{rows.map(p => {
         const value = p.lastValueLamports && solUsd ? Number(p.lastValueLamports) / 1e9 * solUsd : null;
         return <tr key={p.id}><td>{p.strategy ?? 'FAIR'}</td><td title={p.mint}>{p.symbol ?? short(p.mint)} <Fomo mint={p.mint} /></td><td>{p.qtyRaw}</td><td>{p.entryPriceUsd?.toPrecision(6) ?? '--'}</td>
           <td>{p.lastPriceUsd?.toPrecision(6) ?? '--'}</td><td>{fine(p.costUsd)}</td><td>{fine(value)}</td><td>{fine(value === null ? null : value - p.costUsd)}</td>
           <td>{p.noRouteSince ? <span className="unknown" title="Jupiter finds no route to sell this token (pool drained or delisted). Re-quoted every 2 min; it exits if a route returns.">NO ROUTE since {ago(p.noRouteSince)}</span> : p.route}</td><td>{ago(p.openedAt)}</td>
           <td><button className="stop-action" disabled={busy || !!p.exitRequested} onClick={() => exit(p)}>{p.exitRequested ? 'SELLING…' : 'EXIT NOW'}</button></td></tr>;
       })}{!d.positions.length && <tr><td colSpan={11}>No open positions.</td></tr>}</tbody></table></div>
+    {more}
   </section>;
 }
 
 function Ledger({ d }: { d: DeskStatus }) {
+  const [rows, more] = useTop(d.ledger);
   return <section className="panel desk-card" aria-label="Ledger">
     <div className="card-head"><h3>{d.mode === 'PAPER' ? 'TEST ledgers' : 'LIVE ledgers'} · persistent · one per strategy</h3><small>Router fees are already inside the quoted output; net PnL does not subtract them twice.</small></div>
     <div className="wallet-table"><table><thead><tr><th>Time</th><th>Strategy</th><th>Tx signature</th><th>Token / CA</th><th>DEX / route</th><th>Side</th><th>Quantity</th><th>Entry</th><th>Exit</th>
       <th>Gross PnL</th><th>Network fee</th><th>Router fee</th><th>Total fees</th><th>Net PnL</th><th>Status</th></tr></thead>
-      <tbody>{d.ledger.map(e => <tr key={`${e.strategy}-${e.id}`}><td>{ago(e.at)}</td><td>{e.strategy ?? 'FAIR'}</td>
+      <tbody>{rows.map(e => <tr key={`${e.strategy}-${e.id}`}><td>{ago(e.at)}</td><td>{e.strategy ?? 'FAIR'}</td>
         <td>{e.txSignature ? <a href={`https://solscan.io/tx/${encodeURIComponent(e.txSignature)}`} target="_blank" rel="noreferrer">{short(e.txSignature)}</a> : 'TEST — none'}</td>
         <td title={e.mint}>{e.symbol ?? ''} <small>{short(e.mint)}</small></td><td>{e.router} · {e.route}</td><td>{e.side}</td><td>{e.quantity}</td>
         <td>{e.entryPriceUsd?.toPrecision(6) ?? '--'}</td><td>{e.exitPriceUsd?.toPrecision(6) ?? '--'}</td><td>{fine(e.grossPnlUsd)}</td>
         <td>{fine(e.networkFeeUsd)}</td><td>{fine(e.routerFeeUsd)}</td><td>{fine(e.totalFeesUsd)}</td><td>{fine(e.netPnlUsd)}</td>
         <td title={e.note ?? undefined}>{e.status.replace('_', ' ')}</td></tr>)}
         {!d.ledger.length && <tr><td colSpan={15}>No executions recorded. Nothing is ever back-filled.</td></tr>}</tbody></table></div>
+    {more}
   </section>;
 }
 
@@ -591,6 +610,7 @@ function Watch({ t, d }: { t: TradingSession; d: DeskStatus }) {
     if (perm === 'granted') for (const a of [...(w?.alerts ?? [])].reverse()) if (a.at > seen.current) new Notification(a.title, { body: a.body, tag: `${a.ruleId}-${a.at}` });
     seen.current = Math.max(seen.current, newest);
   }, [w?.alerts, perm]);
+  const [rules, moreRules] = useTop(w?.rules ?? []), [heldRows, moreHeld] = useTop(held?.holdings ?? []);
   if (!w) return null;
   const canSell = !!w.sellWallet && wallet === w.sellWallet;
   const submit = async () => {
@@ -619,16 +639,16 @@ function Watch({ t, d }: { t: TradingSession; d: DeskStatus }) {
     {heldError && <p className="trading-error" role="alert">{describe(heldError)}</p>}
     {held && <details open><summary>{short(held.wallet)} holds {held.holdings.length} token(s) — pick one to watch</summary>
       <div className="wallet-table"><table><thead><tr><th>Token</th><th>Balance</th><th>Value</th><th>Market cap</th><th></th></tr></thead>
-        <tbody>{held.holdings.map(h => <tr key={h.mint}><td title={h.mint}><strong>{h.symbol ?? short(h.mint)}</strong> <Fomo mint={h.mint} /></td>
+        <tbody>{heldRows.map(h => <tr key={h.mint}><td title={h.mint}><strong>{h.symbol ?? short(h.mint)}</strong> <Fomo mint={h.mint} /></td>
           <td>{numeric(h.balance, 2)}</td><td>{h.valueUsd === null ? '--' : money(h.valueUsd)}</td><td>{cap(h.marketCapUsd)}</td>
           <td>{w.rules.some(r => r.mint === h.mint && r.wallet === held.wallet) ? 'watched'
             : <button className="source-button" type="button" onClick={() => setForm({ ...form, mint: h.mint, wallet: held.wallet })}>Set levels</button>}</td></tr>)}
-          {!held.holdings.length && <tr><td colSpan={5}>No tokens in this wallet.</td></tr>}</tbody></table></div></details>}
+          {!held.holdings.length && <tr><td colSpan={5}>No tokens in this wallet.</td></tr>}</tbody></table></div>{moreHeld}</details>}
     <p className="desk-note">{w.sellWallet ? `Automatic selling is available for the local-key wallet ${short(w.sellWallet)} only; for FOMO or other wallets you get alerts. ` : 'Automatic selling needs DESK_LIVE_SIGNER=local-key; until then every rule alerts. '}
       Phone alerts: {w.channels.length ? w.channels.join(' + ') : 'off — add DESK_NTFY_TOPIC (ntfy app) or DESK_TELEGRAM_BOT_TOKEN + DESK_TELEGRAM_CHAT_ID to .env'}. Browser alerts: {perm === 'granted' ? 'on' : perm === 'unsupported' ? 'not supported here'
         : <button className="source-button" type="button" onClick={() => void Notification.requestPermission().then(setPerm)}>turn on</button>}</p>
     <div className="wallet-table"><table><thead><tr><th>Token</th><th>Wallet</th><th>Market cap</th><th>Peak since added</th><th>Rules</th><th>Balance</th><th>Status</th><th></th></tr></thead>
-      <tbody>{w.rules.map(r => { const st = watchStatus(r); return <tr key={r.id}>
+      <tbody>{rules.map(r => { const st = watchStatus(r); return <tr key={r.id}>
         <td title={r.mint}><strong>{r.symbol ?? '?'}</strong> <Fomo mint={r.mint} /><br /><small>{short(r.mint)}</small></td>
         <td title={r.wallet}>{short(r.wallet)}{r.wallet === w.sellWallet ? <><br /><small>local key</small></> : null}</td>
         <td>{cap(r.lastMarketCapUsd)}</td><td>{cap(r.peakMarketCapUsd)}</td>
@@ -639,6 +659,7 @@ function Watch({ t, d }: { t: TradingSession; d: DeskStatus }) {
         <td>{r.triggered && <button className="source-button" disabled={busy} onClick={() => void t.desk('watch-rearm', { id: r.id })}>Re-arm</button>}
           <button className="source-button" disabled={busy} onClick={() => { if (window.confirm(`Stop watching ${r.symbol ?? r.mint}?`)) void t.desk('watch-remove', { id: r.id }); }}>Remove</button></td></tr>; })}
         {!w.rules.length && <tr><td colSpan={8}>Nothing watched yet. Add a token you hold, e.g. with a market-cap floor at your exit level.</td></tr>}</tbody></table></div>
+    {moreRules}
     {w.alerts.length > 0 && <details open><summary>Alerts ({w.alerts.length})</summary><ul className="watch-alerts">{w.alerts.slice(0, 10).map(a =>
       <li key={`${a.ruleId}-${a.at}`}><strong>{ago(a.at)} · {a.title}</strong> — {a.body}</li>)}</ul></details>}
   </section>;
@@ -735,18 +756,20 @@ function GoldenPocket({ d }: { d: DeskStatus }) {
   const mins = (at: number) => `${Math.max(0, Math.round((Date.now() - at) / 60_000))} min`;
   const phase: Record<string, string> = { IMPULSE: 'first impulse', DIP: 'dipped', BROKEN_OUT: 'broke out, waiting for the retest', EXPIRED: 'no entry in time', FAILED: 'failed' };
   const kinds = g?.entryKinds ?? ['ONLY_UP'];
+  const [rows, more] = useTop(list);
   return <section className="panel desk-card" aria-label="Golden pocket">
     <div className="card-head"><h3>Golden pocket · graduated pools: only up, and break and retest</h3>
       <small>{g ? `${g.counts.watched ?? 0} pools watched · ${g.counts.DIP ?? 0} dipped · ${g.counts.BROKEN_OUT ?? 0} broke out · ${g.counts.ENTRY ?? 0} filled`
         : 'Runs while TEST or LIVE scans.'} Market caps from each pool's reserves every 4 s. Bought: {kinds.map(x => x === 'RETEST' ? 'break and retest' : 'only up').join(' and ')}.</small></div>
     <div className="wallet-table"><table><thead><tr><th>Token</th><th>Since graduation</th><th>High → dip → breakout</th><th>Now</th><th>Peak</th><th>Pattern</th><th>Fill / stop</th><th>GOLDEN</th></tr></thead>
-      <tbody>{list.map(x => <tr key={x.mint} className={x.entry && kinds.includes(x.entry.kind) ? 'launch-ready' : x.phase === 'FAILED' ? 'launch-fake' : ''}>
+      <tbody>{rows.map(x => <tr key={x.mint} className={x.entry && kinds.includes(x.entry.kind) ? 'launch-ready' : x.phase === 'FAILED' ? 'launch-fake' : ''}>
         <td title={x.mint}><strong>{x.symbol ?? `${x.mint.slice(0, 4)}…${x.mint.slice(-4)}`}</strong> <Fomo mint={x.mint} /></td>
         <td>{mins(x.startAt)}</td><td><small>{k(x.highUsd)} → {k(x.lowUsd)} → {k(x.topUsd)}</small></td><td>{k(x.lastUsd)}</td><td>{k(x.peakUsd)}</td>
         <td title={x.detail}><small>{x.entry ? (x.entry.kind === 'RETEST' ? 'BREAK AND RETEST' : 'ONLY UP') : phase[x.phase] ?? x.phase}</small></td>
         <td><small>{x.entry ? `${k(x.entry.fillUsd)} / ${k(x.entry.stopUsd)}` : '--'}</small></td>
         <td><small>{x.held ? `held by ${x.held}` : x.entry && !kinds.includes(x.entry.kind) ? 'shown only' : x.verdict ?? (x.entry ? 'waiting for market data' : '--')}</small></td></tr>)}
         {!list.length && <tr><td colSpan={8}>No graduation watched yet.</td></tr>}</tbody></table></div>
+    {more}
   </section>;
 }
 
@@ -763,6 +786,7 @@ function OpeningScreen({ d, t }: { d: DeskStatus; t: TradingSession }) {
   const label: Record<string, string> = { STRONG: 'watching', SIGNAL: 'BREAKOUT', RUG: 'rug (below floor)', GRADUATED: 'graduated first', EXPIRED: 'no breakout' };
   const phone = new Set(o?.phone ?? []), busy = !!t.busy || !t.online;
   const toggle = (kind: string) => void t.desk('phone-alerts', { kinds: PHONE_KINDS.map(([k]) => k).filter(k => k === kind ? !phone.has(k) : phone.has(k)) });
+  const [rows, more] = useTop(list);
   return <section className="panel desk-card" aria-label="Opening screen">
     <div className="card-head"><h3>Opening screen · 10K+ opening candle, never below 6.7K, breakout above the open</h3>
       <small>{o ? `${o.counts.OPENING ?? 0} launches in their first minute · ${o.counts.STRONG ?? 0} strong opens watched · ${o.counts.SIGNAL ?? 0} breakouts · ${o.counts.RUG ?? 0} fell below 6.7K · ${o.counts.WEAK ?? 0} weak opens skipped`
@@ -773,13 +797,14 @@ function OpeningScreen({ d, t }: { d: DeskStatus; t: TradingSession }) {
         onClick={() => toggle(kind)}>{phone.has(kind) ? '✓' : '✗'} {text}</button>)}
     </div>}
     <div className="wallet-table"><table><thead><tr><th>Token</th><th>Age</th><th>Opening candle</th><th>Speed</th><th>Low</th><th>Now</th><th>Peak</th><th>Status</th><th>OPEN entry</th></tr></thead>
-      <tbody>{list.map(x => <tr key={x.mint} className={x.status === 'SIGNAL' ? 'launch-ready' : x.status === 'RUG' ? 'launch-fake' : ''}>
+      <tbody>{rows.map(x => <tr key={x.mint} className={x.status === 'SIGNAL' ? 'launch-ready' : x.status === 'RUG' ? 'launch-fake' : ''}>
         <td title={x.mint}><strong>{x.symbol}</strong> <Fomo mint={x.mint} /><br /><small>{x.name.slice(0, 32)}</small></td>
         <td>{mins(x.at)}</td><td>{k(x.openHighUsd)}</td><td><small>{x.speed ?? '--'}</small></td><td>{k(x.lowUsd)}</td><td>{k(x.lastUsd)}</td><td>{k(x.peakUsd)}</td>
         <td title={x.detail}><small>{x.status === 'SIGNAL' ? `BREAKOUT at ${k(x.signalUsd)}` : label[x.status] ?? x.status}</small></td>
         <td><small>{x.held ? `held by ${x.held}` : x.entry ?? (x.status !== 'SIGNAL' ? '--' : x.signalAt && Date.now() - x.signalAt > 30 * 60_000 ? 'not entered (signal expired)'
           : 'no tradable quote yet (DexScreener lists curve coins late)')}</small></td></tr>)}
         {!list.length && <tr><td colSpan={9}>No strong opening candle yet.</td></tr>}</tbody></table></div>
+    {more}
   </section>;
 }
 
@@ -796,6 +821,7 @@ function LaunchRadar({ d }: { d: DeskStatus }) {
   const ca = (c: L['ca']) => !c ? '--' : c.status === 'X' ? '✓ on X' : c.status === 'WEBSITE' ? '✓ on site' : c.status === 'IMPERSONATOR' ? '✗ FAKE' : 'not yet';
   const num = (n: number | null | undefined) => n == null ? '?' : n >= 10_000 ? `${(n / 1000).toFixed(0)}K` : n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
   const x = d.xFeed;
+  const [rows, more] = useTop(list);
   return <section className="panel desk-card" aria-label="Launch radar">
     <div className="card-head"><h3>Launch radar · new pump.fun launches with their own X account and a website</h3>
       <small>About 50 launches a minute are read from the chain. The X page (followers, account age, post views, CA), the website (CA) and the insiders
@@ -804,7 +830,7 @@ function LaunchRadar({ d }: { d: DeskStatus }) {
         X feed: {x ? (x.configured ? (x.lastError ?? `${x.signals} token posts read`) : 'off (set X_BEARER_TOKEN in .env)') : 'off'}.</small></div>
     <div className="wallet-table"><table><thead><tr><th>Token</th><th>Age</th><th>Score</th><th>CA</th><th title="Followers · best post views (3 days) · account age">X reach</th>
       <th title="Creator + wallets that bought in the creation slot">Insiders</th><th>Claude</th><th>Why</th><th>Links</th><th>Market cap</th><th>Status</th></tr></thead>
-      <tbody>{list.map(l => <tr key={l.mint} className={l.signal ? 'launch-ready' : l.rug || l.ca?.status === 'IMPERSONATOR' ? 'launch-fake' : ''}>
+      <tbody>{rows.map(l => <tr key={l.mint} className={l.signal ? 'launch-ready' : l.rug || l.ca?.status === 'IMPERSONATOR' ? 'launch-fake' : ''}>
         <td title={l.mint}><strong>{l.symbol}</strong> <Fomo mint={l.mint} /><br /><small>{l.name.slice(0, 40)}</small></td>
         <td>{mins(l.at)}</td><td>{l.score}</td><td title={l.ca?.detail}><small>{l.rug ? '✗ RUG' : ca(l.ca)}</small></td>
         <td><small>{l.ownX === false ? <>narrative: someone else's account<br />({num(l.followers)} followers)</> : <>{num(l.followers)} followers</>}<br />{l.bestViews != null ? `${num(l.bestViews)} views` : '--'}{l.accountAgeDays != null ? ` · ${l.accountAgeDays < 1 ? `${Math.max(1, Math.round(l.accountAgeDays * 24))} h` : `${Math.round(l.accountAgeDays)} d`} old` : ''}
@@ -817,5 +843,6 @@ function LaunchRadar({ d }: { d: DeskStatus }) {
           {l.website ? <a href={l.website} target="_blank" rel="noreferrer">{(() => { try { return new URL(l.website).hostname; } catch { return 'site'; } })()}</a> : 'no site'}</small></td>
         <td>{cap(l.marketCapUsd)}</td><td><small>{l.signal ? 'ENTRY-READY · ' : ''}{l.status}</small></td></tr>)}
         {!list.length && <tr><td colSpan={11}>No launch with its own X account and a live website yet. The radar runs while TEST or LIVE scans.</td></tr>}</tbody></table></div>
+    {more}
   </section>;
 }
