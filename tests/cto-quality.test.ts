@@ -187,3 +187,15 @@ test('CTO-11 (Q-16): by default no desk alert reaches the phone; it is still rec
   await new Promise(r => setImmediate(r));
   assert.deepEqual(chosen.sent, ['RUG'], 'once per key, only selected kinds, never when the caller says no phone');
 });
+
+test('CTO-12 (Q-21): a save that fails after a TEST probe is reported in the event log, not swallowed', async () => {
+  const proto = DeskEngine.prototype as unknown as { probe: (this: unknown, mint: string) => Promise<void> };
+  const events: string[] = [];
+  const e = { d: { mode: 'PAPER' }, work: null as Promise<void> | null, candidates: new Map(),
+    syncWallet: async () => { throw new Error('wallet unavailable'); },
+    persist: async () => { throw new Error('EPERM: ledger-PAPER.json'); },
+    event: (stage: string, message: string) => { events.push(`${stage} ${message}`); } };
+  await assert.rejects(proto.probe.call(e, 'MINT'), /wallet unavailable/);
+  assert.ok(events.some(x => x.startsWith('FAILED Saving desk state failed: EPERM')), events.join(' | '));
+  assert.equal(e.work, null);
+});

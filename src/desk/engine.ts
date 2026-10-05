@@ -502,7 +502,7 @@ export class DeskEngine {
       const decimals = c?.onchain.decimals ?? mintInfo!.decimals, token2022 = c ? c.onchain.token2022 === true : mintInfo!.isToken2022;
       this.event('SYSTEM', `PROBE started for ${c?.symbol ?? mint} (${c ? `candidate status ${c.status}` : 'not a strategy candidate'}); nothing will be booked`, { mint, symbol: c?.symbol ?? null });
       await this.execute('BUY', { strategy: 'FAIR', mint, symbol: c?.symbol ?? null, decimals, pairAddress: c?.pair.address ?? '', heldRaw: 0n, token2022 }, ledger, () => false, true);
-    })().finally(async () => { await this.persist().catch(() => undefined); this.work = null; });
+    })().finally(async () => { await this.persist().catch(error => this.event('FAILED', `Saving desk state failed: ${errorMessage(error)}`)); this.work = null; });
     this.work = work;
     return work;
   }
