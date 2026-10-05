@@ -148,6 +148,8 @@ export interface LedgerEntry {
   router: string; route: string; side: 'BUY' | 'SELL'; quantity: string; qtyRaw: string;
   entryPriceUsd: number | null; exitPriceUsd: number | null; grossPnlUsd: number | null;
   networkFeeLamports: string; networkFeeUsd: number | null; routerFeeUsd: number | null; totalFeesUsd: number | null;
+  /** SELL: the exit rule that fired (absent on older rows and on manual or failed orders). */
+  exitReason?: string;
   netPnlUsd: number | null; solDeltaLamports: string; status: 'CONFIRMED' | 'PAPER_FILLED' | 'FAILED' | 'UNKNOWN'; note: string | null;
   /** SELL: token-account rent charged to this trade and not yet returned by closing the account. */
   rentOutstandingLamports?: string;
@@ -227,6 +229,9 @@ export interface DeskStatus {
   events: DeskEvent[]; candidates: Candidate[]; preflights: Preflight[];
   positions: DeskPosition[]; ledger: LedgerEntry[]; sources: Record<string, string>;
   path: Array<{ layer: string; provider: string }>;
+  /** Level 1 (Solana) progress: the clean trades of each strategy against the level's checks (desk/levels.ts). */
+  levels?: { chain: string; since: number; mode: DeskMode;
+    criteria: { minTrades: number; maxLuckP: number; maxStopGapPts: number; liveTrades: number }; rows: import('./levels').LevelRow[] };
   /** Observer heartbeat and phone delivery, shown at the top of the desk (desk/health.ts). */
   health?: import('./health').HealthLine[];
 }

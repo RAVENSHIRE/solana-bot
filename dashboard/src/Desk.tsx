@@ -75,7 +75,7 @@ export function DeskPanel({ t }: { t: TradingSession }) {
       <button className="primary-action" disabled={!!t.busy || !t.online} onClick={() => void t.approve()}>Review in Phantom</button>
     </div>}
     {d && <>
-      <div id="desk-overview" className="desk-anchor"><Capital d={d} /></div>
+      <div id="desk-overview" className="desk-anchor"><Capital d={d} /><Levels d={d} /></div>
       <div id="desk-telemetry" className="desk-anchor">
         <Stages events={d.events} />
         <div className="desk-grid"><Telemetry events={d.events} /><PreflightCard p={d.preflights[0] ?? null} live={live} /></div>
@@ -539,6 +539,36 @@ function Positions({ d, busy, exit }: { d: DeskStatus; busy: boolean; exit: (p: 
           <td>{p.noRouteSince ? <span className="unknown" title="Jupiter finds no route to sell this token (pool drained or delisted). Re-quoted every 2 min; it exits if a route returns.">NO ROUTE since {ago(p.noRouteSince)}</span> : p.route}</td><td>{ago(p.openedAt)}</td>
           <td><button className="stop-action" disabled={busy || !!p.exitRequested} onClick={() => exit(p)}>{p.exitRequested ? 'SELLING…' : 'EXIT NOW'}</button></td></tr>;
       })}{!d.positions.length && <tr><td colSpan={11}>No open positions.</td></tr>}</tbody></table></div>
+    {more}
+  </section>;
+}
+
+/**
+ * Level 1 (owner, 5 Oct: "first master SOL", "look at it like levels"): each strategy's trades since the clean start
+ * against the level's checks. One strategy passing all of them opens the LIVE step at the smallest size; the next
+ * chain opens only after that and the owner's go (docs/MULTICHAIN.md).
+ */
+function Levels({ d }: { d: DeskStatus }) {
+  const l = d.levels, [rows, more] = useTop(l?.rows ?? []);
+  if (!l) return null;
+  const k = l.criteria, test = l.mode === 'PAPER';
+  const mark = (ok: boolean | null, text: string) => <span className={ok === null ? 'gate-unknown' : ok ? 'gate-pass' : 'gate-fail'}>{text}</span>;
+  const signed = (v: number | null, digits = 1) => v === null ? '--' : `${v >= 0 ? '+' : ''}${v.toFixed(digits)} %`;
+  const since = new Date(l.since).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const state = (r: NonNullable<DeskStatus['levels']>['rows'][number]) => !test ? (r.trades >= k.liveTrades ? 'LIVE step done: your go' : `LIVE step: ${r.trades} of ~${k.liveTrades}`)
+    : r.testPassed ? 'TEST passed: LIVE step next (your yes)' : `${[r.checks.trades, r.checks.positive, r.checks.luck, r.checks.stops !== false].filter(Boolean).length} of 4 checks`;
+  return <section className="panel desk-card" aria-label="Levels">
+    <div className="card-head"><h3>Level 1 · {l.chain} · {test ? 'TEST' : 'LIVE'} trades since {since}</h3>
+      <small>Mastered when one strategy has ≥ {k.minTrades} TEST trades, a positive average after costs, luck p &lt; {k.maxLuckP} and stops filling within {k.maxStopGapPts} points;
+        then about {k.liveTrades} LIVE trades at the smallest size and your go. Level 2 (BNB Chain) opens only after that.</small></div>
+    <div className="wallet-table"><table><thead><tr><th>Strategy</th><th>Trades</th><th>Average net</th><th>Won</th><th>Luck p</th><th>Stop fills</th><th>Status</th></tr></thead>
+      <tbody>{rows.map(r => <tr key={r.id}><td>{r.label}{r.enabled ? '' : ' (off)'}</td>
+        <td>{mark(test ? r.checks.trades : r.trades >= k.liveTrades, `${r.trades} / ${test ? k.minTrades : k.liveTrades}`)}</td>
+        <td>{mark(r.trades ? r.checks.positive : null, signed(r.avgPct))}</td><td>{r.wonPct === null ? '--' : `${r.wonPct.toFixed(0)} %`}</td>
+        <td>{mark(r.luckP === null ? null : r.checks.luck, r.luckP === null ? '--' : r.luckP < 0.001 ? '< 0.001' : r.luckP.toFixed(3))}</td>
+        <td>{r.stops.n ? mark(r.checks.stops, `${r.stops.n} · ${r.stops.gapPts! >= 0 ? '+' : ''}${r.stops.gapPts!.toFixed(1)} pts past the stop`) : 'none yet'}</td>
+        <td>{mark(r.testPassed ? true : null, state(r))}</td></tr>)}
+        {!rows.length && <tr><td colSpan={7}>No strategy on. Trades opened since the clean start count.</td></tr>}</tbody></table></div>
     {more}
   </section>;
 }

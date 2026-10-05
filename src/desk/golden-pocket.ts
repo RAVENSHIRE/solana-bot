@@ -212,6 +212,8 @@ export interface GoldenWatch {
   mint: string; symbol: string | null; startAt: number; state: PocketState;
   pool: string | null; vaults: { base: string; quote: string; quoteMint: string } | null; resolveTries: number;
   lastUsd: number | null; lastSampleAt: number | null; peakUsd: number | null;
+  /** Both sides of the pool in dollars at the last read (twice the quote reserve). */
+  lastLiquidityUsd?: number | null;
   /** Minute candles of the pool's market cap since the graduation (structure(), the P2 shadow trades). */
   bars: Bar[];
 }
@@ -304,6 +306,7 @@ export class GoldenTracker {
         if (!base || !quote || !usd) return;
         const cap = (quote / 10 ** QUOTE_DECIMALS[q]!) / (base / 10 ** BASE_DECIMALS) * PUMP_SUPPLY * usd;
         w.lastUsd = cap; w.lastSampleAt = now; w.peakUsd = Math.max(w.peakUsd ?? 0, cap);
+        w.lastLiquidityUsd = 2 * (quote / 10 ** QUOTE_DECIMALS[q]!) * usd;
         addSample(w.bars, w.startAt, now, cap);
         this.shadow?.sample(w.mint, cap, now);
         const entry = pocketStep(w.state, this.rules, { t: now, o: cap, h: cap, l: cap, c: cap });

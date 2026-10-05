@@ -69,6 +69,12 @@ test('alert evidence grades its own data quality', () => {
   assert.ok(unknownGate.data_quality.issues.some(i => i.startsWith('UNKNOWN_GATE Top-10 (blocking)')));
   const none = buildAlertEvidence(input({ candidate: null, key: `rug:${MINT}`, kind: 'rug' }));
   assert.equal(none.data_quality.status, 'UNKNOWN');
+  // A GOLDEN fill before any scan: the tracker's own pool reading fills the numbers (it showed "data UNKNOWN", 5 Oct).
+  const pool = buildAlertEvidence(input({ candidate: null, key: `golden:${MINT}`, kind: 'golden', market: { marketCapUsd: 87_600, liquidityUsd: 25_100, source: 'PumpSwap pool reserves', at: T0 - 3_000 } }));
+  assert.equal(pool.data_quality.status, 'DEGRADED');
+  assert.match(pool.data_quality.issues[0]!, /^NO_CANDIDATE_SNAPSHOT: only the PumpSwap pool reserves reading \(market cap, liquidity\)/);
+  assert.match(formatAlertMessage(pool), /mcap \$87\.6K · liq \$25\.1K/);
+  assert.equal(pool.when_it_knew.newest_input_at, T0 - 3_000);
 });
 
 test('the evidence is stored as an immutable event and reads back identical', async () => {

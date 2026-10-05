@@ -47,6 +47,11 @@ export interface AlertInput {
   heldBy?: string | null;
   solUsd?: number | null;
   regime?: string | null;
+  /**
+   * A fill seen by a tracker before any scan assessed the token (GOLDEN pools, OPEN curves): the market cap and
+   * liquidity it read on chain, and when. Used only when there is no candidate snapshot.
+   */
+  market?: { marketCapUsd: number | null; liquidityUsd: number | null; source: string; at: number } | null;
   delivery: { decision: DeliveryDecision; channels: string[]; selectedKinds: string[] };
 }
 
@@ -91,13 +96,15 @@ export function buildAlertEvidence(i: AlertInput, o: { staleAfterMs?: number; ev
   const c = i.candidate ?? null, sig = signalFor(i.kind, c), stale = o.staleAfterMs ?? 120_000, issues: string[] = [];
   const inputs = (c?.evidence ?? []).map(e => ({ key: e.key ?? null, label: e.label ?? null, kind: e.kind ?? null, value: e.value ?? null, source: e.source ?? null,
     at: num(e.at), age_ms: num(e.at) === null ? null : i.at - (e.at as number) }));
-  const times = [...inputs.map(x => x.at), num(c?.updatedAt), num(c?.holders?.at)].filter((t): t is number => t !== null && t <= i.at);
+  const times = [...inputs.map(x => x.at), num(c?.updatedAt), num(c?.holders?.at), !c ? num(i.market?.at) : null].filter((t): t is number => t !== null && t <= i.at);
   const newest = times.length ? Math.max(...times) : null, oldest = times.length ? Math.min(...times) : null;
-  if (!c) issues.push('NO_CANDIDATE_SNAPSHOT: the token was not in the scanner\'s candidate set at alert time');
+  const m = !c && i.market ? i.market : null;
+  if (!c) issues.push(m ? `NO_CANDIDATE_SNAPSHOT: only the ${m.source} reading (market cap${m.liquidityUsd !== null ? ', liquidity' : ''})` : 'NO_CANDIDATE_SNAPSHOT: the token was not in the scanner\'s candidate set at alert time');
+  if (m && i.at - m.at > stale) issues.push(`MARKET_READING_STALE (${Math.round((i.at - m.at) / 1000)} s old)`);
   if (c?.updatedAt !== undefined && i.at - c.updatedAt > stale) issues.push(`CANDIDATE_STALE (${Math.round((i.at - c.updatedAt) / 1000)} s since its last assessment)`);
   for (const g of c?.gates ?? []) if (g.status === 'UNKNOWN') issues.push(`UNKNOWN_GATE ${g.label ?? g.key}${g.blocking ? ' (blocking)' : ''}`);
   for (const x of inputs) if (x.value === null) issues.push(`UNKNOWN_INPUT ${x.label ?? x.key}`);
-  const metrics = (c?.metrics ?? {}) as Record<string, unknown>;
+  const metrics = (c?.metrics ?? (m ? { marketCapUsd: m.marketCapUsd, liquidityUsd: m.liquidityUsd } : {})) as Record<string, unknown>;
   const key_features: AlertEvidence['key_features'] = {};
   for (const k of KEY_METRICS) { const v = metrics[k]; key_features[k] = typeof v === 'number' || typeof v === 'string' || typeof v === 'boolean' ? v : null; }
   if (c?.launch?.score !== undefined) key_features.launchScore = c.launch.score;
@@ -115,7 +122,8 @@ export function buildAlertEvidence(i: AlertInput, o: { staleAfterMs?: number; ev
       max_input_age_ms: oldest === null ? null : i.at - oldest, inputs: inputs.length },
     key_features,
     market_state: { sol_usd: i.solUsd ?? null, regime: i.regime ?? null },
-    data_quality: { status: !c ? 'UNKNOWN' : issues.length ? 'DEGRADED' : 'OK', issues },
+    // A tracker's own reading is real data, but partial: DEGRADED, not UNKNOWN.
+    data_quality: { status: !c && !m ? 'UNKNOWN' : issues.length ? 'DEGRADED' : 'OK', issues },
     links: {
       dexscreener: mint ? `https://dexscreener.com/solana/${mint}` : null, solscan: mint ? `https://solscan.io/token/${mint}` : null,
       fomo: mint ? `https://fomo.family/tokens/solana/${mint}` : null, pair: c?.pair?.url ?? null,

@@ -582,6 +582,11 @@ test('CRASH enters a young pump in its first scan (no fair launch needed), exits
     assert.ok(tape.some(r => r.mint === MINT && r.signal === true && r.poolAgeMin > 9 && r.liquidityUsd === 50_000), 'every CRASH signal is on the replay tape');
     const stats = view.strategies.find(s => s.id === 'CRASH')!.stats;
     assert.equal(stats.trades, 1); assert.equal(stats.wins, 1); assert.ok(stats.netPnlUsd > 2);
+    assert.match(view.ledger.find(e => e.side === 'SELL')!.exitReason!, /^TAKE_PROFIT /, 'the exit rule is on the ledger row');
+    const level = view.levels!.rows.find(r => r.id === 'CRASH')!;
+    assert.equal(view.levels!.chain, 'Solana'); assert.equal(level.trades, 1); assert.ok(level.avgPct! > 90, `average ${level.avgPct}`);
+    assert.equal(level.checks.trades, false); assert.equal(level.testPassed, false);
+    assert.ok(!view.levels!.rows.some(r => r.id === 'OPEN'), 'retired strategies are not on the level card');
     await fs.access(path.join(dir, 'ledger-PAPER-CRASH.json'));
     await assert.rejects(engine.resetTest(), /STOP_TEST_FIRST/);
     engine.stop(); await engine.settled();

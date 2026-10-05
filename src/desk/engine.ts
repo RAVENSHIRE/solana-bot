@@ -37,6 +37,7 @@ import type { XFeed } from './xfeed';
 import { OPENING, openingSpeed, type OpeningState, type OpeningTracker } from './opening';
 import { GOLDEN, PUMP_QUOTE_MINT, WSOL_MINT, type GoldenSignal, type GoldenTracker } from './golden-pocket';
 import { structure, structureLine } from './structure';
+import { byProgress, LEVEL1, levelRow, levelTrades, type LevelRow } from './levels';
 /** CRASH's window: pools are sampled for structure up to 15 minutes after their graduation. */
 const STRUCTURE_FOLLOW_MS = 15 * 60_000;
 
@@ -125,6 +126,8 @@ interface ExecTarget {
   strategy: StrategyId; mint: string; symbol: string | null; decimals: number; pairAddress: string; heldRaw: bigint; token2022?: boolean; drill?: boolean;
   /** A scale-in to the open position, of this size. */
   add?: boolean; addUsd?: number;
+  /** SELL: the exit rule that fired, kept on the ledger row. */
+  reason?: string;
   entry?: { liquidityUsd: number | null; creator: string | null; creatorPct: number | null; insiders?: string[] | null; insiderPct?: number | null; onCurve?: boolean | null;
     stopUsd?: number | null; targetUsd?: number | null };
 }
@@ -180,6 +183,8 @@ export class DeskEngine {
   private loggedSkips = new Map<string, string>();
   /** TEST: sleeves that ran dry and were re-funded; their trades still count in the strategy stats. */
   private cycles = new Map<StrategyId, LedgerState[]>();
+  /** Level rows by strategy, kept until its ledger, switch or stop changes: the luck test resamples 4,000 times. */
+  private levelCache = new Map<StrategyId, { key: string; row: LevelRow }>();
   private readonly damagedCycles: string[] = [];
   private currentScanAt = 0;
   private readonly graduations: GraduationFeed;
@@ -1095,7 +1100,7 @@ export class DeskEngine {
         void this.d.launches?.markRug?.(p.mint, reason).catch(() => undefined);
         this.alertOnce(`rug:${p.mint}`, `${p.symbol ?? p.mint.slice(0, 6)}: RUG — selling`, `${reason}\n${fomoUrl(p.mint)}`, 'rug');
       }
-      await this.execute('SELL', { strategy: id, mint: p.mint, symbol: p.symbol, decimals: p.decimals, pairAddress: p.pairAddress, heldRaw: BigInt(p.qtyRaw) }, ledger, stopped);
+      await this.execute('SELL', { strategy: id, mint: p.mint, symbol: p.symbol, decimals: p.decimals, pairAddress: p.pairAddress, heldRaw: BigInt(p.qtyRaw), reason }, ledger, stopped);
     }
   }
 
@@ -1335,7 +1340,11 @@ export class DeskEngine {
     try {
       const mint = key.slice(key.indexOf(':') + 1), token = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint) ? mint : null;
       const candidate = token ? this.candidates.get(token) ?? null : null, channels = [...(this.d.alertChannels ?? [])];
-      return this.d.research.alert({ key, kind, title, body, at: Date.now(), mode: this.d.mode, token, symbol: candidate?.symbol ?? null, candidate,
+      // A tracker fill before any scan assessed the token: its own on-chain reading, so the evidence is not empty.
+      const g = token && !candidate ? this.d.golden?.get(token) ?? null : null, o = token && !candidate && !g ? this.d.opening?.get(token) ?? null : null;
+      const market = g?.lastSampleAt != null ? { marketCapUsd: g.lastUsd, liquidityUsd: g.lastLiquidityUsd ?? null, source: 'PumpSwap pool reserves', at: g.lastSampleAt }
+        : o?.lastSampleAt != null ? { marketCapUsd: o.lastUsd, liquidityUsd: null, source: 'bonding curve', at: o.lastSampleAt } : null;
+      return this.d.research.alert({ key, kind, title, body, at: Date.now(), mode: this.d.mode, token, symbol: candidate?.symbol ?? g?.symbol ?? o?.symbol ?? null, candidate, market,
         heldBy: token ? this.heldBy(token) : null, solUsd: this.solUsd,
         delivery: { decision: !selected.has(kind) ? 'SUPPRESSED_BY_CONFIG' : !phone ? 'SUPPRESSED_BY_LIMIT' : channels.length ? 'SENT' : 'NO_CHANNEL', channels, selectedKinds: [...selected] } });
     } catch { return null; }
@@ -1711,7 +1720,8 @@ export class DeskEngine {
       const order = guard.lastOrder!;
       const row = ledger.book({ side, mint: t.mint, symbol: t.symbol, decimals: t.decimals, pairAddress: t.pairAddress, inAmountRaw: fill.inAmountRaw,
         outAmountRaw: fill.outAmountRaw, solDeltaLamports: fill.solDeltaLamports, feeLamports: fill.feeLamports, rentLamports: fill.rentLamports,
-        router: 'Jupiter', route: order.route, routerFeeUsd: sol(order.routerFee) * solUsd, txSignature: fill.signature, solUsd, at: Date.now(), note: null, entry: t.entry, add: t.add });
+        router: 'Jupiter', route: order.route, routerFeeUsd: sol(order.routerFee) * solUsd, txSignature: fill.signature, solUsd, at: Date.now(), note: null, entry: t.entry, add: t.add,
+        exitReason: t.reason ?? null });
       if (guard.lastPreflight) { guard.lastPreflight.outcome = 'CONFIRMED'; guard.lastPreflight.txSignature = fill.signature; }
       record(guard.lastPreflight);
       this.event('CONFIRMED', `${side} confirmed on-chain: ${fill.signature}`, ctx);
@@ -1790,7 +1800,7 @@ export class DeskEngine {
     this.event('SUBMITTED', `TEST — no signature requested, nothing submitted; paper execution recorded (${t.strategy})`, ctx);
     const row = ledger.book({ side, mint: t.mint, symbol: t.symbol, decimals: t.decimals, pairAddress: t.pairAddress, inAmountRaw: BigInt(q.inAmount),
       outAmountRaw: buy ? tokens : BigInt(q.outAmount), solDeltaLamports: solDelta, feeLamports: fee, rentLamports: rent, router: 'Jupiter', route: o.route,
-      routerFeeUsd: sol(o.routerFee) * solUsd, txSignature: null, solUsd, at: Date.now(), note, entry: t.entry, add: t.add });
+      routerFeeUsd: sol(o.routerFee) * solUsd, txSignature: null, solUsd, at: Date.now(), note, entry: t.entry, add: t.add, exitReason: t.reason ?? null });
     this.bookedEvents(side, t.strategy, row, ctx);
     // As LIVE with the local key does: the emptied token account is closed and its rent returns (minus the base fee).
     const heldRent = held ? BigInt(held.rentLamports) : 0n, ata = heldRent < TOKEN_ACCOUNT_RENT_LAMPORTS ? heldRent : TOKEN_ACCOUNT_RENT_LAMPORTS;
@@ -1908,7 +1918,7 @@ export class DeskEngine {
         held: this.heldBy(w.mint) ?? null, verdict: this.candidates.get(w.mint)?.golden?.signal.summary ?? null })) } } : {}),
       ...(d.xfeed ? { xFeed: (({ configured, lastPollAt, lastError, posts, signals }) => ({ configured, lastPollAt, lastError, posts, signals }))(d.xfeed.status()) } : {}),
       preflights: [...this.preflights].reverse(), positions, ledger: rows,
-      sources: this.sources, path: this.pathView(),
+      sources: this.sources, path: this.pathView(), levels: this.levelsView(),
       health: healthLines({ observer: d.pumpStream?.observer?.() ?? null, streamOff: !d.pumpStream, phone: d.phoneHealth?.() ?? null, channels: d.alertChannels?.length ?? 0 }, Date.now()),
     };
   }
@@ -1930,6 +1940,25 @@ export class DeskEngine {
       stats, scale: scaleAdvice(p, stats, this.d.mode),
       ...(p.rule ? { spec: p.rule } : {}),
     };
+  }
+
+  /**
+   * Level 1 (levels.ts, docs/MULTICHAIN.md): each strategy's trades since the clean start against the level's checks.
+   * TEST scores the TEST ledgers (past sleeve cycles included); LIVE counts the LIVE trades of step 3. Retired
+   * strategies are left out; one that is off stays listed while it has trades.
+   */
+  private levelsView(): DeskStatus['levels'] {
+    const rows = this.ids().filter(id => !this.retired(id)).map(id => {
+      const p = this.profile(id), past = this.d.mode === 'PAPER' ? this.cycles.get(id) ?? [] : [];
+      const entries = [...past.flatMap(c => c.entries), ...(this.ledgerOf(id)?.state.entries ?? [])];
+      const key = `${entries.length}:${entries.at(-1)?.at ?? 0}:${p.enabled}:${p.exits.stopLossPct}:${p.label}`, hit = this.levelCache.get(id);
+      if (hit?.key === key) return hit.row;
+      const row = levelRow({ id, label: p.label, enabled: p.enabled, stopLossPct: p.exits.stopLossPct }, levelTrades(entries, LEVEL1.since));
+      this.levelCache.set(id, { key, row });
+      return row;
+    }).filter(r => r.enabled || r.trades > 0).sort(byProgress);
+    return { chain: LEVEL1.chain, since: LEVEL1.since, mode: this.d.mode,
+      criteria: { minTrades: LEVEL1.minTrades, maxLuckP: LEVEL1.maxLuckP, maxStopGapPts: LEVEL1.maxStopGapPts, liveTrades: LEVEL1.liveTrades }, rows };
   }
 
   /**

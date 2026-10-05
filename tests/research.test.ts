@@ -569,7 +569,12 @@ test('info messages: a checkmarked or established project account that posted it
   assert.equal(sent.length, 1);
   engine.xRead(org, 'bigco', read(org.mint, profile({ handle: 'bigco', verified: true, verifiedType: 'business', followers: 120_000 }), true));
   assert.match(sent[1]![0], /^INFO T1: project posted its CA \(gold check \(organisation\)\)$/);
-  for (let i = 2; i < 30; i++) { const x = syntheticLaunch(i, now - 60_000, true); engine.xRead(x, 'bigco', read(x.mint, profile({ handle: 'bigco', verified: true, verifiedType: 'government' }), true)); }
+  assert.match(sent[1]![1], /SOL\) market cap/);
+  // A mayhem coin: its curve price does not follow its trades, so no market cap is printed (it read "$0.0K (0 SOL)").
+  const mayhem = { ...syntheticLaunch(2, now - 60_000, true), mayhem: true };
+  engine.xRead(mayhem, 'bigco', read(mayhem.mint, profile({ handle: 'bigco', verified: true, verifiedType: 'business', followers: 120_000 }), true));
+  assert.match(sent[2]![1], /market cap unknown \(mayhem mode/); assert.doesNotMatch(sent[2]![1], /\$0\.0K/);
+  for (let i = 3; i < 30; i++) { const x = syntheticLaunch(i, now - 60_000, true); engine.xRead(x, 'bigco', read(x.mint, profile({ handle: 'bigco', verified: true, verifiedType: 'government' }), true)); }
   assert.equal(sent.length, CALLS.infoPerHour, 'capped per hour');
   await ledger.close();
 });

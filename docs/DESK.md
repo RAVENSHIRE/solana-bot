@@ -485,6 +485,19 @@ The position shows **NO ROUTE since …** under *Open positions*. It is re-quote
 
 Advisory only — the desk never changes a size by itself. A strategy shows READY for the next rung after ≥ 20 closed trades with positive net PnL, profit factor ≥ 1.3 and a max drawdown within half its sleeve. Paper fills ignore latency and MEV, so confirm with LIVE fills before sizing up real money. The next size also needs pool liquidity of about 50× the entry (≈ 2 % impact); most sub-$1M meme pools cannot absorb $1K+ orders.
 
+### Level 1: Solana (the Levels card, under Capital)
+
+The owner's levels (docs/MULTICHAIN.md): master Solana first, then one chain at a time. The card scores every strategy
+that is on (or has trades) on its trades **opened since the clean start, 5 Oct 21:00 UTC** (after that day's fixes),
+past TEST sleeve cycles included and retired strategies left out (desk/levels.ts):
+- **Trades** ≥ 100, **average net** after costs > 0, **luck p** < 0.05: the share of 4,000 resamples of the returns,
+  shifted to a zero mean, whose average reaches the real one (seeded, so the same trades always give the same p).
+- **Stop fills**: STOP_LOSS exits and how many points past the stop they filled on average, net of costs; within 10
+  points passes. SELL ledger rows now keep the exit rule that fired (`exitReason`), so this only counts exits made
+  after the 5 Oct evening deploy; no stop yet is not a fail.
+- A strategy passing all four may take the LIVE step: about 20 trades at the smallest size, then the owner's go. In
+  LIVE the card counts those LIVE trades. Nothing switches by itself.
+
 ### Signal tape and replay
 
 Every scan appends the market snapshot of each pumping young pool (price, market cap, liquidity, pool age, 5m volume, buys/sells, concentration, CRASH signal) to `data-desk/tape-<MODE>.jsonl`.

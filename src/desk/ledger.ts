@@ -20,7 +20,9 @@ const entry = z.object({ id: z.string(), at: z.number().int(), mode: z.enum(['PA
   entryPriceUsd: finite.nullable(), exitPriceUsd: finite.nullable(), grossPnlUsd: finite.nullable(), networkFeeLamports: raw,
   networkFeeUsd: finite.nullable(), routerFeeUsd: finite.nullable(), totalFeesUsd: finite.nullable(), netPnlUsd: finite.nullable(),
   solDeltaLamports: raw, status: z.enum(['CONFIRMED', 'PAPER_FILLED', 'FAILED', 'UNKNOWN']), note: z.string().nullable(),
-  rentOutstandingLamports: raw.optional() }).strict();
+  rentOutstandingLamports: raw.optional(),
+  /** A sell's exit rule ("STOP_LOSS -41.20% ≤ -35%"): the level card measures how far stops fill from their level. */
+  exitReason: z.string().max(300).optional() }).strict();
 const stateSchema = z.object({ version: z.literal(1), mode: z.enum(['PAPER', 'LIVE']), wallet: z.string().nullable(), createdAt: z.number().int(),
   paperCashLamports: raw.nullable(), paperStartUsd: finite.nullable(), positions: z.array(position).max(50), entries: z.array(entry).max(10_000),
   pending: z.object({ side: z.enum(['BUY', 'SELL']), mint: z.string(), at: z.number().int(), signature: z.string().nullable() }).strict().nullable(),
@@ -35,6 +37,8 @@ export interface Fill {
     stopUsd?: number | null; targetUsd?: number | null };
   /** A scale-in: added to the open position (average price), not a new one. */
   add?: boolean;
+  /** SELL: the exit rule that fired. */
+  exitReason?: string | null;
 }
 
 export const uiAmount = (rawAmount: bigint, decimals: number): string => {
@@ -206,6 +210,6 @@ export class DeskLedger {
       symbol: f.symbol, router: f.router, route: f.route, side: f.side, quantity: v.quantity, qtyRaw: String(v.qtyRaw), entryPriceUsd: v.entryPriceUsd,
       exitPriceUsd: v.exitPriceUsd, grossPnlUsd: v.grossPnlUsd, networkFeeLamports: String(f.feeLamports), networkFeeUsd: v.feeUsd,
       routerFeeUsd: f.routerFeeUsd, totalFeesUsd: v.feeUsd + (f.routerFeeUsd ?? 0), netPnlUsd: v.netPnlUsd,
-      solDeltaLamports: String(f.solDeltaLamports), status, note: f.note };
+      solDeltaLamports: String(f.solDeltaLamports), status, note: f.note, ...(f.side === 'SELL' && f.exitReason ? { exitReason: f.exitReason.slice(0, 300) } : {}) };
   }
 }

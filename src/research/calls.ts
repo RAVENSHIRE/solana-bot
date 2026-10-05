@@ -1,4 +1,4 @@
-import { features, type LaunchFacts } from './dataset';
+import { features, NORMAL_CURVE_FLOOR_SOL, type LaunchFacts } from './dataset';
 import { simulate, GATE_COSTS, PHONE_FILL_MS, type DirectOptions } from './direct';
 import { GROUPS, describeExit } from './rules';
 import type { Qualification, RuleEvidence } from './qualify';
@@ -101,14 +101,16 @@ export class CallEngine {
     this.infoSent.set(l.mint, now); this.stats.info++;
     const badge = p.verifiedType === 'business' ? 'gold check (organisation)' : p.verifiedType === 'government' ? 'grey check (government)' : p.verified ? 'blue check' : 'no check';
     const last = [...l.trades].sort((a, b) => a.obs - b.obs).at(-1), sol = this.d.solUsd?.() ?? null;
-    const mcSol = last ? last.vSol / last.vTok * 1e6 : null, ageMin = (now - l.createdObs) / 60_000;
+    // A mayhem curve's price does not follow its trades (research, 5 Oct: @Teemlings showed "$0.0K (0 SOL)"): no market cap.
+    const curve = last ? last.vSol / last.vTok * 1e6 : null, mayhem = l.mayhem || (curve !== null && curve < NORMAL_CURVE_FLOOR_SOL);
+    const mcSol = mayhem ? null : curve, ageMin = (now - l.createdObs) / 60_000;
     const buyers = new Set(l.trades.filter(t => t.buy).map(t => t.w)).size;
     const age = p.joinedAt ? (now - p.joinedAt) / 86_400_000 : null;
     const body = [
       `Not a qualified call — for your eyes.`,
       `@${handle}: ${badge}, ${(p.followers ?? 0).toLocaleString('en-US')} followers${age !== null ? `, account ${age < 2 ? `${Math.round(age * 24)} h` : `${Math.round(age)} days`} old` : ''}.`,
       `It posted this contract address ${Math.max(0, Math.round((own.at - l.createdObs) / 1000))} s after launch.`,
-      `Now ${mcSol !== null ? (sol ? `${usdK(mcSol * sol)} (${mcSol.toFixed(0)} SOL)` : `${mcSol.toFixed(0)} SOL`) : 'no trade yet'} market cap · ${buyers} buyers · ${ageMin < 1 ? `${Math.round(ageMin * 60)} s` : `${ageMin.toFixed(1)} min`} old${l.mayhem ? ' · mayhem mode' : ''}${l.completeObs ? ' · graduated' : ''}.`,
+      `Now ${mayhem ? 'market cap unknown (mayhem mode: the curve price does not follow its trades)' : mcSol !== null ? `${sol ? `${usdK(mcSol * sol)} (${mcSol.toFixed(0)} SOL)` : `${mcSol.toFixed(0)} SOL`} market cap` : 'no trade yet'} · ${buyers} buyers · ${ageMin < 1 ? `${Math.round(ageMin * 60)} s` : `${ageMin.toFixed(1)} min`} old${l.completeObs ? ' · graduated' : ''}.`,
       this.d.link ? this.d.link(l.mint) : `https://pump.fun/coin/${l.mint}`,
     ].join('\n');
     this.d.ledger.put(['INFO', now, { $m: l.mint }, handle, { badge: p.verifiedType ?? (p.verified ? 'blue' : null), f: p.followers, ownCa: 1, mcSol }]);
