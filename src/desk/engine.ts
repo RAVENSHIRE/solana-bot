@@ -101,6 +101,8 @@ export const ALERT_KINDS: readonly AlertKind[] = ['golden', 'rug', 'open', 'laun
  * Every alert is still shown in the dashboard and recorded.
  */
 export const DEFAULT_ALERTS: ReadonlySet<AlertKind> = new Set<AlertKind>();
+/** Sent-alert memory kept across restarts: keys of the last 6 h (a coin alerted earlier is not news again), at most 5,000. */
+export const ALERT_MEMORY = Object.freeze({ keepMs: 6 * 3_600_000, maxKeys: 5_000 });
 
 interface Deep { at: number; onchain: OnchainEvidence; social: SocialEvidence }
 interface Staged { found: Discovered; pair: DexPair; tier: Tier; metrics: ReturnType<typeof pairMetrics>; crashHint: boolean; ruleHints: StrategyId[]; launch: Launch | null;
@@ -150,7 +152,9 @@ export class DeskEngine {
   private graduationPoll: Promise<Graduation[]> | null = null;
   private pumpUsd: { value: number; at: number } | null = null;
   private copycatSearches = new Map<string, { at: number; pairs: DexPair[] }>();
-  private launchAlerts = new Set<string>();
+  /** Alert keys already raised, with when: saved to alerts-sent-<MODE>.json so a restart neither re-alerts nor resets the OPEN cap. */
+  private launchAlerts = new Map<string, number>();
+  private alertWrite: Promise<void> = Promise.resolve();
   /** When the last hour's OPEN alerts went to the phone (the hourly cap). */
   private readonly openPhoneSent: number[] = [];
   private launchPoll: Promise<void> | null = null;
@@ -229,6 +233,7 @@ export class DeskEngine {
     for (const spec of custom.specs) engine.strategies[spec.id] = ruleProfile(spec, d.mode === 'PAPER');
     for (const error of custom.errors) engine.event('FAILED', `Custom strategy not loaded: ${error}`);
     if (d.operational?.deploymentMode !== 'LOCKED') await engine.loadSettings();
+    await engine.loadAlertMemory();
     if (d.mode === 'PAPER') for (const id of engine.ids()) { await engine.ledgerFor(id, null); await engine.loadCycles(id); }
     // Files a power cut left unreadable were moved aside (events.ts, ledger.ts): said once, so a fresh TEST is explained.
     const damaged = [engine.events.damaged, ...[...engine.ledgers.values()].map(l => l.damaged), ...engine.damagedCycles].filter((f): f is string => !!f);
@@ -414,6 +419,25 @@ export class DeskEngine {
     for (const id of this.ids()) if (typeof saved.strategies?.[id] === 'boolean') this.profile(id).enabled = saved.strategies[id] as boolean;
     if (this.d.mode === 'PAPER' && typeof saved.drill === 'boolean') this.drill = saved.drill;
   }
+  /**
+   * Which alerts went out (keys of the last `ALERT_MEMORY.keepMs`) and when OPEN last used the phone. In memory only, a
+   * restart re-alerted every live coin and reset the OPEN cap (3 Oct: 8 OPEN messages in under an hour after restarts).
+   */
+  private alertMemoryFile(): string { return path.join(this.d.dir, `alerts-sent-${this.d.mode}.json`); }
+  private async loadAlertMemory(now = Date.now()): Promise<void> {
+    let saved: { keys?: unknown; openPhone?: unknown };
+    try { saved = JSON.parse(await fs.readFile(this.alertMemoryFile(), 'utf8')); } catch { return; }
+    if (Array.isArray(saved.keys)) for (const row of saved.keys) {
+      if (Array.isArray(row) && typeof row[0] === 'string' && typeof row[1] === 'number' && now - row[1] <= ALERT_MEMORY.keepMs) this.launchAlerts.set(row[0], row[1]);
+    }
+    if (Array.isArray(saved.openPhone)) this.openPhoneSent.push(...saved.openPhone.filter((t): t is number => typeof t === 'number' && now - t <= 3_600_000).sort((a, b) => a - b));
+  }
+  private saveAlertMemory(): void {
+    this.alertWrite = this.alertWrite.then(async () => {
+      const now = Date.now(), keys = [...this.launchAlerts].filter(([, at]) => now - at <= ALERT_MEMORY.keepMs);
+      await atomicWriteFile(this.alertMemoryFile(), JSON.stringify({ keys, openPhone: this.openPhoneSent }) + '\n');
+    }).catch(error => { this.event('FAILED', `Saving sent alerts failed: ${errorMessage(error)}`); });
+  }
   private async saveSettings(): Promise<void> {
     const body = { strategies: Object.fromEntries(this.ids().map(id => [id, this.profile(id).enabled])), drill: this.drill, updatedAt: new Date().toISOString() };
     await atomicWriteFile(this.settingsFile(), JSON.stringify(body, null, 2) + '\n').catch(error => this.event('FAILED', `Saving settings failed: ${errorMessage(error)}`));
@@ -528,7 +552,7 @@ export class DeskEngine {
 
   async settled(): Promise<void> {
     while (this.work || this.positionWork) { await this.work?.catch(() => undefined); await this.positionWork?.catch(() => undefined); }
-    await this.orders; await this.background; await this.settingsWrite; await this.idleSync;
+    await this.orders; await this.background; await this.settingsWrite; await this.alertWrite; await this.idleSync;
   }
   async persist(): Promise<void> {
     // Ledgers first, each on its own: they hold positions and orders. A failing telemetry write (a locked event log, a
@@ -1059,10 +1083,11 @@ export class DeskEngine {
       const age = Math.max(1, Math.round((now - state.at) / 60_000)), speed = openingSpeed(state);
       this.event('QUALIFIED', `OPEN screen: ${state.symbol} "${state.name}" ${age} min old · ${state.detail}${speed ? ` · ${speed.text}` : ''}`, ctx);
       const secs = Math.max(0, Math.round(((state.signalAt ?? now) - state.at) / 1000));
+      // A key already alerted (e.g. before a restart) never uses up one of the hour's phone slots.
       this.alertOnce(`open:${state.mint}`, `OPEN ${state.symbol}: $${((state.signalUsd ?? 0) / 1000).toFixed(1)}K, ${secs < 120 ? `${secs} s` : `${Math.round(secs / 60)} min`} after launch`,
         [`${state.name}${speed ? ` · ${speed.text}` : ''}`, state.detail, launch?.insiders?.detail ?? '',
           'Not a qualified call. Fast openers often rug within minutes: take profit early.', fomoUrl(state.mint)].filter(Boolean).join('\n'), 'open',
-        secs * 1000 <= OPENING.phoneWithinMs && this.openPhoneSlot(now));
+        !this.launchAlerts.has(`open:${state.mint}`) && secs * 1000 <= OPENING.phoneWithinMs && this.openPhoneSlot(now));
     }
     // A breakout is traded fresh: start a scan now instead of waiting for the next one.
     if (fresh.length && this.strategies.OPEN.enabled && !this.work) this.nextScanAt = Date.now();
@@ -1143,7 +1168,7 @@ export class DeskEngine {
       const age = Math.max(0, Math.round((Date.now() - l.at) / 60_000)), ctx = { mint: l.mint, symbol: l.symbol };
       if (this.launchList.has(l.mint)) {
         if (l.rug && !this.launchAlerts.has(`rugseen:${l.mint}`)) {
-          this.launchAlerts.add(`rugseen:${l.mint}`);
+          this.launchAlerts.set(`rugseen:${l.mint}`, Date.now());
           this.event('FILTERED', `LAUNCH radar: ${l.symbol} ${l.rug}${this.heldBy(l.mint) ? ' — selling' : ' — never bought'}`, ctx);
           this.alertOnce(`rugradar:${l.mint}`, `LAUNCH radar: ${l.symbol} RUG`, `${l.rug}\n${fomoUrl(l.mint)}`, 'radar');
           continue;
@@ -1211,8 +1236,9 @@ export class DeskEngine {
   /** `phone` false: recorded (and on the dashboard) like any alert, but not sent. */
   private alertOnce(key: string, title: string, body: string, kind: AlertKind, phone = true): void {
     if (this.launchAlerts.has(key) || !this.d.notify) return;
-    this.launchAlerts.add(key);
-    if (this.launchAlerts.size > 5_000) this.launchAlerts.delete(this.launchAlerts.values().next().value!);
+    this.launchAlerts.set(key, Date.now());
+    if (this.launchAlerts.size > ALERT_MEMORY.maxKeys) this.launchAlerts.delete(this.launchAlerts.keys().next().value!);
+    this.saveAlertMemory();
     const selected = this.d.alerts ?? DEFAULT_ALERTS;
     // Every first alert per key is recorded with what the desk knew at this moment, whether or not it reaches the phone.
     const record = this.recordAlert(key, title, body, kind, selected, phone);

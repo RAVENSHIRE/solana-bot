@@ -91,3 +91,28 @@ test('CTO-06 (Q-19): a failed event-log write is retried on the next flush, and 
   const history = (await fs.readFile(path.join(dir, 'events-PAPER.log.jsonl'), 'utf8')).trim().split('\n');
   assert.equal(history.length, 1);
 });
+
+test('CTO-07 (Q-20, OPEN cap): sent alerts and the OPEN phone cap survive a restart', async () => {
+  const { ALERT_MEMORY } = await import('../src/desk/engine');
+  const proto = DeskEngine.prototype as unknown as Record<string, (...a: unknown[]) => unknown>;
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cto-alerts-')), now = Date.now();
+  const engine = () => {
+    const e: Record<string, unknown> = { d: { dir, mode: 'PAPER', alerts: new Set(['open']) }, launchAlerts: new Map<string, number>(), openPhoneSent: [] as number[],
+      alertWrite: Promise.resolve(), event: () => undefined };
+    for (const m of ['alertMemoryFile', 'loadAlertMemory', 'saveAlertMemory', 'openPhoneSlot']) e[m] = proto[m]!.bind(e);
+    return e as { launchAlerts: Map<string, number>; openPhoneSent: number[]; alertWrite: Promise<void>; loadAlertMemory: () => Promise<void>; saveAlertMemory: () => void; openPhoneSlot: (n: number) => boolean };
+  };
+  const before = engine();
+  for (let i = 0; i < 4; i++) assert.equal(before.openPhoneSlot(now - 50 * 60_000 + i * 60_000), true);
+  assert.equal(before.openPhoneSlot(now), false, '4 an hour');
+  before.launchAlerts.set('open:MINT1', now - 60_000);
+  before.launchAlerts.set('radar:OLD', now - ALERT_MEMORY.keepMs - 60_000);
+  before.saveAlertMemory(); await before.alertWrite;
+  const after = engine();
+  await after.loadAlertMemory();
+  assert.ok(after.launchAlerts.has('open:MINT1'), 'a coin alerted before the restart is not alerted again');
+  assert.ok(!after.launchAlerts.has('radar:OLD'), 'keys older than the memory window are dropped');
+  assert.equal(after.openPhoneSent.length, 4);
+  assert.equal(after.openPhoneSlot(now), false, 'the restart does not reset the OPEN cap');
+  assert.equal(after.openPhoneSlot(now + 11 * 60_000), true, 'the oldest slot expires after an hour');
+});
