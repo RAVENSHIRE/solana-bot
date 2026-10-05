@@ -73,7 +73,9 @@ export async function readXTimeline(handle: string, fetcher: typeof fetch = fetc
 const B58 = /(?<![1-9A-HJ-NP-Za-km-z])[1-9A-HJ-NP-Za-km-z]{32,44}(?![1-9A-HJ-NP-Za-km-z])/g;
 /** Whether a post names this mint, and the first other contract-like address it names (a pump.fun one preferred). */
 export function postAddresses(raw: string, mint: string): { mint: boolean; other: string | null } {
-  const found = [...new Set(raw.match(B58) ?? [])];
+  // `raw` is the post as JSON: a line break before the address is the two characters \ n, and that "n" would join the
+  // address into one base58 run too long to match ("ca:\n<address>", CRWLR 5 Oct). Escapes become spaces first.
+  const found = [...new Set(raw.replace(/\\(?:u[0-9a-fA-F]{4}|[nrtbf"\\/])/g, ' ').match(B58) ?? [])];
   const others = found.filter(a => a !== mint && !/^\d+$/.test(a));
   return { mint: found.includes(mint), other: others.find(a => a.endsWith('pump')) ?? others[0] ?? null };
 }

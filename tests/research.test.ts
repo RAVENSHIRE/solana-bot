@@ -50,6 +50,9 @@ test('X posts: the post time comes from its id, and contract addresses are found
   assert.equal(p?.at, snowflakeMs('2105790296105841114'));
   assert.deepEqual(postAddresses(p!.raw, mint), { mint: true, other: null });
   assert.deepEqual(postAddresses(JSON.stringify({ t: 'new one 9tGLRvTTmm4MHCGUaULjpQbHFLg6JPLyqTz4k64Cpump' }), mint), { mint: false, other: '9tGLRvTTmm4MHCGUaULjpQbHFLg6JPLyqTz4k64Cpump' });
+  // The CA on its own line (CRWLR, 5 Oct: "ca:" + line break + address): in the JSON the break is \n, whose "n" made one
+  // base58 run too long to match. Also after a tab or a unicode escape.
+  for (const sep of ['\n', '\n\n', '\r\n', '\t', '\u2026 ']) assert.deepEqual(postAddresses(JSON.stringify({ text: `ca:${sep}${mint}` }), mint), { mint: true, other: null }, JSON.stringify(sep));
 });
 
 test('recent set: each key once, bounded', () => {
