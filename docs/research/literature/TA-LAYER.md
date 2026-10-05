@@ -71,8 +71,11 @@ breaking it. "The longer it holds, the more likely the upside." I could not chec
 blocked in this session.
 
 **Why Raven sent no INFO, from the code:**
-- the address does not end in `pump`, so it is probably not a pump.fun launch, and the observer only watches
-  pump.fun;
+- correction (owner, 5 Oct): it **is** a pump.fun coin ("Human", Team Human), even though the address does not end
+  in `pump`, so a missing `pump` suffix proves nothing. More likely, **the observer was not running**: the
+  owner's INFO list has no INFO at all between 4 Oct 00:44 and 5 Oct 08:57 UTC, and the launch at 22:30 on 4 Oct
+  falls inside that gap. The case extract (whether a `PC` record exists for this mint) would confirm it. A launch
+  INFO also needs the project's own account to post the CA;
 - the verified-coin INFO needs ≥ $1M market cap, a Jupiter check, a place on Jupiter's trending/organic/traded lists
   (or the watchlist), **and** +15 % in the hour. A coin ranging at $500–800K fails on market cap and on movement.
 
