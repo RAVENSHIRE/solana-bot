@@ -3,6 +3,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import { atomicWriteFile } from '../utils/fs';
 import { CRASH_DEFAULTS, DESK, type StrategyProfile } from './config';
+import { structureLine, type Structure } from './structure';
 import type { Candidate, CandidateMetrics, CrashSignal, GateResult } from './types';
 
 /**
@@ -40,6 +41,11 @@ export const ruleSpecSchema = z.object({
     maxTop10WalletPct: opt(pct100), maxLargestWalletPct: opt(pct100),
     /** The token links an X account (not a post or a community). */
     requireXAccount: z.boolean().default(false),
+    /**
+     * TA2 (research, TA-LAYER.md): enter only when the pool's previous resistance gives a structural stop at most this
+     * far below the price; no structure yet (or no pool candles) is a miss.
+     */
+    maxStructureStopPct: opt(num.positive().max(100)),
   }).strict(),
   exits: z.object({
     /** null: no take profit, the trailing stop or the market-cap target ends the trade. */
@@ -51,6 +57,11 @@ export const ruleSpecSchema = z.object({
     graceSec: num.min(0).max(3_600).default(0),
     /** Exit when the token's market cap falls to this (your floor), or reaches this target. */
     marketCapFloorUsd: opt(num.positive()), marketCapTargetUsd: opt(num.positive()),
+    /**
+     * TA1: the stop sits at the previous resistance −3 % (set at entry from the pool's candles) instead of the fixed
+     * stop, which then applies only to an entry without structure or while the market cap cannot be read.
+     */
+    structuralStop: z.boolean().default(false),
   }).strict(),
   sizing: z.object({
     capitalUsd: num.positive().max(1_000_000), entryUsd: num.positive().max(100_000),
@@ -59,6 +70,12 @@ export const ruleSpecSchema = z.object({
     maxDragPct: num.min(0.5).max(25),
   }).strict(),
   reentryCooldownMin: num.min(0).max(10_080).default(60),
+  /**
+   * A TEST comparison variant of a built-in strategy: its entries need that strategy's own entry signal (plus the rules
+   * above), it enters in the same pass, and in TEST it may hold a token the strategy holds (and the reverse), so both
+   * trade the same signals side by side. In LIVE the usual one-holder-per-token rule applies.
+   */
+  compareWith: z.enum(['CRASH']).nullable().default(null),
 }).strict().superRefine((s, ctx) => {
   const issue = (message: string, at: string[]) => ctx.addIssue({ code: z.ZodIssueCode.custom, message, path: at });
   const band = (lo: number | null, hi: number | null, name: string, at: string[]) => { if (lo !== null && hi !== null && lo > hi) issue(`${name}: minimum above maximum`, at); };
@@ -150,7 +167,8 @@ export const CRASH_V1_PRESET: RuleSpecInput = {
  * CRASH on bigger, slightly older pools (pre-registered 5 Oct 2026, 15:00 UTC): in the 88 TEST trades of CRASH (1–5 Oct),
  * entries at a market cap of $70K or more on a pool at least 5 minutes old made +15.6 % on average (40 trades), the rest
  * −6.1 % (48). That split was found in those same trades, so it proves nothing yet: this preset runs it beside CRASH in
- * TEST on the same signals, with CRASH's own exits, and only its trades from now on count.
+ * TEST on the same signals, with CRASH's own exits, and only its trades from now on count. It takes CRASH's own signal
+ * (compareWith) and may hold a coin CRASH holds: before 5 Oct 21:00 UTC CRASH, entering first, kept it out of nearly every coin.
  */
 export const CRASH_70K_PRESET: RuleSpecInput = {
   id: 'CRASH_70K', label: 'CRASH 70K+ (5–15 min)',
@@ -160,9 +178,29 @@ export const CRASH_70K_PRESET: RuleSpecInput = {
   exits: { takeProfitPct: 100, stopLossPct: 35, trailingActivationPct: null, trailingStopPct: null, maxHoldMin: 10, graceSec: 0 },
   sizing: { capitalUsd: 10, entryUsd: 2, maxOpenPositions: 3, slippageBps: 250, exitSlippageBps: 1_000, maxDragPct: 5 },
   reentryCooldownMin: 10,
+  compareWith: 'CRASH',
+};
+/**
+ * CRASH's TA variants (research, STRATEGY-REVIEW.md C1/C2 and TA-LAYER.md TA1/TA2, pre-registered 5 Oct): the same
+ * CRASH signals, in TEST beside CRASH. Only trades after 5 Oct 21:00 UTC count; each needs ≥ 100 trades and the luck
+ * test before LIVE. The structure comes from the pool's minute candles (pump.fun graduations watched from the start).
+ *   C1 (TA2): skip the entry when the structural stop is more than 25 % below the price, or there is no structure.
+ *   C2 (TA1): stop at the previous resistance −3 % instead of −35 %; target and time stop as CRASH.
+ */
+const CRASH_EXITS = { takeProfitPct: 100, stopLossPct: 35, trailingActivationPct: null, trailingStopPct: null, maxHoldMin: 10, graceSec: 0 };
+const CRASH_SIZING = { capitalUsd: 10, entryUsd: 2, maxOpenPositions: 3, slippageBps: 250, exitSlippageBps: 1_000, maxDragPct: 5 };
+export const CRASH_C1_PRESET: RuleSpecInput = {
+  id: 'CRASH_C1', label: 'CRASH C1 (skip far stops)',
+  summary: 'CRASH, but only when the previous resistance gives a stop at most 25% below the price (TA2); CRASH\'s exits',
+  entry: { maxStructureStopPct: 25, minLiquidityUsd: 10_000 }, exits: CRASH_EXITS, sizing: CRASH_SIZING, reentryCooldownMin: 10, compareWith: 'CRASH',
+};
+export const CRASH_C2_PRESET: RuleSpecInput = {
+  id: 'CRASH_C2', label: 'CRASH C2 (stop at resistance)',
+  summary: 'CRASH\'s entries with the stop at the previous resistance −3% instead of −35% (TA1); +100% target, 10 minutes',
+  entry: { minLiquidityUsd: 10_000 }, exits: { ...CRASH_EXITS, structuralStop: true }, sizing: CRASH_SIZING, reentryCooldownMin: 10, compareWith: 'CRASH',
 };
 export const PRESETS: Record<string, RuleSpecInput> = { RUNNER: RUNNER_PRESET, MIGRATION: MIGRATION_PRESET, CONSOL: CONSOL_PRESET, SCALP: SCALP_PRESET, CRASH_V1: CRASH_V1_PRESET,
-  CRASH_70K: CRASH_70K_PRESET };
+  CRASH_70K: CRASH_70K_PRESET, CRASH_C1: CRASH_C1_PRESET, CRASH_C2: CRASH_C2_PRESET };
 
 const usd = (n: number | null) => n === null ? 'UNKNOWN' : `$${n >= 1000 ? Math.round(n).toLocaleString('en-US') : n.toFixed(2)}`;
 const pct = (n: number | null) => n === null ? 'UNKNOWN' : `${n.toFixed(1)}%`;
@@ -194,7 +232,8 @@ export function ruleMarketChecks(s: RuleSpec, m: CandidateMetrics): GateResult[]
       : range('ruleLiquidity', 'AMM liquidity', m.liquidityUsd, e.minLiquidityUsd, null, usd, big)),
   ];
 }
-export const ruleMarketHint = (s: RuleSpec, m: CandidateMetrics): boolean => ruleMarketChecks(s, m).every(g => g.status === 'PASS');
+/** Whether staging keeps a token for this strategy; a comparison variant rides on its base strategy's staging. */
+export const ruleMarketHint = (s: RuleSpec, m: CandidateMetrics): boolean => s.compareWith === null && ruleMarketChecks(s, m).every(g => g.status === 'PASS');
 
 /** Every rule of the strategy, with the always-on safety gates; UNKNOWN evidence blocks (the token waits for it). */
 export function ruleCheck(s: RuleSpec, c: Candidate): CrashSignal {
@@ -212,12 +251,25 @@ export function ruleCheck(s: RuleSpec, c: Candidate): CrashSignal {
     ...range('ruleLargest', 'Largest single wallet', m.largestWalletPct, null, e.maxLargestWalletPct, pct, v => `${v}%`),
     ...(e.requireXAccount ? [{ key: 'ruleX', label: 'X account linked', status: c.social.x.kind === 'ACCOUNT' ? 'PASS' as const : 'FAIL' as const,
       actual: c.social.x.handle ? `${c.social.x.kind} @${c.social.x.handle}` : c.social.x.kind, required: 'ACCOUNT', blocking: true }] : []),
+    ...(s.compareWith === 'CRASH' ? [{ key: 'ruleCrash', label: 'CRASH entry signal', status: !c.crash ? 'UNKNOWN' as const : c.crash.signal ? 'PASS' as const : 'FAIL' as const,
+      actual: c.crash ? c.crash.signal ? 'entry-ready' : c.crash.summary : 'not evaluated', required: 'entry-ready', blocking: true }] : []),
+    ...(e.maxStructureStopPct !== null ? [structureGate(c.structure ?? null, e.maxStructureStopPct)] : []),
   ];
   const signal = checks.every(g => g.status === 'PASS'), miss = checks.find(g => g.status !== 'PASS');
   const summary = signal
-    ? `${usd(m.marketCapUsd)} cap · ${holders !== null ? `${holders.toLocaleString('en-US')}${capped ? '+' : ''} holders · ` : ''}1h ${pct(m.priceChange1hPct)} · 5m ${pct(m.priceChange5mPct)}`
+    ? `${usd(m.marketCapUsd)} cap · ${holders !== null ? `${holders.toLocaleString('en-US')}${capped ? '+' : ''} holders · ` : ''}1h ${pct(m.priceChange1hPct)} · 5m ${pct(m.priceChange5mPct)}` +
+      (usesStructure(s) ? ` · ${structureLine(c.structure ?? null)}` : '')
     : `${miss!.label}: ${miss!.actual} (${miss!.required})`;
   return { signal, checks, summary };
+}
+
+/** Whether a strategy reads the pool's structure (TA1/TA2): the GOLDEN tracker must then sample young pools. */
+export const usesStructure = (s: RuleSpec): boolean => s.entry.maxStructureStopPct !== null || s.exits.structuralStop;
+
+/** TA2's gate: a structural stop within the distance; no candles or no structure is a miss (FAIL, not UNKNOWN). */
+function structureGate(st: Structure | null, maxPct: number): GateResult {
+  const ok = st?.stopPct != null && st.stopPct <= maxPct;
+  return { key: 'ruleStructure', label: 'Structural stop distance', status: ok ? 'PASS' : 'FAIL', actual: structureLine(st), required: `≤ ${maxPct}% below (previous resistance −3 %)`, blocking: true };
 }
 
 export function ruleProfile(s: RuleSpec, enabled: boolean): StrategyProfile {

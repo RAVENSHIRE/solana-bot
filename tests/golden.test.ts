@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PublicKey } from '@solana/web3.js';
+import { GoldenShadow, GRADUATION_MCAP_SOL, type ShadowRecord } from '../src/desk/golden-shadow';
 import { GoldenTracker, PUMP_AMM_PROGRAM, PUMP_QUOTE_MINT, WSOL_MINT, decodePumpSwapPool, pocketState, pocketStep, pumpSwapPool, type PocketRules } from '../src/desk/golden-pocket';
 import { GOLDEN_RULES, deskCapital, strategyProfiles } from '../src/desk/config';
 import { exitReason, goldenEntryCheck } from '../src/desk/strategies';
@@ -103,6 +104,38 @@ test('the tracker watches a graduation from its pool reserves and reports an onl
   assert.equal(calls[0]!.length, 2, 'first read: the SOL- and PUMP-quoted pool addresses'); assert.deepEqual(calls[1], [baseVault, quoteVault]);
   cap = 130 * K; assert.deepEqual(await tracker.poll(t + 130_000, quote), [], 'a fill is reported once');
   assert.equal(tracker.counts().ENTRY, 1); assert.equal(tracker.list()[0]!.mint, BULLISHCAT);
+  // Minute candles from the samples (structure, shadow trades); the first pool minute against the graduation value.
+  assert.deepEqual(tracker.get(BULLISHCAT)!.bars.map(b => [b.t - t, Math.round(b.o / K), Math.round(b.h / K), Math.round(b.c / K)]), [[0, 80, 95, 95], [60_000, 97, 110, 110], [120_000, 112, 112, 112]], 'the pattern is over after the fill: the $130K read is not taken');
+  assert.ok(Math.abs(fills[0]!.poolJumpX! - 95 * K / (GRADUATION_MCAP_SOL * solUsd)) < 1e-9);
+});
+
+test('the tracker follows its only-up fills as shadow trades, and keeps young pools sampled while a strategy needs their structure', async () => {
+  const t = Date.parse('2026-10-01T12:00:00Z'), pool = pumpSwapPool(BULLISHCAT, WSOL_MINT);
+  const baseVault = new PublicKey(new Uint8Array(32).fill(7)).toBase58(), quoteVault = new PublicKey(new Uint8Array(32).fill(8)).toBase58();
+  const poolData = Buffer.alloc(301);
+  new PublicKey(BULLISHCAT).toBuffer().copy(poolData, 43); new PublicKey(WSOL_MINT).toBuffer().copy(poolData, 75);
+  new PublicKey(baseVault).toBuffer().copy(poolData, 139); new PublicKey(quoteVault).toBuffer().copy(poolData, 171);
+  const vault = (raw: bigint) => { const d = Buffer.alloc(165); d.writeBigUInt64LE(raw, 64); return { data: d }; };
+  let cap = 80 * K, reads = 0;
+  const conn = { getMultipleAccountsInfo: async (keys: PublicKey[]) => { reads++;
+    return keys.map(k => k.toBase58() === pool ? { owner: new PublicKey(PUMP_AMM_PROGRAM), data: poolData }
+      : k.toBase58() === baseVault ? vault(200_000_000n * 1_000_000n) : k.toBase58() === quoteVault ? vault(BigInt(Math.round(cap / 100 / 1e9 * 200e6 * 1e9))) : null); } };
+  const rows: ShadowRecord[] = [], shadow = new GoldenShadow(r => { rows.push(r); });
+  const tracker = new GoldenTracker({ execute: async (_l: string, fn: (c: never) => unknown) => fn(conn as never) } as never, GOLDEN_RULES, shadow);
+  tracker.watchGraduations([{ mint: BULLISHCAT, at: t, symbol: 'BULLISHCAT' }], t + 2_000);
+  const quote = (q: string) => q === WSOL_MINT ? 100 : null;
+  for (const [sec, k] of [[4, 80], [30, 88], [56, 95], [64, 97], [90, 104], [116, 110], [124, 112]] as Array<[number, number]>) { cap = k * K; await tracker.poll(t + sec * 1000, quote); }
+  assert.deepEqual(shadow.mints(), [BULLISHCAT], 'the fill opened a shadow trade');
+  cap = 113 * K; await tracker.poll(t + 128_000, quote);   // bot entry
+  cap = 115 * K; await tracker.poll(t + 170_000, quote);   // phone entry
+  cap = 60 * K; await tracker.poll(t + 174_000, quote);    // under the pattern stop: every exit closes
+  assert.equal(rows.length, 1); assert.equal(rows[0]!.legs[0]!.a!.reason, 'POCKET_STOP'); assert.equal(rows[0]!.symbol, 'BULLISHCAT');
+  assert.deepEqual(shadow.mints(), []);
+  // Pattern over, nothing held, no shadow: the pool is no longer read, unless young pools are followed.
+  const before = reads; await tracker.poll(t + 178_000, quote);
+  assert.equal(reads, before, 'not sampled');
+  tracker.followYoung(15 * 60_000); await tracker.poll(t + 182_000, quote);
+  assert.equal(reads, before + 1, 'sampled again for its first 15 minutes');
 });
 
 test('GOLDEN strategy: only-up fills are bought by default; the pattern stop and the retest target are per position', () => {

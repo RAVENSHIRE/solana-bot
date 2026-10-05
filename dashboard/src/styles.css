@@ -1393,3 +1393,6 @@ tr.launch-fake td:nth-child(4){text-decoration:none;font-weight:600}
 .coin-verdict.good{background:#eef8f3;border-color:#9fd8bf}.coin-verdict.warn{background:#fdf7e8;border-color:#e6cf8f}.coin-verdict.bad{background:#fbefef;border-color:#e7aaaa}
 .coin-result th{text-align:left;white-space:nowrap;vertical-align:top;color:#7b8190;font-weight:500;padding-right:12px}
 .coin-result td ul{margin:4px 0 0;padding-left:16px}
+
+/* A retired strategy: no switch, just the label. */
+.pill { display: inline-block; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: 0.04em; }

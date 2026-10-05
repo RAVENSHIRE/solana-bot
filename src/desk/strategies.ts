@@ -184,13 +184,14 @@ export function goldenEntryCheck(c: Candidate, g: Omit<NonNullable<Candidate['go
 
 /** One rule set for both strategies; percentages are net of the entry fee (value vs cost). */
 export function exitReason(r: ExitRules, x: { pnlPct: number; peakPct: number; fromPeakPct: number; heldMs: number; marketCapUsd?: number | null; peakMultiple?: number | null;
-  levels?: { stopUsd?: number | null; targetUsd?: number | null } | null }): string | null {
+  levels?: { stopUsd?: number | null; targetUsd?: number | null; kind?: 'POCKET' | 'STRUCTURE' } | null }): string | null {
   const settling = x.heldMs < (r.graceMs ?? 0);
   if (x.pnlPct <= -r.stopLossPct && !settling) return `STOP_LOSS ${x.pnlPct.toFixed(2)}% ≤ -${r.stopLossPct}%`;
   const cap = x.marketCapUsd ?? null, mc = r.marketCap;
   // GOLDEN POCKET: the pattern's own levels, set at entry for this position.
   const lv = x.levels;
-  if (lv?.stopUsd != null && cap !== null && cap <= lv.stopUsd) return `POCKET_STOP ${usd(cap)} ≤ ${usd(lv.stopUsd)} (under the pocket)`;
+  if (lv?.stopUsd != null && cap !== null && cap <= lv.stopUsd) return lv.kind === 'STRUCTURE'
+    ? `STRUCTURE_STOP ${usd(cap)} ≤ ${usd(lv.stopUsd)} (previous resistance −3 %)` : `POCKET_STOP ${usd(cap)} ≤ ${usd(lv.stopUsd)} (under the pocket)`;
   if (lv?.targetUsd != null && cap !== null && cap >= lv.targetUsd) return `RESISTANCE_TARGET ${usd(cap)} ≥ ${usd(lv.targetUsd)} (just under the breakout high)`;
   if (mc && cap !== null && mc.floorUsd !== null && cap <= mc.floorUsd) return `MCAP_FLOOR ${usd(cap)} ≤ ${usd(mc.floorUsd)}`;
   if (mc && cap !== null && mc.targetUsd !== null && cap >= mc.targetUsd) return `MCAP_TARGET ${usd(cap)} ≥ ${usd(mc.targetUsd)}`;

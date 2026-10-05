@@ -28,6 +28,8 @@ import { GeminiReviewer, LaunchReviewer, REVIEW, RotatingReviewer, type Reviewer
 import { XFeed, XFEED } from './xfeed';
 import { OpeningTracker } from './opening';
 import { GoldenTracker } from './golden-pocket';
+import { GoldenShadow } from './golden-shadow';
+import { RECORDER_WATCH, RecorderWatch } from './recorder-watch';
 import { GOLDEN_RULES, deskCapital, deskOperational, liveSignerSettings, strategyProfiles, type DeskCapital, type DeskOperational, type LiveSignerKind } from './config';
 import { localKeySigner } from './local-signer';
 import { DeskResearchRecorder } from '../research/integration/desk-recorder';
@@ -157,7 +159,9 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
     // Opening screen: every launch's curve market cap from its first seconds (the owner's basic screen, OPEN strategy).
     const opening = new OpeningTracker(rpc, pumpStream);
     // GOLDEN POCKET: every fresh graduation's PumpSwap pool, its reserves read on chain every few seconds.
-    const golden = new GoldenTracker(rpc, GOLDEN_RULES);
+    // Its only-up fills are also followed as shadow trades (research P2, no money): data-desk/golden-shadow.jsonl.
+    const shadowFile = path.join(o.dataDir, 'golden-shadow.jsonl');
+    const golden = new GoldenTracker(rpc, GOLDEN_RULES, new GoldenShadow(r => { void fs.appendFile(shadowFile, `${JSON.stringify(r)}\n`).catch(() => undefined); }));
     const alerts = notifier(env, fetch, { onFailure: r => logger.warn('Phone delivery failed', { channel: r.channel, status: r.status, error: r.error }) }), launches = new LaunchFeed(rpc, fetch, undefined, undefined,
       { rugs, review: reviewer ? (i, now) => reviewer.review(i, now) : null, reviewAvailable: reviewer ? now => reviewer.available(now) : undefined,
         onDecoded: (events, now) => opening.observe(events, now), stream: pumpStream });
@@ -169,7 +173,12 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
       : await DeskResearchRecorder.open(path.join(o.dataDir, 'research-store'), { enrichMessages: env.DESK_ALERT_EVIDENCE?.trim().toLowerCase() !== 'off',
         recordTape: env.DESK_RESEARCH?.trim().toLowerCase() === 'full' })
         .catch((error: unknown) => { logger.warn('Research recorder unavailable; the desk runs without it', { error: error instanceof Error ? error.message : String(error) }); return null; });
-    const recorder = research, researchDeps = { research: recorder, deliver: alerts.deliver, alertChannels: alerts.channels, phoneHealth: alerts.health };
+    // Dead-man alert for the research observer (a separate process): one phone message after 10 silent minutes.
+    const recorderWatch = new RecorderWatch(path.join(o.dataDir, 'research'), alerts.notify);
+    const recorderTimer = setInterval(() => { void recorderWatch.check().catch(() => undefined); }, RECORDER_WATCH.checkMs);
+    recorderTimer.unref?.();
+    const recorder = research, researchDeps = { research: recorder, deliver: alerts.deliver, alertChannels: alerts.channels, phoneHealth: alerts.health,
+      recorderStatus: () => recorderWatch.status() };
     // Which alerts reach the phone: none by default; DESK_ALERTS=rug, golden, open, launch, radar — or "all". The dashboard
     // switch (data-desk/phone-alerts.json) wins; both engines share this one set, so a change applies at once.
     const phoneFile = path.join(o.dataDir, 'phone-alerts.json');
@@ -216,6 +225,7 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
       await watch.settled();
       for (const e of Object.values(engines)) { e.stop('shutdown'); await e.settled(); await e.persist(); }
       if (heartbeat) clearInterval(heartbeat);
+      clearInterval(recorderTimer);
       await recorder?.close().catch(() => undefined);
       await data.flush(); await lock.close(); await fs.unlink(lockPath);
     } };

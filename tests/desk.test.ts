@@ -769,6 +769,70 @@ test('RIDE mode has no take profit and trails the move; CRASH may re-enter after
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
+test('CRASH variants in TEST: C1 and C2 take the same signal and hold the same coin as CRASH; C2 sells at the previous resistance −3 %; C1 skips a coin without structure', async () => {
+  for (const scenario of ['structure', 'no-candles'] as const) {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), `desk-variants-${scenario}-`)), { shared } = world(YOUNG_PUMP, 'insider');
+    try {
+      // The pool's minutes (market caps): a $190K swing high, closed above at $198K; the current minute is still running.
+      const start = Date.now() - 4.5 * 60_000, m = (i: number, o: number, h: number, l: number, c: number) => ({ t: start + i * 60_000, o, h, l, c });
+      const watch = { mint: MINT, symbol: 'ABC', startAt: start, lastUsd: 200_000, lastSampleAt: Date.now(),
+        bars: [m(0, 150e3, 170e3, 150e3, 165e3), m(1, 165e3, 190e3, 160e3, 180e3), m(2, 180e3, 185e3, 170e3, 175e3), m(3, 175e3, 200e3, 175e3, 198e3), m(4, 198e3, 201e3, 197e3, 200e3)] };
+      const followed: number[] = [];
+      const tracker = { watchGraduations: () => undefined, hold: () => undefined, followYoung: (ms: number) => { followed.push(ms); }, poll: async () => [],
+        get: (x: string) => scenario === 'structure' && x === MINT ? { ...watch, lastSampleAt: Date.now() } : null, list: () => [], counts: () => ({ IMPULSE: 0, DIP: 0, BROKEN_OUT: 0, ENTRY: 0, FAILED: 0, EXPIRED: 0, watched: 1 }) };
+      const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }), golden: tracker as never });
+      for (const id of ['CRASH_C1', 'CRASH_C2'] as const) await engine.defineStrategy(parseRuleSpec(PRESETS[id]!));
+      assert.equal(engine.goldenWanted(), true, 'C1/C2 need the pools sampled');
+      engine.start(); await engine.pulse();
+      let view = engine.status({ connected: false, address: null });
+      const held = view.positions.map(p => p.strategy).sort();
+      if (scenario === 'no-candles') {
+        assert.deepEqual(held, ['CRASH', 'CRASH_C2'], 'C1 skips a coin without pool candles; C2 enters with the fixed stop');
+        assert.match(view.candidates.find(c => c.mint === MINT)!.rules!.CRASH_C1!.summary, /^Structural stop distance: no pool candles yet/);
+        assert.doesNotMatch(await fs.readFile(path.join(dir, 'ledger-PAPER-CRASH_C2.json'), 'utf8'), /"stopUsd"/);
+        continue;
+      }
+      assert.deepEqual(held, ['CRASH', 'CRASH_C1', 'CRASH_C2'], 'the same coin, held side by side in TEST');
+      assert.ok(engine.events.list().some(e => /^CRASH_C1 entry selected: .*stop \$184\.3K \(prev\. resistance \$190\.0K, −8 %\)/.test(e.message)));
+      assert.match(await fs.readFile(path.join(dir, 'ledger-PAPER-CRASH_C2.json'), 'utf8'), /"stopUsd": 184300/);
+      await engine.goldenPass();
+      assert.equal(followed.at(-1), 15 * 60_000, 'young pools sampled for CRASH\'s 15 minutes');
+      // The pool trades under the structural stop: C2 sells; CRASH and C1 (−35 % fixed stop) hold.
+      watch.lastUsd = 180_000;
+      for (const id of ['CRASH', 'CRASH_C1', 'CRASH_C2']) (engine as unknown as { lastPositionCheckAt: Record<string, number> }).lastPositionCheckAt[id] = 0;
+      engine.tick(); await engine.settled();
+      view = engine.status({ connected: false, address: null });
+      assert.deepEqual(view.positions.map(p => p.strategy).sort(), ['CRASH', 'CRASH_C1']);
+      assert.ok(engine.events.list().some(e => /^CRASH_C2 · exit signal: STRUCTURE_STOP \$180,000 ≤ \$184,300 \(previous resistance −3 %\)/.test(e.message)));
+    } finally { await fs.rm(dir, { recursive: true, force: true }); }
+  }
+});
+
+test('OPEN is retired: off in TEST and LIVE whatever a saved switch says, cannot be switched on, no breakout reaches the phone', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-retired-')), { shared } = world();
+  try {
+    await fs.writeFile(path.join(dir, 'settings-PAPER.json'), JSON.stringify({ strategies: { OPEN: true } }));
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    const open = engine.status({ connected: false, address: null }).strategies.find(s => s.id === 'OPEN')!;
+    assert.equal(open.enabled, false); assert.equal(open.retired, true); assert.match(open.summary, /^RETIRED 5 Oct/);
+    assert.throws(() => engine.setStrategy('OPEN', true), /STRATEGY_RETIRED/);
+    engine.setStrategy('OPEN', false);
+    assert.equal(engine.status({ connected: false, address: null }).strategies.find(s => s.id === 'CRASH')!.retired, false);
+    // A sprint breakout with OPEN switched on for the phone: shown, recorded, never sent.
+    const at = Date.now(), sprint = { mint: key(60).toBase58(), symbol: 'S0', name: 'Sprint', at: at - 68_000, status: 'SIGNAL' as const, openHighUsd: 10_000, lowUsd: 7_000,
+      lastUsd: 28_900, peakUsd: 28_900, firstSampleAt: at - 65_000, lastSampleAt: at, signalAt: at, signalUsd: 28_900, detail: '$10.0K open → $28.9K', samples: [] };
+    let pending = [sprint];
+    const tracker = { observe: () => undefined, poll: async () => { const out = pending; pending = []; return out; }, get: () => null, list: () => [], counts: () => ({}) };
+    const alerts: string[] = [], dir2 = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-retired-phone-'));
+    const phone = await DeskEngine.create({ ...world().shared, mode: 'PAPER', dir: dir2, sender: null, wallet: () => ({ owner, signer: null }), opening: tracker as never,
+      notify: async t => { alerts.push(t); }, alerts: new Set(['open']) });
+    await phone.openingPass();
+    assert.deepEqual(alerts, []);
+    assert.ok(phone.events.list().some(e => /^OPEN screen: S0/.test(e.message)), 'the opening screen still shows it');
+    await fs.rm(dir2, { recursive: true, force: true });
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
 test('held positions ask Jupiter only when due: a quiet price is re-quoted every 10 s, a price near the stop at every check', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-quote-')), patch: Record<string, unknown> = { ...YOUNG_PUMP }, { w, shared } = world(patch, 'insider');
   try {
@@ -1123,7 +1187,7 @@ test('OPEN: a breakout above a strong opening candle is bought, scaled into at 2
     // No 60 s settling period in this test (positions are seconds old).
     const profiles = strategyProfiles({}, shared.capital, shared.cfg.rs);
     profiles.OPEN = { ...profiles.OPEN, exits: { ...profiles.OPEN.exits, graceMs: 0 } };
-    const engine = await DeskEngine.create({ ...shared, strategies: profiles, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }), opening: tracker as never,
+    const engine = await DeskEngine.create({ ...shared, strategies: profiles, mode: 'PAPER', retired: new Set(), dir, sender: null, wallet: () => ({ owner, signer: null }), opening: tracker as never,
       notify: async (title, body, o) => { alerts.push({ title, body, click: o?.click }); }, alerts: new Set(['open']) });
     engine.setStrategy('CRASH', false); engine.setStrategy('LAUNCH', false); engine.start();
     await engine.pulse();
@@ -1186,7 +1250,7 @@ test('OPEN on the phone: only sprints (a breakout within 2 min of launch), at mo
     const tracker = { observe: () => undefined, poll: async () => { const out = pending; pending = []; return out; }, get: () => null, list: () => [],
       counts: () => ({ OPENING: 0, STRONG: 0, SIGNAL: 7, WEAK: 0, RUG: 0, GRADUATED: 0, EXPIRED: 0, UNKNOWN_OPEN: 0 }) };
     const alerts: Array<{ title: string; body: string; click: string | null | undefined }> = [];
-    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }), opening: tracker as never,
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', retired: new Set(), dir, sender: null, wallet: () => ({ owner, signer: null }), opening: tracker as never,
       notify: async (title, body, o) => { alerts.push({ title, body, click: o?.click }); }, alerts: new Set(['open']) });
     for (const id of ['FAIR', 'CRASH', 'LAUNCH', 'OPEN', 'GOLDEN']) engine.setStrategy(id, false);
     await engine.openingPass();
@@ -1210,19 +1274,23 @@ test('GOLDEN POCKET: an only-up fill on a fresh pool is alerted, bought in TEST 
     const watch = { mint: MINT, symbol: 'ABC', startAt: at - 3 * 60_000, state: { phase: 'ENTRY', high: null, low: null, top: null, detail: entry.detail, entry },
       pool: 'P', vaults: null, resolveTries: 0, lastUsd: 113_000, lastSampleAt: Date.now(), peakUsd: 113_000 };
     const other = key(81).toBase58();
-    let pending = [{ mint: MINT, symbol: 'ABC', entry, at, pool: 'P' }, { mint: other, symbol: 'RET', entry: retest, at, pool: 'Q' }];
+    const rug = key(82).toBase58();
+    let pending = [{ mint: MINT, symbol: 'ABC', entry, at, pool: 'P', poolJumpX: 1.1 }, { mint: other, symbol: 'RET', entry: retest, at, pool: 'Q' },
+      { mint: rug, symbol: 'RUG', entry: { ...entry, price: 5_260_000 }, at, pool: 'R', poolJumpX: 109 }];
     const held: string[][] = [];
     const tracker = { watchGraduations: () => undefined, hold: (m: string[]) => { held.push(m); }, poll: async () => { const out = pending; pending = []; return out; },
       get: (m: string) => m === MINT ? { ...watch, lastSampleAt: Date.now() } : null, list: () => [watch], counts: () => ({ IMPULSE: 4, DIP: 2, BROKEN_OUT: 1, ENTRY: 1, FAILED: 9, EXPIRED: 0, watched: 17 }) };
-    const alerts: string[] = [], phone = new Set<'golden'>(['golden']);
+    const alerts: string[] = [], bodies: string[] = [], phone = new Set<'golden'>(['golden']);
     const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }), golden: tracker as never,
-      notify: async title => { alerts.push(title); }, alerts: phone });
+      notify: async (title, body) => { alerts.push(title); bodies.push(body); }, alerts: phone });
     for (const id of ['FAIR', 'CRASH', 'LAUNCH', 'OPEN']) engine.setStrategy(id, false);
     engine.setStrategy('GOLDEN', true);
     engine.start(); await engine.pulse();
     const fresh = await engine.goldenPass();
     assert.deepEqual(fresh.map(f => f.symbol), ['ABC'], 'the retest is not a GOLDEN entry by default');
-    assert.deepEqual(alerts, ['GOLDEN POCKET: ABC at $112.0K']);
+    assert.deepEqual(alerts, ['GOLDEN POCKET: ABC at $112.0K'], 'the pool that opened at 109× its graduation value is not alerted');
+    assert.match(bodies[0]!, /pool opened at 1\.1× its graduation value/); assert.match(bodies[0]!, /Not a qualified call/);
+    assert.ok(engine.events.list().some(e => /^GOLDEN POCKET: RUG filled .* but its pool opened at 109\.0× its graduation value \(> 10×\) — no alert, never bought$/.test(e.message)));
     assert.ok(engine.events.list().some(e => /^GOLDEN POCKET \(shown only\): RET · \$162\.8K/.test(e.message)));
     await engine.pulse();
     let view = engine.status({ connected: false, address: null });
@@ -1409,7 +1477,8 @@ test('execution path: built from the running desk — every enabled strategy, an
     const paper = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
     const p = paper.status({ connected: false, address: null }).path;
     const short = `${owner.toBase58().slice(0, 4)}…${owner.toBase58().slice(-4)}`;
-    assert.match(layer(p, /^Strategies \(\d+ on/), /FAIR LAUNCH.*CRASH.*LAUNCH.*OPEN/);
+    assert.match(layer(p, /^Strategies \(\d+ on/), /FAIR LAUNCH.*CRASH.*LAUNCH/);
+    assert.doesNotMatch(layer(p, /^Strategies/), /OPEN/, 'OPEN is retired: never running');
     assert.doesNotMatch(layer(p, /^Strategies/), /GOLDEN POCKET/, 'off by default, so not listed as running');
     assert.equal(layer(p, /^Wallet$/), `${short}: an address only, TEST never holds a key`);
     assert.match(layer(p, /^Signer$/), /^None/);

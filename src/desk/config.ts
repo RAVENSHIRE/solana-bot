@@ -187,6 +187,12 @@ export interface StrategyProfile {
 /** The built-in strategies; custom rule strategies are added at runtime (see custom.ts). */
 export type BuiltinStrategyId = 'FAIR' | 'CRASH' | 'LAUNCH' | 'OPEN' | 'GOLDEN';
 export const STRATEGY_IDS: readonly BuiltinStrategyId[] = ['FAIR', 'CRASH', 'LAUNCH', 'OPEN', 'GOLDEN'];
+/**
+ * Retired after review: off in TEST and LIVE, and cannot be switched on. OPEN (5 Oct, research STRATEGY-REVIEW.md):
+ * 69 TEST trades, −$113; −$105 on the 55 the stale-baseline exit bug did not touch; 59 of 65 alerts dead or −70 %
+ * within an hour. The opening screen keeps running for research (the gate's sprint rules use fast openers).
+ */
+export const RETIRED_STRATEGIES: ReadonlySet<string> = new Set(['OPEN']);
 
 export interface DeskOperational {
   version: 1;
@@ -318,7 +324,9 @@ export const GOLDEN_RULES: Readonly<PocketRules> = Object.freeze({
   retest: true, dipMinPct: 15, dipMaxPct: 50, breakoutOverHigh: 1.1, zone: 'EITHER', resistanceBelowPct: 12, resistanceAbovePct: 3, fibTop: 0.5, fibBottom: 0.65,
   stopBelowPct: 5, retestWindowMin: 20, maxPatternMin: 60, onlyUp: { bars: 2, ref: 2, chasePct: 12, windowMin: 10, stopBelowPct: 5 }, floorUsd: 0 });
 /** GOLDEN POCKET exits: the pattern's stop (per position), a trailing stop, out after an hour; a retest sells just under the breakout high. */
-export const GOLDEN_EXIT = Object.freeze({ trailing: { activationPct: 50, stopPct: 25 }, maxHoldMin: 60, belowResistancePct: 5 });
+export const GOLDEN_EXIT = Object.freeze({ trailing: { activationPct: 50, stopPct: 25 }, maxHoldMin: 60, belowResistancePct: 5,
+  /** No alert and no entry when the pool's first minute topped this many times its graduation value (research P1, 5 Oct). */
+  maxPoolJumpX: 10 });
 
 /** The opening screen's price rules (see opening.ts), shared with the OPEN strategy's floor. */
 export const OPENING_RULES = Object.freeze({ minOpenUsd: 10_000, floorUsd: 6_700, breakoutOverOpen: 1.3 });

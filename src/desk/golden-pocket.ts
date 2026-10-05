@@ -1,5 +1,7 @@
 import { PublicKey, type Connection } from '@solana/web3.js';
 import type { Candle } from './replay';
+import { addSample, type Bar } from './structure';
+import { GRADUATION_MCAP_SOL, type GoldenShadow } from './golden-shadow';
 
 /**
  * GOLDEN POCKET — break and retest, from 66hK2…pump on 1 Oct (PumpSwap pool from 21:41 UTC):
@@ -210,8 +212,14 @@ export interface GoldenWatch {
   mint: string; symbol: string | null; startAt: number; state: PocketState;
   pool: string | null; vaults: { base: string; quote: string; quoteMint: string } | null; resolveTries: number;
   lastUsd: number | null; lastSampleAt: number | null; peakUsd: number | null;
+  /** Minute candles of the pool's market cap since the graduation (structure(), the P2 shadow trades). */
+  bars: Bar[];
 }
-export interface GoldenSignal { mint: string; symbol: string | null; entry: PocketEntry; at: number; pool: string | null }
+export interface GoldenSignal {
+  mint: string; symbol: string | null; entry: PocketEntry; at: number; pool: string | null;
+  /** The first pool minute's high ÷ the graduation market cap (≈ 410.9 SOL); null when unknown. */
+  poolJumpX?: number | null;
+}
 type Rpc = { execute<T>(label: string, fn: (c: Connection) => Promise<T>): Promise<T> };
 
 /**
@@ -222,7 +230,10 @@ type Rpc = { execute<T>(label: string, fn: (c: Connection) => Promise<T>): Promi
 export class GoldenTracker {
   private readonly watches = new Map<string, GoldenWatch>();
   private readonly held = new Set<string>();
-  constructor(private readonly rpc: Rpc, private readonly rules: PocketRules) {}
+  private readonly followed = new Set<string>();
+  /** Pools younger than this stay sampled whatever their pattern did (strategies that need the pool's structure). */
+  private followMs = 0;
+  constructor(private readonly rpc: Rpc, private readonly rules: PocketRules, private readonly shadow: GoldenShadow | null = null) {}
 
   /** Fresh graduations start being watched from their graduation time. */
   watchGraduations(list: Array<{ mint: string; at: number; symbol?: string | null }>, now: number): void {
@@ -231,24 +242,29 @@ export class GoldenTracker {
       if (known) { known.symbol ??= g.symbol ?? null; continue; }
       if (now - g.at > GOLDEN.firstSampleWithinMs) continue;
       this.watches.set(g.mint, { mint: g.mint, symbol: g.symbol ?? null, startAt: g.at, state: pocketState(g.at), pool: null, vaults: null,
-        resolveTries: 0, lastUsd: null, lastSampleAt: null, peakUsd: null });
+        resolveTries: 0, lastUsd: null, lastSampleAt: null, peakUsd: null, bars: [] });
     }
     this.prune(now);
   }
   /** Mints the desk holds: sampled until sold, whatever their pattern did. */
   hold(mints: string[]): void { this.held.clear(); for (const m of mints) this.held.add(m); }
+  /** Mints with open shadow trades (P2): sampled until those close. */
+  follow(mints: string[]): void { this.followed.clear(); for (const m of mints) this.followed.add(m); }
+  /** Keep every pool sampled for its first `ms` after the graduation (0: only while its pattern runs). */
+  followYoung(ms: number): void { this.followMs = Math.max(0, ms); }
 
-  private active(w: GoldenWatch): boolean {
-    return this.held.has(w.mint) || w.state.phase === 'IMPULSE' || w.state.phase === 'DIP' || w.state.phase === 'BROKEN_OUT';
+  private kept(mint: string): boolean { return this.held.has(mint) || this.followed.has(mint) || !!this.shadow?.has(mint); }
+  private active(w: GoldenWatch, now: number): boolean {
+    return this.kept(w.mint) || now - w.startAt <= this.followMs || w.state.phase === 'IMPULSE' || w.state.phase === 'DIP' || w.state.phase === 'BROKEN_OUT';
   }
   private prune(now: number): void {
     for (const [mint, w] of this.watches) {
-      if (this.held.has(mint)) continue;
-      const end = w.startAt + this.rules.maxPatternMin * 60_000;
-      if (now > end + GOLDEN.keepMs || (!this.active(w) && now - (w.lastSampleAt ?? w.startAt) > GOLDEN.keepMs)) this.watches.delete(mint);
+      if (this.kept(mint)) continue;
+      const end = w.startAt + Math.max(this.rules.maxPatternMin * 60_000, this.followMs);
+      if (now > end + GOLDEN.keepMs || (!this.active(w, now) && now - (w.lastSampleAt ?? w.startAt) > GOLDEN.keepMs)) this.watches.delete(mint);
     }
     if (this.watches.size > GOLDEN.maxTracked) {
-      const drop = [...this.watches.values()].filter(w => !this.held.has(w.mint)).sort((a, b) => Number(this.active(a)) - Number(this.active(b)) || a.startAt - b.startAt)
+      const drop = [...this.watches.values()].filter(w => !this.kept(w.mint)).sort((a, b) => Number(this.active(a, now)) - Number(this.active(b, now)) || a.startAt - b.startAt)
         .slice(0, this.watches.size - GOLDEN.maxTracked);
       for (const w of drop) this.watches.delete(w.mint);
     }
@@ -256,7 +272,7 @@ export class GoldenTracker {
 
   /** Reads every watched pool; returns the fills of this read. `quoteUsd` prices the pool's quote token (SOL, PUMP). */
   async poll(now: number, quoteUsd: (quoteMint: string) => number | null): Promise<GoldenSignal[]> {
-    const live = [...this.watches.values()].filter(w => this.active(w));
+    const live = [...this.watches.values()].filter(w => this.active(w, now));
     // New pools: the canonical SOL- and PUMP-quoted addresses, whichever exists.
     const unresolved = live.filter(w => !w.vaults).slice(0, 50);
     if (unresolved.length) {
@@ -288,10 +304,17 @@ export class GoldenTracker {
         if (!base || !quote || !usd) return;
         const cap = (quote / 10 ** QUOTE_DECIMALS[q]!) / (base / 10 ** BASE_DECIMALS) * PUMP_SUPPLY * usd;
         w.lastUsd = cap; w.lastSampleAt = now; w.peakUsd = Math.max(w.peakUsd ?? 0, cap);
+        addSample(w.bars, w.startAt, now, cap);
+        this.shadow?.sample(w.mint, cap, now);
         const entry = pocketStep(w.state, this.rules, { t: now, o: cap, h: cap, l: cap, c: cap });
-        if (entry) out.push({ mint: w.mint, symbol: w.symbol, entry, at: now, pool: w.pool });
+        if (!entry) return;
+        const sol = quoteUsd(WSOL_MINT), graduationUsd = sol ? GRADUATION_MCAP_SOL * sol : null, first = w.bars[0];
+        const poolJumpX = graduationUsd && first && first.t + 60_000 <= now ? first.h / graduationUsd : null;
+        if (entry.kind === 'ONLY_UP') this.shadow?.start({ mint: w.mint, symbol: w.symbol, fillAt: now, fillUsd: entry.price, stopUsd: entry.stop, poolJumpX, graduationUsd });
+        out.push({ mint: w.mint, symbol: w.symbol, entry, at: now, pool: w.pool, poolJumpX });
       });
     }
+    this.shadow?.expire(now, mint => { const w = this.watches.get(mint); return { cap: w?.lastUsd ?? null, at: w?.lastSampleAt ?? null }; });
     this.prune(now);
     return out;
   }

@@ -51,7 +51,8 @@
     "research:build": "tsc -p tsconfig.research.json",
     "test:research": "node --import tsx --test tests/research-*.test.ts",
     "test:research:node": "tsc -p tsconfig.research.json && node --test dist-research/tests/*.test.js",
-    "test:desk": "node --import tsx --test tests/desk.test.ts"
+    "test:desk": "node --import tsx --test tests/desk.test.ts",
+    "research:golden-shadow": "node --import tsx src/scripts/golden-shadow-report.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",

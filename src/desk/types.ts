@@ -3,6 +3,7 @@ export type DeskMode = 'PAPER' | 'LIVE';
 /** FAIR: fair-launch trend strategy with momentum confirmation. CRASH: 1–4 minute momentum trades with tight exits. */
 /** FAIR and CRASH are built in; custom rule strategies use their own upper-case ids (e.g. RUNNER). */
 import type { RuleSpec } from './custom';
+import type { Structure } from './structure';
 
 export type StrategyId = string;
 
@@ -75,6 +76,8 @@ export interface Candidate {
   momentumStreak: number;
   /** CRASH entry checks for this scan; null until computed. */
   crash: CrashSignal | null;
+  /** The pool's previous resistance and the stop it implies (structure.ts), from the GOLDEN tracker's minute candles. */
+  structure?: Structure | null;
   /** Launch radar: why this fresh pump.fun launch was shortlisted, and the LAUNCH entry checks. */
   launch?: { score: number; reasons: string[]; x: string | null; website: string | null; launchedAt: number; signal: CrashSignal;
     /** X: the project's X account posted this CA; WEBSITE: its site shows it; IMPERSONATOR: either shows another CA. */
@@ -167,6 +170,8 @@ export interface ScaleAdvice {
 }
 export interface StrategyView {
   id: StrategyId; label: string; summary: string; enabled: boolean;
+  /** Retired after review: off in both modes, cannot be switched on. */
+  retired?: boolean;
   capitalUsd: number; entryUsd: number; slippageBps: number; maxDragPct: number; maxOpenPositions: number; positionCheckSec: number;
   exitRules: string[]; reentryCooldownMin?: number;
   cashUsd: number | null; openPositions: number; realizedPnlUsd: number; unrealizedPnlUsd: number | null; feesUsd: number; halted: string | null;

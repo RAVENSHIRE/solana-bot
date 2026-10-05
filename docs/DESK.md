@@ -108,6 +108,16 @@ Native reserve (0.003 SOL) and max drag (1.5 %) are the project's existing micro
   - Entries at **$70K+ market cap on a pool 5+ minutes old** made +15.6 % on average (40 trades), the rest −6.1 % (48).
     Found in these same trades, so it is a hypothesis: the **CRASH 70K+** preset (`CRASH_70K`) runs it beside CRASH in
     TEST on the same signals with the same exits; only its trades from 5 Oct on count.
+  - **CRASH's TEST variants** (research C1/C2, `TA-LAYER.md`, pre-registered 5 Oct; only trades after 5 Oct 21:00 UTC
+    count): **C1** (`CRASH_C1`) enters only when the pool's previous resistance gives a stop at most 25 % below the
+    price (TA2); **C2** (`CRASH_C2`) takes CRASH's entries with the stop at the previous resistance −3 % instead of
+    −35 % (TA1), the −35 % stop then applies only without structure or while the pool's market cap cannot be read.
+    The previous resistance is the last swing high a later minute closed above, below the price, read from the pool's
+    minute candles (`structure.ts`; the GOLDEN tracker samples every fresh PumpSwap pool every 4 s, for 15 minutes
+    while C1 or C2 is on). A pool with no candles yet is a C1 skip.
+  - **Side by side:** `CRASH_70K`, C1 and C2 are *comparison variants* (`compareWith: CRASH`): they need CRASH's own
+    entry signal, enter in CRASH's pass and, in TEST, may hold a coin CRASH holds (and the reverse). Until 5 Oct CRASH,
+    entering first, kept `CRASH_70K` out of nearly every coin it signalled. In LIVE one wallet keeps one holder per coin.
   - Before any LIVE CRASH: about 100 more TEST trades positive after costs, the luck test passing, and the EXEC records
     showing how long a LIVE order takes from signal to confirmation.
 - Other CRASH settings in `.env`: `CRASH_ENABLED`, `CRASH_TAKE_PROFIT_PCT`, `CRASH_LOCK_PEAK_PCT`, `CRASH_GIVEBACK_PTS`, `CRASH_STOP_LOSS_PCT`, `CRASH_MAX_HOLD_MIN`, `CRASH_TRAIL_ACTIVATION_PCT`, `CRASH_TRAIL_STOP_PCT`, `CRASH_RIDE_MAX_HOLD_MIN`.
@@ -191,6 +201,11 @@ Setup and data:
 
 ### OPEN: the opening screen (your basic screen)
 
+> **OPEN is retired (5 Oct, research STRATEGY-REVIEW.md):** 69 TEST trades, −$113 (−$105 on the 55 the stale-baseline
+> exit bug did not touch); 59 of 65 breakout alerts dead or −70 % within an hour. It stays off in TEST and LIVE, cannot
+> be switched on, and its breakouts no longer reach the phone. The opening screen keeps running: research uses fast
+> openers (the gate's sprint rules), and its breakouts still show in the dashboard and the event log.
+
 From FIX6900 (`6bQ4…SmvC`) on 1 Oct: **$20K opening candle → $7K → $14K → $27K → $35K →** graduated, $500K+. The rules:
 
 1. **Strong open:** the first one-minute candle reaches at least **$10K** market cap.
@@ -210,6 +225,19 @@ How it works:
 These rules come from one example. The alert audit of 1–2 Oct (65 breakouts, see *Which desk alerts reach the phone*) found no exit that makes them pay reliably at a realistic fill, and OPEN lost on all 7 TEST trades (−$11.77): its breakout alerts are off the phone by default (`DESK_ALERTS`), and it should stay in TEST.
 
 ### GOLDEN POCKET: graduated pools, only up and break and retest
+
+> **5 Oct changes (research P1/P2):**
+> - **10× ceiling:** a fill on a pool whose first minute topped more than 10× its graduation value (a pump.fun curve
+>   completes at about 410.9 SOL) is not alerted and not bought: the $5.25M-first-candle "golden" fills were rugs
+>   (CTi9…pump, ~100×).
+> - **Alerts say what they are:** market cap, how far the pool opened above its graduation value, the previous
+>   resistance and its stop, and "Not a qualified call".
+> - **Shadow trades (no money):** every only-up fill is followed at bot speed (+2 s) and phone speed (+45 s) with
+>   three exits judged together: (a) GOLDEN as it trades, (b) plus a +100 % take profit, (c) half sold at +100 %.
+>   The take profit is the fix for "fomocoin" (5 Oct 16:53 UTC: +281 %, then −88 % three seconds later).
+>   Records: `data-desk/golden-shadow.jsonl`; report: `npm run research:golden-shadow -- --size 2 --fee-pct 1.25
+>   --fixed 0.03` (costs are options: they change with the provider and the size). P2 passes after ≥ 30 fills of
+>   pools that opened at ≤ 3× with a positive average after costs.
 
 > **Off by default (2 Oct).** The first 5 live TEST trades lost 57 % on average: the coins (SpaceX, Mr Beast, SIGF at $300–470K, 25–30× above their launch) rugged straight through the 5 % stop. The backtest below filled every stop at its level; with a stop that a rug gaps within a minute selling at that minute's close (`gapFill`), the deployed only-up rule makes **−33 % per trade** (PF 0.31, both halves), at every entry level. The numbers below are kept as the record of that mistake.
 
@@ -391,6 +419,11 @@ How it runs:
 - your phone, when one of these is set in `.env`:
   - `DESK_NTFY_TOPIC=<long random name>`, then subscribe to that topic in the free ntfy app;
   - `DESK_TELEGRAM_BOT_TOKEN` and `DESK_TELEGRAM_CHAT_ID` for Telegram.
+
+**Research recorder down:** the desk watches the research observer's ledger. When no ledger file changed for
+10 minutes while the desk runs, one phone message says so ("Research recorder silent"), and one more when it records
+again; the data sources show the last record's age. A PC that is off sends nothing (5 Oct: the observer had been down
+about 32 h, 4–5 Oct, without anyone knowing).
 
 Which desk alerts reach the phone: the **Phone** switches on the opening screen (OPEN breakouts, GOLDEN fills, rug sales, LAUNCH entry-ready, radar finds) — saved in `data-desk/phone-alerts.json`, applied at once and winning over `.env` — or else `DESK_ALERTS` in `.env`, a comma list of `golden` (GOLDEN POCKET fills), `rug` (a held position sold as a rug), `open` (OPEN breakouts), `launch` (LAUNCH entry-ready) and `radar` (a launch shortlisted, a radar rug, an impersonator), or `all`. The default is **none** (owner, 2 Oct: no rug confirmations on the phone, only qualified calls). Qualified calls, interesting coins (checkmarked project accounts that post their CA) and research updates come from the research observer, not the desk: see [RESEARCH.md](RESEARCH.md#what-reaches-the-phone-qualified-calls-interesting-coins-research-updates). Tapping an ntfy notification opens the coin in FOMO. OPEN calls say how fast the launch grew ("$3.4K → $28.9K in 68 s (×8.5)") and that fast openers often rug within minutes. Only **sprints** go to the phone, a breakout within 2 minutes of launch, at most 4 an hour: on 3 Oct every breakout went out (about 12 an hour, 159 by the afternoon) and the free ntfy quota ran out, so ntfy answered HTTP 429 and no alert of any kind reached the phone. Everything still shows in the dashboard and the event log (an OPEN alert held back by the limit is recorded as `SUPPRESSED_BY_LIMIT`). The observer's status line counts phone deliveries and failures.
 

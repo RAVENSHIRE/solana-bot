@@ -328,14 +328,15 @@ function Strategies({ d, t }: { d: DeskStatus; t: TradingSession }) {
       <label><span>Strategy</span>
         <select value={current ? selected : 'ALL'} onChange={e => choose(e.target.value)} disabled={!!editor}>
           <option value="ALL">All strategies ({d.strategies.length})</option>
-          {d.strategies.map(s => <option key={s.id} value={s.id}>{s.label} — {s.enabled ? 'ON' : 'OFF'}{s.spec ? ' · custom' : ''}</option>)}
+          {d.strategies.map(s => <option key={s.id} value={s.id}>{s.label} — {s.retired ? 'RETIRED' : s.enabled ? 'ON' : 'OFF'}{s.spec ? ' · custom' : ''}</option>)}
           {!locked && <optgroup label="Add a strategy">
             {Object.entries(d.presets ?? {}).map(([k, p]) => <option key={k} value={`new:${k}`}>+ {p.label} preset — {PRESET_HINT[k] ?? p.summary}</option>)}
             <option value="new:BLANK">+ Blank strategy</option>
           </optgroup>}
         </select></label>
-      {current && <button className={current.enabled ? 'source-button' : 'primary-action'} disabled={busy || locked}
+      {current && !current.retired && <button className={current.enabled ? 'source-button' : 'primary-action'} disabled={busy || locked}
         onClick={() => void t.desk('strategy', { strategy: current.id, enabled: !current.enabled })}>{current.enabled ? `${current.label} ON · turn off` : `${current.label} OFF · turn on`}</button>}
+      {current?.retired && <span className="pill">{current.label} RETIRED</span>}
       {current?.spec && !editor && !locked && <button className="source-button" onClick={() => setEditor({ spec: current.spec!, isNew: false })}>Edit rules</button>}
       {current?.spec && !editor && !locked && <button className="stop-action" disabled={busy} onClick={() => void remove(current)}>Delete</button>}
       <small>{test ? 'TEST' : 'LIVE'}: switches apply to this mode only. Custom strategies trade their own ledger{test ? ' and TEST sleeve' : ''}.</small>
@@ -346,8 +347,8 @@ function Strategies({ d, t }: { d: DeskStatus; t: TradingSession }) {
     const x = s.stats, row = (label: string, value: string) => <div><span>{label}</span><strong>{value}</strong></div>;
     return <section key={s.id} className={`strategy ${s.enabled ? 'on' : 'off'}`}>
       <div className="card-head"><h3>{s.label}{s.spec ? <small> · custom</small> : null}</h3>
-        <button className={s.enabled ? 'source-button' : 'primary-action'} disabled={busy || locked}
-          onClick={() => void t.desk('strategy', { strategy: s.id, enabled: !s.enabled })}>{s.enabled ? 'ON · turn off' : 'OFF · turn on'}</button></div>
+        {s.retired ? <span className="pill">RETIRED</span> : <button className={s.enabled ? 'source-button' : 'primary-action'} disabled={busy || locked}
+          onClick={() => void t.desk('strategy', { strategy: s.id, enabled: !s.enabled })}>{s.enabled ? 'ON · turn off' : 'OFF · turn on'}</button>}</div>
       <p className="desk-note">{s.summary}{!test && (s.id === 'CRASH' || s.spec) && !d.operational ? ' · LIVE: starts OFF by default.' : ''}{d.operational ? ` · Re-entry ${s.reentryCooldownMin ?? '--'} min; after loss at least ${(d.operational.lossCooldownMs[s.id] ?? (s.reentryCooldownMin ?? 0) * 60000) / 60000} min` : ''}</p>
       {s.halted && <p className="trading-error">HALTED: {describe(s.halted)}</p>}
       <div className="strategy-kpis">
@@ -778,7 +779,7 @@ function GoldenPocket({ d }: { d: DeskStatus }) {
  * few seconds. A launch whose first one-minute candle reached $10K and that never fell below $6.7K is watched; when it
  * breaks back above its opening high (×1.3) an alert goes out at once and OPEN buys, holds for at least 6× and adds.
  */
-const PHONE_KINDS: Array<[string, string]> = [['open', 'OPEN breakouts'], ['golden', 'GOLDEN fills'], ['rug', 'rug sales'], ['launch', 'LAUNCH entry-ready'], ['radar', 'radar finds']];
+const PHONE_KINDS: Array<[string, string]> = [['open', 'OPEN breakouts (retired: never sent)'], ['golden', 'GOLDEN fills'], ['rug', 'rug sales (coins we hold, TEST or LIVE)'], ['launch', 'LAUNCH entry-ready'], ['radar', 'radar finds']];
 
 function OpeningScreen({ d, t }: { d: DeskStatus; t: TradingSession }) {
   const o = d.opening, list = o?.list ?? [], k = (v: number | null) => v == null ? '--' : `$${(v / 1000).toFixed(1)}K`;
