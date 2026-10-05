@@ -23,6 +23,12 @@ export const CALLS = Object.freeze({
    * gold or grey) or ≥ `infoMinFollowers` followers. At most `infoPerHour`, once per launch.
    */
   infoMinFollowers: 1_000, infoPerHour: 8,
+  /**
+   * The creator's history for rules that use it (organicXClean): earlier launches by the same wallet seen in this
+   * window, and how many had graduated by the decision time, as the look-back counts them in its 48 h (qualify.ts).
+   * Launches from before an observer restart are not known live.
+   */
+  creatorWindowMs: 48 * 3_600_000,
 });
 export interface CallDeps {
   ledger: ResearchLedger;
@@ -44,6 +50,10 @@ export class CallEngine {
   private readonly done = new Map<string, Set<number>>();
   private open: Signal[] = [];
   private readonly infoSent = new Map<string, number>();
+  /** Every launch seen, by creator: the live side of `creatorLaunches` / `creatorGraduations`. */
+  private readonly creators = new Map<string, Array<{ createdObs: number; completeObs: number | null }>>();
+  private readonly creatorOf = new Map<string, { creator: string; createdObs: number; completeObs: number | null }>();
+  private creatorsPrunedAt = 0;
   private lastSummaryDay: string | null = null;
   stats = { calls: 0, shadows: 0, late: 0, judged: 0, notFilled: 0, info: 0 };
   constructor(private readonly d: CallDeps) {}
@@ -114,6 +124,7 @@ export class CallEngine {
       const delays = [...new Set(q.rules.map(r => r.delayS))];
       for (const l of launches) {
         if (l.mayhem) continue;
+        this.remember(l);
         const done = this.done.get(l.mint) ?? new Set<number>();
         for (const delayS of delays) {
           const at = l.createdObs + delayS * 1000;
@@ -130,16 +141,40 @@ export class CallEngine {
 
   private evaluate(l: LaunchFacts, delayS: number, q: Qualification, at: number): void {
     l.trades.sort((a, b) => a.slot - b.slot || a.obs - b.obs);
-    const f = features(l, delayS, { creatorLaunches: 0, creatorGraduations: 0 }, []);
+    const f = features(l, delayS, this.creatorHistory(l, at), []);
     if (f.mcapSol === null) return;
     for (const rule of q.rules.filter(r => r.delayS === delayS && GROUPS[r.group].test(f))) {
       const qualified = rule.qualified, sent = qualified && !!this.d.notify;
       if (qualified) this.stats.calls++; else this.stats.shadows++;
       this.d.ledger.put(['SIG', this.now, { $m: l.mint }, rule.id, qualified ? 1 : 0, Math.round(f.mcapSol * 1000) / 1000, sent ? 1 : 0,
-        { b: f.buyers, top1: f.top1, eff: f.effectiveBuyers, v60: f.velocity60, p: f.progress, dev: f.devBuySol, devSold: f.devSold, x: f.hasX, site: f.hasSite }]);
+        { b: f.buyers, top1: f.top1, eff: f.effectiveBuyers, v60: f.velocity60, p: f.progress, dev: f.devBuySol, devSold: f.devSold, x: f.hasX, site: f.hasSite,
+          cl: f.creatorLaunches, cg: f.creatorGraduations }]);
       if (this.open.length < CALLS.maxOpen) this.open.push({ l, rule, qualified, decisionAt: at });
       if (sent) void this.d.notify!(...this.message(l, rule, f.mcapSol)).catch(() => undefined);
     }
+  }
+
+  /** Keeps each launch's creator, creation and graduation time (not its trades); entries older than the window go. */
+  private remember(l: LaunchFacts): void {
+    if (!l.creator) return;
+    const known = this.creatorOf.get(l.mint);
+    if (known) { known.completeObs ??= l.completeObs; return; }
+    const entry = { creator: l.creator, createdObs: l.createdObs, completeObs: l.completeObs };
+    this.creatorOf.set(l.mint, entry);
+    (this.creators.get(l.creator) ?? this.creators.set(l.creator, []).get(l.creator)!).push(entry);
+    const now = this.now;
+    if (now - this.creatorsPrunedAt < 10 * 60_000) return;
+    this.creatorsPrunedAt = now;
+    for (const [mint, e] of this.creatorOf) if (now - e.createdObs > CALLS.creatorWindowMs) this.creatorOf.delete(mint);
+    for (const [creator, list] of this.creators) {
+      const keep = list.filter(e => now - e.createdObs <= CALLS.creatorWindowMs);
+      if (keep.length) this.creators.set(creator, keep); else this.creators.delete(creator);
+    }
+  }
+  /** As the look-back: earlier launches by the same wallet, and those that had graduated by the decision time `at`. */
+  private creatorHistory(l: LaunchFacts, at: number): { creatorLaunches: number; creatorGraduations: number } {
+    const earlier = (l.creator ? this.creators.get(l.creator) ?? [] : []).filter(e => e.createdObs < l.createdObs);
+    return { creatorLaunches: earlier.length, creatorGraduations: earlier.filter(e => e.completeObs !== null && e.completeObs <= at).length };
   }
 
   /** The phone message: what to buy, at what price, the exit plan, and the evidence behind the rule. */

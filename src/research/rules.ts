@@ -8,11 +8,25 @@ import type { ExitRule } from './direct';
  *
  * Only features the live observer knows by the decision time are allowed: trades and curve state, the creation
  * message (dev buy) and the launch's metadata. The X contract-address post is not used yet: the observer reads X at
- * +6 min, so a live rule could not see it at 60–120 s even though a backtest would.
+ * +6 min, so a live rule could not see it at 60–120 s even though a backtest would. (The owner, 5 Oct: a CA in the bio
+ * or a post is no safe signal, rather the opposite, unless the project is an established brand or company.)
+ *
+ * Pre-registered 5 Oct 2026 (research department, docs/research/literature/README.md, R1 and R2), before their data was
+ * looked at: `steady` (R1) at 300 s only, and `organicXClean` (R2) at 120 s with its exit fixed in advance. Neither
+ * threshold moves after a result.
  */
-export type GroupId = 'all' | 'ownX' | 'ownXSite' | 'devBuy1' | 'buyers5' | 'broad15' | 'organic' | 'organicX' | 'sprint' | 'sprintBroad';
-/** `fast`: the group is judged on FAST_EXITS (short holds, trailing stop) instead of EXITS. */
-export interface Group { label: string; minDelayS: number; test: (f: Features) => boolean; fast?: boolean }
+export type GroupId = 'all' | 'ownX' | 'ownXSite' | 'devBuy1' | 'buyers5' | 'broad15' | 'organic' | 'organicX' | 'sprint' | 'sprintBroad'
+  | 'steady' | 'organicXClean';
+/**
+ * `fast`: the group is judged on FAST_EXITS (short holds, trailing stop) instead of EXITS. `delaysS`: its own decision
+ * times instead of DELAYS_S. `exits`: an exit fixed in advance (no choice on the tuning period).
+ */
+export interface Group { label: string; minDelayS: number; test: (f: Features) => boolean; fast?: boolean; delaysS?: readonly number[]; exits?: ExitRule[] }
+export const EXITS: ExitRule[] = [];
+for (const tpPct of [40, 100]) for (const slPct of [20, 35, null]) for (const maxHoldMin of [15, 60]) EXITS.push({ tpPct, slPct, maxHoldMin });
+/** Fast exits for sprints: keep most of the spike (trailing 20 % from the peak) and end early (1 or 3 min at most). */
+export const FAST_EXITS: ExitRule[] = [];
+for (const tpPct of [40, 100, 200]) for (const maxHoldMin of [1, 3]) FAST_EXITS.push({ tpPct, slPct: 25, maxHoldMin, trailPct: 20 });
 const organic = (f: Features) => (f.velocity60 ?? 0) > 0 && (f.effectiveBuyers ?? 0) >= 3 && (f.top1 ?? 1) < 0.5 && f.devSold !== true;
 /**
  * Growth speed in the first minutes (the owner's OPEN observation, 3 Oct: GOOP HEAD went $3.4K → $28.9K in 68 s and
@@ -21,6 +35,9 @@ const organic = (f: Features) => (f.velocity60 ?? 0) > 0 && (f.effectiveBuyers ?
  */
 export const SPRINT = Object.freeze({ minVelocity: 0.3 });
 const sprint = (f: Features) => Math.max(f.velocity30 ?? 0, f.velocity60 ?? 0) >= SPRINT.minVelocity && f.mayhem !== true;
+const steady = (f: Features) => f.progress !== null && f.progress >= 0.15 && f.progress <= 0.6 && (f.velocity60 ?? 0) > 0 && (f.velocity60 ?? 1) <= 0.15
+  && (f.effectiveBuyers ?? 0) >= 10 && (f.top1 ?? 1) < 0.15 && (f.top5 ?? 1) < 0.45 && f.devSold === false && (f.sellShare ?? 1) < 0.45
+  && f.mayhem !== true && f.gapInWindow !== true;
 export const GROUPS: Record<GroupId, Group> = {
   all: { label: 'every normal launch', minDelayS: 0, test: () => true },
   ownX: { label: 'own X account in its metadata', minDelayS: 0, test: f => f.hasX === true },
@@ -33,14 +50,24 @@ export const GROUPS: Record<GroupId, Group> = {
   sprint: { label: 'sprint: curve filling ≥ 30 %/min in its first minutes', minDelayS: 30, test: sprint, fast: true },
   sprintBroad: { label: 'sprint with ≥ 10 buyers, no wallet over 30 %, dev not sold', minDelayS: 30, fast: true,
     test: f => sprint(f) && f.buyers >= 10 && (f.top1 ?? 1) < 0.3 && f.devSold !== true },
+  /**
+   * R1: a slow, broadly held curve. The 45 s the owner needs to buy cost least on a curve that rises slowly, and by 300 s
+   * most sniper and bundle sales are over; the dev still holding and no wallet dominating is the organic profile
+   * without the sprint.
+   */
+  steady: { label: 'steady curve: 15–60 % filled, rising ≤ 15 %/min, ≥ 10 effective buyers, top wallet < 15 %, top 5 < 45 %, dev holding, sells < 45 %',
+    minDelayS: 300, delaysS: [300], test: steady },
+  /**
+   * R2: the best rule of 5 Oct (organicX at 120 s, −0.9 % later) without two structural losers: serial creators (≥ 2
+   * earlier launches, none graduated) and supply held by a few wallets (top 5 ≥ 60 %). Exit fixed to that run's: +100 %,
+   * −20 %, 60 min.
+   */
+  organicXClean: { label: 'organic demand and an own X account, no serial creator, top 5 wallets < 60 %', minDelayS: 120, delaysS: [120],
+    exits: EXITS.filter(x => x.tpPct === 100 && x.slPct === 20 && x.maxHoldMin === 60),
+    test: f => organic(f) && f.hasX === true && !(f.creatorLaunches >= 2 && f.creatorGraduations === 0) && (f.top5 ?? 0) < 0.6 },
 };
 export const DELAYS_S = [5, 15, 30, 60, 120] as const;
-export const EXITS: ExitRule[] = [];
-for (const tpPct of [40, 100]) for (const slPct of [20, 35, null]) for (const maxHoldMin of [15, 60]) EXITS.push({ tpPct, slPct, maxHoldMin });
-/** Fast exits for sprints: keep most of the spike (trailing 20 % from the peak) and end early (1 or 3 min at most). */
-export const FAST_EXITS: ExitRule[] = [];
-for (const tpPct of [40, 100, 200]) for (const maxHoldMin of [1, 3]) FAST_EXITS.push({ tpPct, slPct: 25, maxHoldMin, trailPct: 20 });
-export const exitsFor = (group: GroupId): ExitRule[] => GROUPS[group].fast ? FAST_EXITS : EXITS;
+export const exitsFor = (group: GroupId): ExitRule[] => GROUPS[group].exits ?? (GROUPS[group].fast ? FAST_EXITS : EXITS);
 
 export interface RuleSpec { id: string; group: GroupId; delayS: number; exit: ExitRule }
 export const ruleId = (group: GroupId, delayS: number, x: ExitRule) => `${group}@${delayS}s/tp${x.tpPct}/sl${x.slPct ?? 'none'}${x.trailPct ? `/tr${x.trailPct}` : ''}/${x.maxHoldMin}m`;
@@ -49,6 +76,6 @@ export const describeExit = (x: ExitRule) => `+${x.tpPct}% target · ${x.slPct =
 /** Every (group, decision time) pair of the catalog. */
 export function groupDelays(): Array<{ group: GroupId; delayS: number }> {
   const out: Array<{ group: GroupId; delayS: number }> = [];
-  for (const group of Object.keys(GROUPS) as GroupId[]) for (const delayS of DELAYS_S) if (delayS >= GROUPS[group].minDelayS) out.push({ group, delayS });
+  for (const group of Object.keys(GROUPS) as GroupId[]) for (const delayS of GROUPS[group].delaysS ?? DELAYS_S) if (delayS >= GROUPS[group].minDelayS) out.push({ group, delayS });
   return out;
 }

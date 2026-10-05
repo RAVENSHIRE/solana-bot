@@ -621,3 +621,54 @@ test('verified coins: a blue-check memecoin that starts to move is an INFO messa
   assert.ok(vt.length >= 5 && vt.every(r => r[4] === 'J' || r[4] === 'W'), 'every watched coin is recorded at every check');
   assert.equal(recs.filter(r => r[0] === 'VINFO').length, sent.length);
 });
+
+test('R1/R2 (pre-registered 5 Oct): steady@300 s and organicXClean@120 s with its exit fixed in advance, nothing else', async () => {
+  const { GROUPS, EXITS, exitsFor, groupDelays } = await import('../src/research/rules');
+  const at = (g: string) => groupDelays().filter(x => x.group === g).map(x => x.delayS);
+  assert.deepEqual(at('steady'), [300]); assert.deepEqual(at('organicXClean'), [120]);
+  assert.equal(groupDelays().length, 42, '40 rules before, one more for each');
+  const fixed = exitsFor('organicXClean');
+  assert.equal(fixed.length, 1); assert.ok(EXITS.includes(fixed[0]!), 'the same object as in the menu: the gate matches exits by reference');
+  assert.deepEqual(fixed[0], { tpPct: 100, slPct: 20, maxHoldMin: 60 });
+  const base = { t: 300, mcapSol: 60, progress: 0.4, trades: 200, velocity30: 0.05, velocity60: 0.1, acceleration: 0, buyers: 80, newBuyers30: 5, newBuyersPrev30: 5,
+    buyerAcceleration: 0, buySol: 40, sellSol: 10, netSol: 30, sellShare: 0.2, hhi: 0.05, top1: 0.1, top5: 0.3, effectiveBuyers: 20, devBuySol: 1, devSold: false,
+    hasX: true, hasSite: false, hasTelegram: false, descLen: 10, metadataLinks: 1, xCaPost: null, xCaPostDelayS: null, xFollowers: null, xAccountAgeH: null,
+    creatorLaunches: 0, creatorGraduations: 0, gapInWindow: false, chainBreaks: 0, mayhem: false };
+  const steady = GROUPS.steady.test, clean = GROUPS.organicXClean.test;
+  assert.equal(steady(base), true);
+  for (const [k, v] of [['velocity60', 0.2], ['velocity60', 0], ['progress', 0.7], ['progress', 0.1], ['top1', 0.15], ['top5', 0.45], ['effectiveBuyers', 9],
+    ['devSold', null], ['devSold', true], ['sellShare', 0.45], ['gapInWindow', true]] as const) assert.equal(steady({ ...base, [k]: v }), false, `${k} = ${v}`);
+  assert.equal(clean(base), true);
+  assert.equal(clean({ ...base, creatorLaunches: 2, creatorGraduations: 0 }), false, 'a serial creator who never graduated');
+  assert.equal(clean({ ...base, creatorLaunches: 2, creatorGraduations: 1 }), true);
+  assert.equal(clean({ ...base, top5: 0.6 }), false); assert.equal(clean({ ...base, hasX: false }), false);
+});
+
+test('call engine: live calls get the creator\'s history the way the look-back counts it (earlier launches, graduations by the decision time)', async () => {
+  const { qualify } = await import('../src/research/qualify');
+  const { CallEngine } = await import('../src/research/calls');
+  const q = qualify(syntheticDataset(400, 2), freeCosts);
+  for (const r of q.rules) r.qualified = false;
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'research-calls-creator-'));
+  const t0 = Date.parse('2026-10-03T00:00:00Z');
+  let now = t0;
+  const ledger = new ResearchLedger({ dir, now: () => now, freeBytes: async () => 5e9 });
+  await ledger.start();
+  const engine = new CallEngine({ ledger, now: () => now, notify: null, solUsd: () => 150, costs: freeCosts });
+  engine.setQualification(q);
+  // Three launches by one wallet, a minute apart; the first graduates 30 s after the third is created.
+  const ls = [0, 1, 2].map(i => ({ ...syntheticLaunch(i, t0, false), creator: 'SERIAL' }));
+  for (let s = 1; s <= 130; s++) { now = t0 + s * 1_000; engine.tick(ls.filter(l => l.createdObs <= now)); }
+  ls[0]!.completeObs = ls[2]!.createdObs + 30_000;
+  for (let s = 131; s <= 250; s++) { now = t0 + s * 1_000; engine.tick(ls.filter(l => l.createdObs <= now)); }
+  await ledger.close();
+  const read = async (f: string) => f.endsWith('.gz') ? gunzipSync(await fs.readFile(path.join(dir, f))).toString() : await fs.readFile(path.join(dir, f), 'utf8');
+  const recs = lines((await Promise.all((await fs.readdir(dir)).filter(f => f.startsWith('ev-')).sort().map(read))).join(''));
+  const dict = new Map<number, string>();
+  for (const r of recs) if (r[0] === 'M') dict.set(r[1] as number, r[2] as string);
+  const seen = (mint: string, delayS: number) => recs.find(r => r[0] === 'SIG' && String(r[3]).startsWith('all@') && String(r[3]).includes(`@${delayS}s/`)
+    && (typeof r[2] === 'object' && r[2] !== null && '$m' in (r[2] as object) ? (r[2] as { $m: string }).$m : dict.get(r[2] as number)) === mint)?.[7] as { cl: number; cg: number } | undefined;
+  assert.deepEqual(seen('M0', 5) && [seen('M0', 5)!.cl, seen('M0', 5)!.cg], [0, 0]);
+  assert.deepEqual([seen('M2', 5)!.cl, seen('M2', 5)!.cg], [2, 0], 'two earlier launches, none graduated by 5 s');
+  assert.deepEqual([seen('M2', 120)!.cl, seen('M2', 120)!.cg], [2, 1], 'the first one graduated before the 120 s decision');
+});

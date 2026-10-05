@@ -136,6 +136,16 @@ curve fills at ≥ 30 % of its length per minute in the first minutes, alone or 
 They are judged on fast exits only: a +40/100/200 % target, a −25 % stop, a trailing exit 20 % under the peak since the
 fill ("keep the max") and 1 or 3 minutes at most ("end early"). A trailing or timed exit that is profitable on average
 needs no target hits to pass.
+**Pre-registered 5 Oct** (research department, `docs/research/literature/README.md`; owner's go the same day), each at
+one decision time only, so the run tests 42 rules:
+- **R1 `steady` at 300 s:** a slow, broadly held curve: 15–60 % filled, rising at most 15 % of the curve per minute,
+  ≥ 10 effective buyers, top wallet < 15 %, top 5 < 45 %, dev still holding, sells < 45 % of the volume. Exit chosen
+  from the normal menu.
+- **R2 `organicXClean` at 120 s:** organic + own X without serial creators (≥ 2 earlier launches by the same wallet,
+  none graduated) and without supply in a few wallets (top 5 ≥ 60 %). Exit fixed in advance: +100 %, −20 %, 60 min.
+  The live call engine counts each creator's earlier launches of the last 48 h the way the look-back does.
+- Not R3 (own CA post on X): the owner, 5 Oct: a CA in the bio or a post is no safe signal, rather the opposite, unless
+  the project is an established brand or company.
 
 **Gate** (`npm run research:qualify`, `src/research/qualify.ts`, rerun by the observer every 6 h on the last 48 h):
 each group's exit is chosen on the earlier 60 % of launches; unchanged, on the later 40 % it must have
