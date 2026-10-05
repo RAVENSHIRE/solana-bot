@@ -12,7 +12,12 @@
  * A graduation sells at the curve's last price. Costs as the gate: $2 trades, 1.25 % fee per side, $0.10 a round trip.
  * Known cases (CRWLR, Web) are shown, and the summary is repeated without them. Read-only.
  *
- *   npm run research:hold -- [--dir data-desk/research] [--desk data-desk] [--days 7]
+ * INFO-HOLD (pre-registered 5 Oct 2026, 14:30 UTC, after the first run of this study): an INFO coin whose curve is at
+ * 100–250 SOL market cap when the INFO is sent, bought at phone speed, held to graduation with no stop and no target,
+ * 6 h at most (H1). Found in-sample (2–5 Oct: 23 trades, 13 won, +44 % average, +18 % median, +11 % without the best
+ * three), so it counts only on coins after the study: `--since 2026-10-05T14:30Z`.
+ *
+ *   npm run research:hold -- [--dir data-desk/research] [--desk data-desk] [--days 7] [--since <ISO time>]
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -29,6 +34,7 @@ export const HOLD_EXITS: Record<string, ExitRule> = {
   F1a: { tpPct: 100, slPct: 35, maxHoldMin: 30 },
 };
 const KNOWN = new Set(['CRWLR', 'WEB']);
+export const INFO_HOLD = Object.freeze({ minSol: 100, maxSol: 250, exit: 'H1', registeredAt: Date.parse('2026-10-05T14:30:00Z') });
 interface Event { kind: 'INFO' | 'OPEN'; mint: string; at: number; note: string }
 
 const text = (f: string) => { const raw = fs.readFileSync(f); return f.endsWith('.gz') ? gunzipSync(raw).toString('utf8') : raw.toString('utf8'); };
@@ -75,9 +81,9 @@ function openEvents(dir: string, since: number): Event[] {
 
 function main(): void {
   const dir = path.resolve(arg('dir') ?? path.join('data-desk', 'research')), desk = path.resolve(arg('desk') ?? 'data-desk');
-  const days = Number(arg('days') ?? 7), since = Date.now() - days * 86_400_000;
+  const days = Number(arg('days') ?? 7), since = Date.now() - days * 86_400_000, after = arg('since') ? Date.parse(arg('since')!) : null;
   const files = ledgerFiles(dir).filter(f => { const m = /ev-(\d{4})(\d{2})(\d{2})-(\d{2})/.exec(f); return !m || Date.UTC(+m[1]!, +m[2]! - 1, +m[3]!, +m[4]!) >= since - 3_600_000; });
-  const events = [...infoEvents(files), ...openEvents(desk, since)];
+  const events = [...infoEvents(files), ...openEvents(desk, since)].filter(e => after === null || e.at >= after);
   const ds = readDataset(files, { mints: new Set(events.map(e => e.mint)) });
   console.log(`HOLD STUDY · ${new Date(ds.first).toISOString().slice(0, 16)} → ${new Date(ds.last).toISOString().slice(0, 16)} UTC · ${files.length} files · ` +
     `${events.filter(e => e.kind === 'INFO').length} INFO coins, ${events.filter(e => e.kind === 'OPEN').length} OPEN alerts`);
@@ -107,6 +113,14 @@ function main(): void {
       console.log(`  ${line(`${id} ${fill}`, all)}`);
       if (clean.length !== all.length) console.log(`  ${line(`${id} ${fill}, without known cases`, clean)}`);
     }
+  }
+  // The pre-registered rule, on its own: INFO at 100–250 SOL, held to graduation (H1), phone and bot.
+  const band = rows.filter(x => x.e.kind === 'INFO' && x.mcSol !== null && x.mcSol >= INFO_HOLD.minSol && x.mcSol < INFO_HOLD.maxSol);
+  console.log(`\nINFO-HOLD (pre-registered 5 Oct 14:30 UTC: INFO at ${INFO_HOLD.minSol}–${INFO_HOLD.maxSol} SOL, to graduation, no stop, 6 h)${after === null ? ' · in-sample before 5 Oct 14:30 UTC, use --since for the test' : ''}`);
+  for (const fill of ['phone', 'bot']) {
+    const trades = band.filter(x => !x.known).map(x => x.r[`${INFO_HOLD.exit}/${fill}`]).filter((t): t is DirectTrade => !!t);
+    const r = trades.map(t => t.netPct).sort((a, b) => a - b);
+    console.log(`  ${line(`INFO-HOLD ${fill}`, trades)} · without the best 3: ${r.length > 3 ? `${(r.slice(0, -3).reduce((a, x) => a + x, 0) / (r.length - 3)).toFixed(1)} %` : '–'}`);
   }
   console.log('\nEvery coin (phone fill): event · symbol · market cap at the event · graduated · peak until exit · H1 · H2 · H3 · F1a');
   for (const x of rows) {

@@ -181,6 +181,25 @@ id, qualified 0/1, net %, exit reason, entry and exit market cap SOL, peak % · 
 W watchlist), market cap $, liquidity $, holders, organic score, price $, change % 5m/1h/6h/24h, net buyers 1h, bought $
 1h, sold $ 1h, traders 1h · `VINFO` obs, m, symbol, why, checks, market cap $, price $.
 
+## Hold to graduation: OPEN alerts and INFO coins (the CRWLR case)
+
+`npm run research:hold -- [--days 7] [--since <ISO time>]` buys every OPEN alert the desk raised and every INFO the
+observer sent, 45 s later (phone) and 2 s later (bot), and holds with exits fixed in advance: H1 to graduation (no
+stop, 6 h at most), H2 the same with a −50 % stop, H3 4× or graduation with a −50 % stop, and F1a (+100 % / −35 % /
+30 min). A graduation sells at the curve's last price; costs as the gate.
+
+First run, 2–5 Oct (254 INFO coins, 375 OPEN alerts), phone speed:
+- **OPEN alerts held to graduation lose badly**: H1 −25 % average (median −64 %, n 235); F1a −9 %.
+- **INFO coins** as a whole lose too: H1 −7 % (n 186), H3 −1.6 % (bot speed +4 %), F1a −6.6 %.
+- **But INFO at 100–250 SOL** (≈ $12K–30K when the INFO is sent; CRWLR was at 100 SOL) graduated 18 of 34 times,
+  against 3 of 195 below 100 SOL. Held to graduation without a stop: 23 trades, 13 won, **+44 % average, +18 %
+  median, +11 % without the best three** (EMBASSY +251 %, ZIPBOOK +317 %, CLTR +243 %). A −50 % stop ruins it
+  (median −34 %): these coins dip hard before they graduate, as CRWLR did (−47 %).
+
+That band was found after looking at the data, so it proves nothing yet. **INFO-HOLD is pre-registered on 5 Oct, 14:30
+UTC**: an INFO coin at 100–250 SOL when the INFO is sent, bought at phone speed, held to graduation with no stop and
+no target, 6 h at most. Only coins after that time count: `npm run research:hold -- --since 2026-10-05T14:30Z`.
+
 ## The market-cap ladder: every chain, levels, old highs, holders
 
 The launch recorder above sees pump.fun in its first minutes. The ladder (`src/research/ladder.ts`, inside the
