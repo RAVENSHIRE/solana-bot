@@ -45,10 +45,12 @@ export function ledgerFiles(dir: string): string[] {
   return fs.readdirSync(dir).filter(f => /^ev-\d{8}-\d{2}\.jsonl(\.gz)?$/.test(f)).sort().map(f => path.join(dir, f));
 }
 
-export function readDataset(files: string[], o: { from?: number; to?: number } = {}): Dataset {
+/** `mints`: read only these launches (a study of a few coins over many days without loading every launch). */
+export function readDataset(files: string[], o: { from?: number; to?: number; mints?: ReadonlySet<string> } = {}): Dataset {
   const launches = new Map<string, LaunchFacts>(), gaps: Gap[] = [], runs: Run[] = [], results: ForwardResult[] = [], walletIds = new Map<string, number>();
   let first = Infinity, last = 0;
-  const launch = (mint: string, obs: number): LaunchFacts => {
+  const launch = (mint: string, obs: number): LaunchFacts | null => {
+    if (o.mints && !o.mints.has(mint)) return null;
     let l = launches.get(mint);
     if (!l) {
       l = { mint, createdObs: obs, createdTs: null, creator: null, creatorW: null, devBuySol: null, name: null, symbol: null, mayhem: false, trades: [], candles: [], completeObs: null, migrateObs: null,
@@ -79,7 +81,7 @@ export function readDataset(files: string[], o: { from?: number; to?: number } =
       switch (tag) {
         case 'PC': {
           const mint = mintOf(r[2]); if (!mint) break;
-          const l = launch(mint, obs);
+          const l = launch(mint, obs); if (!l) break;
           l.createdObs = Math.min(l.createdObs, obs);
           l.creator ??= typeof r[3] === 'number' ? wallets[r[3]] ?? null : null;
           if (l.creator) l.creatorW = intern(l.creator);
@@ -88,7 +90,7 @@ export function readDataset(files: string[], o: { from?: number; to?: number } =
         }
         case 'C': {
           const mint = mintOf(r[4]); if (!mint) break;
-          const l = launch(mint, obs);
+          const l = launch(mint, obs); if (!l) break;
           l.createdObs = Math.min(l.createdObs, obs); l.createdTs = typeof r[2] === 'number' ? (r[2] as number) * 1000 : l.createdTs;
           const creator = typeof r[6] === 'number' ? wallets[r[6]] : typeof r[5] === 'number' ? wallets[r[5]] : null;
           l.creator ??= creator ?? null; l.name ??= r[8] as string; l.symbol ??= r[9] as string;

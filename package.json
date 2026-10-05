@@ -43,6 +43,7 @@
     "research:report": "node --import tsx src/scripts/research-report.ts",
     "research:direct": "node --import tsx src/scripts/research-direct.ts",
     "research:qualify": "node --max-old-space-size=1536 --import tsx src/scripts/research-qualify.ts",
+    "research:hold": "node --import tsx src/scripts/research-hold.ts",
     "research:platform": "node --import tsx src/scripts/research-platform.ts",
     "research:ladder": "node --import tsx src/scripts/research-ladder.ts",
     "research:holders": "node --import tsx src/scripts/research-holders.ts",
