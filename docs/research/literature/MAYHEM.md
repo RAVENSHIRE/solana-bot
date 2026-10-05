@@ -26,6 +26,30 @@ The command in the owner's reply compares **every** mayhem launch with a 1-in-20
 it uses trade prices, a decision at +60 s and a phone fill at +105 s. It reports which came first: 2× or ½ of the
 entry price, within the kept trade window. "Always runs" becomes a rate.
 
+## First look, result (owner's run, 5 Oct)
+
+| | Launches | 2× first | ½ first | Neither | Graduated |
+| --- | --- | --- | --- | --- | --- |
+| **Mayhem (all)** | 7,618 | 539 (7 %) | 4,661 (**61 %**) | 2,418 | 333 (4 %) |
+| Normal (1 in 20 sample) | 1,029 | 53 (5 %) | 108 (10 %) | 868 | 22 (2 %) |
+
+The prices are trade prices, the decision at +60 s, the fill at +105 s, and the window is the kept raw trades (10–60
+min).
+
+- **Mayhem does not "always run".** It halves first six times as often as a normal launch. It is far more volatile,
+  not better.
+- It reaches 2× slightly more often (7 % against 5 %) and graduates twice as often (4 % against 2 %). The mayhem
+  winners the owner sees are real; they are 7 % of a very large group. Mayhem is about **27 % of all launches**
+  (7,618 against ~20,600 normal, from the 1-in-20 sample).
+- **A rough expectation for M1** (my approximation, not a simulation): 7 % reach +100 % (≈ +90 % net), at least 61 %
+  hit the −35 % stop (≈ −40 % net with gaps), and the rest end flat (≈ −7.5 % costs). That comes to about
+  **−20 % per trade**. M1 as registered will very likely fail. It stays registered so that it is judged rather than
+  argued.
+- Caveat: how trade prices behave in mayhem mode is not documented here. If some mayhem trades are protocol trades
+  at off-market prices, both rates move. The CTO should check what mayhem trades are before relying on these numbers.
+- **The useful split is breadth (M2) and graduation.** The owner's two mayhem cases had 298 and 534 buyers. The
+  command for M2 is in the owner's reply. A mayhem coin that graduates belongs to F1b/G1 (pool prices, gate gap 5).
+
 ## Pre-registered (5 Oct, before any mayhem data is scored)
 
 | # | Rule | Decision | Entry | Exits (fixed) | Judged on |
