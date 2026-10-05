@@ -39,6 +39,13 @@ Effect on the verdicts below:
 - CRASH's record is slightly understated (9 of 92 cut).
 - C1–C4 and MG1–MG3 only count trades after 5 Oct 21:00 UTC, which is after the fix. No pre-registration changes.
 
+## Update, 5 Oct 23:00 UTC
+
+- C1/C2 could not apply: there is no pool structure 1–4 min after graduation. They are dropped as not testable, and replaced by C1′/C2′ (structure from the curve phase).
+- The lever against one-block rugs is the entry: rug features RG1/RG2.
+
+Both in [RUG-AT-ENTRY.md](RUG-AT-ENTRY.md).
+
 ## Verdict per strategy
 
 | Strategy | Status | Evidence | Verdict |
