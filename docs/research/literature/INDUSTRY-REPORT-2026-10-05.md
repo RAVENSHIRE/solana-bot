@@ -17,6 +17,20 @@ evidence.
 | GMGN offers an "Agent API" with smart-money data and execution for AI agents | a possible data source for wallet labels and smart-money signals; its cost and terms are unknown | a possible later data source for W1′/VOICES. Not before an owner decision |
 | "Demystifying Solana Bots: From GitHub Blueprints to On-Chain …" (arXiv 2607.28424) | a study of bot behaviour on chain | on the reading list, next to the bot-wallet finding (`MAYHEM.md`: one wallet tops 58 % of mayhem launches) |
 
+## Correction, 5 Oct 18:28 UTC (CTO, measured on 469 TEST round trips)
+
+The fixed cost per round trip is **about $0.03, not $0.10**: network and priority fee $0.0105 on the buy, $0.0177
+on the sell, $0.0006 to close the token account (the rent comes back). At $2 a round trip is therefore about
+**2.5 % + 1.4 % ≈ 3.9 %**, not 7.5 %. That is closer to the cited +3 % copier edge but still above it. At $5 it is
+about 3.1 %, at $10 about 2.8 %.
+
+- The gate should take the fixed cost from a config value that defaults to the measured figure, not a hard-coded
+  $0.10 (the owner: costs change with the RPC provider, the priority-fee level and the Jupiter plan).
+- Exception: LIVE with Phantom does not close token accounts, so about $0.24 of rent per coin stays locked until
+  the owner closes them.
+
+The point below stands in a weaker form: costs still decide whether a small edge survives at $2. K1 stays.
+
 ## The critical point for the CTO
 
 **Raven's main structural handicap is not speed but cost per dollar traded.** At $2, about 7.5 % per round trip

@@ -67,7 +67,7 @@ the $5.25M rug. The entry was again a real dip: −15 % from the high. So far th
 two sane openers ran, one 100× opener rugged. **Three known cases are still not evidence.** P2's shadow test
 (≥ 30 trades, bot and phone speed) decides.
 
-## TEST trade, 5 Oct 18:53 UTC: `7PUJBf…ipump` ("fomocoin"), a winner sold at −91 %
+## TEST trade, 5 Oct 16:53 UTC (18:53 local): `7PUJBf…ipump` ("fomocoin"), a winner sold at −91 %
 
 Owner: GOLDEN's paper position showed a large unrealised gain ("4.9"), then sold for −$1.83 on about $2 (the sell
 line: Jupiter via the Pump.fun AMM, PAPER FILLED). "Why didn't it close at +100 %?"
@@ -81,6 +81,7 @@ line: Jupiter via the Pump.fun AMM, PAPER FILLED). "Why didn't it close at +100 
   likely a rug in one or a few transactions. That is the failure `config.ts` already records for GOLDEN: "rugs fall
   through the stop in seconds". It could also be a gap in the quotes (an outage). The desk's event log for this
   position (QUOTE and EXIT lines with times) would tell which.
+- **Confirmed (CTO):** +281 % at one check, −88 % three seconds later. A one-block rug.
 - **Lesson:** a trailing stop cannot protect a position against a one-block rug. Only an exit taken *before* the rug
   protects it. For coins this volatile that means taking part of the profit at a fixed level.
 

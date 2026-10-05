@@ -23,6 +23,14 @@ DEGRADED (13). The ledger extract for this coin has not been pasted yet. It is a
 3. **The label.** "RUG" on a coin up 29 % reads as a false alarm, which is how the owner read it. "Insiders exited"
    with the price change would be accurate.
 
+## Correction, 5 Oct 18:28 UTC (CTO)
+
+The 63.2 % was the insiders' share **at the launch**. At the CRASH entry they held 1.4 %. So **the 50 % entry limit
+was not broken** (finding 2 above is withdrawn). The exit fired because of a desk bug: holdings after the buy were
+compared with the share at the launch. It is fixed in commit 6b89637, along with 189 such exits in TEST, 139 of
+them within 30 s of the buy. Finding 1 (an insider exit with no price confirmation) still stands as a question for
+exits after the fix: X9 is unchanged.
+
 ## Hypothesis
 
 | # | Hypothesis | Test | Passes if | Cost |

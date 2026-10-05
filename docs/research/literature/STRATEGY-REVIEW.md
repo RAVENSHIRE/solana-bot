@@ -11,6 +11,34 @@ Sources:
 
 **FAIR's results are not in the repository.** Its strategy card would fill that row.
 
+## Correction, 5 Oct 18:28 UTC (CTO, desk fix 6b89637)
+
+The insider and creator exits ("RUG insiders sold", "DEV_SELLING") compared the holdings after the buy with the share
+measured **at the launch**, often long before the entry. 189 such exits happened in TEST, 139 of them within 30 s
+of the buy.
+
+Trades cut within 60 s of the entry, per strategy:
+
+| Strategy | Trades cut | Net of those trades | Strategy net |
+| --- | --- | --- | --- |
+| LAUNCH | 65 of 91 | −$30.92 | −$49.88 |
+| CRASH_V1 | 23 of 57 | | |
+| MIGRATION2 | 14 of 72 | −$2.88 | −$37.26 |
+| OPEN | 14 of 69 | −$8.25 | −$113.06 |
+| GOLDEN | 10 of 28 | −$2.14 | −$18.90 |
+| CRASH | 9 of 92 | −$2.90 | +$4.95 |
+| FAIR | 6 of 45 | | |
+
+A second fix in the same commit: custom strategies lost about half their signals before 18:03 UTC on 5 Oct.
+
+Effect on the verdicts below:
+- **OPEN, MIGRATION and GOLDEN still fail for the reasons given.** The bug explains only a small part of their losses.
+- **LAUNCH's TEST record is mostly the bug.** Its strategy verdict becomes **unknown until new trades after the fix**.
+  The alert audit of 1–2 Oct (23 of 23 entry-ready coins dead or −70 % within an hour) measured prices after the
+  alerts, not exits, so it still stands for the alert.
+- CRASH's record is slightly understated (9 of 92 cut).
+- C1–C4 and MG1–MG3 only count trades after 5 Oct 21:00 UTC, which is after the fix. No pre-registration changes.
+
 ## Verdict per strategy
 
 | Strategy | Status | Evidence | Verdict |
@@ -19,7 +47,7 @@ Sources:
 | **CRASH_70K** (CRASH at ≥ $70K and pool ≥ 5 min) | TEST from 5 Oct | in CRASH's own trades: +15.6 % (40) against −6.1 % (48). Found in those trades, so only trades from 5 Oct count | **Could work** if its new trades confirm it |
 | **GOLDEN** (graduated pools, only-up) | OFF | backtest −33 %/trade once gapped stops sell at the minute's close; −57 % on 5 live TEST trades; a TEST trade on 5 Oct sold at −91 % after a large gain | **Fails as is. Could work narrowly**: three owner cases fit P2 (pool opens ≤ 3× its graduation value), with a take profit (exits b/c) |
 | **OPEN** (opening breakout) | OFF | TEST: **58 trades, 2 % won, −66.8 % avg, PF 0.12**; earlier 7 of 7 lost; alert audit 59 of 65 dead or −70 % within an hour | **Fails. Retire it.** |
-| **LAUNCH** (radar: own X + site) | TEST | not backtested; audit 23 of 23 entry-ready dead or −70 % within an hour; −22 % with OPEN-like exits, +8–9 % with a trailing stop carried by two outliers | **Fails as an alert.** Its good part, a project posting its CA, is measured more cleanly by INFO F1a/F1c |
+| **LAUNCH** (radar: own X + site) | TEST | not backtested; audit 23 of 23 entry-ready dead or −70 % within an hour; −22 % with OPEN-like exits, +8–9 % with a trailing stop carried by two outliers | **Fails as an alert** (audit). **The strategy itself is unknown** until there are trades after the 5 Oct fix (its TEST record was mostly the stale-baseline exit bug). Its good part, a project posting its CA, is measured more cleanly by INFO F1a/F1c |
 | **MIGRATION** (custom: graduations $60–300K in their first hour, Vol/MC > 30 %, holders, no whale; trail 30 % from 2×, stop −50 %, 3 days) | TEST | owner's card, 5 Oct: **66 trades, 24 % won, −16.4 % avg, PF 0.61**, best +542.3 %, worst −99.3 %, average hold 698 s, realised −$21.73 | **Fails today, but has real upside.** The single +542 % trade is worth about +$10.8. Without it the other 65 average about −25 %. The losers are the problem: a −50 % stop that rugs gap through to −99 % |
 | **FAIR** (fair launch, two-scan momentum) | ON | no record in the repository | **Unknown**: paste its card |
 | MIGRATION · CONSOL · SCALP · RUNNER presets | custom, TEST | not backtested | **Unknown.** CONSOL and RUNNER are the owner's range idea: test them through TA4 |
