@@ -103,7 +103,8 @@ Native reserve (0.003 SOL) and max drag (1.5 %) are the project's existing micro
   - Take profit (+100 %) was hit 23 times (+101 % each); the 10-minute time stop closed 14, 10 of them up (+25 %).
   - **The −35 % stop filled at −56 % on average** (36 trades; most between −42 % and −55 %): the price falls on between
     two checks, plus fees. Position and exit quotes now go to Jupiter before scan and entry quotes (a rate-limited
-    Jupiter key used to queue them behind each other), and short-hold custom strategies are checked every 2 s too.
+    Jupiter key used to queue them behind each other), short-hold custom strategies are checked every 2 s too, and a
+    quiet position is re-quoted only every 10 s (see *Known limits*), so a position near its stop is not in line.
   - Entries at **$70K+ market cap on a pool 5+ minutes old** made +15.6 % on average (40 trades), the rest −6.1 % (48).
     Found in these same trades, so it is a hypothesis: the **CRASH 70K+** preset (`CRASH_70K`) runs it beside CRASH in
     TEST on the same signals with the same exits; only its trades from 5 Oct on count.
@@ -567,7 +568,14 @@ Runs TEST on live data (both strategies; `--no-crash` / `--no-fair` to switch on
 
 - With $2 entries, the 1.5 % max drag (including 1 % slippage tolerance) blocks many meme-coin routes before a transaction is built; the reason is shown on the event. CRASH allows 5 % for exactly this reason.
 - Priority fee: each order authorizes a priority-fee budget (`MAX_PRIORITY_FEE_LAMPORTS`, within the drag cap for entries) and Jupiter's `PRIORITY_LEVEL` estimate picks the actual fee inside it; the fee actually charged is measured before signing.
-- `JUPITER_MAX_RPS` (default 1) limits how often positions can be valued; with several open positions each check takes that many seconds.
+- `JUPITER_MAX_RPS` (default 1) is what the key allows: the free plan answers 10 requests per 10 s (measured on Raven
+  on 5 Oct: `x-ratelimit-current: 10`, and 5 of 6 requests at 2 per second were refused), so a higher setting only
+  produces 429s; more needs a paid plan (portal.jup.ag). Held positions are therefore not quoted at every check: the
+  DexScreener price of all of them (one request) is watched, and a position is re-quoted when its last Jupiter quote is
+  10 s old, when that price is within 12 points of the stop or 15 of the target, when it moved 5 % since the last quote,
+  and near the time stop. An active trailing stop or profit lock, market-cap and pocket levels, scale-ins and early
+  warnings are quoted at every check. Every exit is still decided and booked on an executable Jupiter quote; the
+  execution path shows how many checks needed none.
 - With Phantom, empty token accounts are not closed automatically (closing needs its own Phantom signature), so their rent stays locked. With the local key they are closed after each exit (see *Costs per trade*).
 - Token-account rent (≈ 0.0015–0.002 SOL per new token) stays locked after an exit until the account is closed; the desk reports it as reserved, not as a fee.
 - The real Phantom signature and Auto-Confirm flow can only be verified by the wallet owner.

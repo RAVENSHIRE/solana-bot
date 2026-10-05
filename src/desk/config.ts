@@ -67,6 +67,15 @@ export const DESK = Object.freeze({
     noRoute: { retryMs: 120_000, writeOffMin: 30 },
     /** Other valuation failures (provider outage) are logged at most this often per position. */
     valuationLogMs: 60_000,
+    /**
+     * Jupiter quotes for valuation. A key on the free plan allows 10 requests per 10 s (measured on Raven, 5 Oct) and a
+     * quote per position every 2 s exceeded it, so stops waited in line. Between quotes the DexScreener price (one request
+     * for all held tokens) is watched; a position is re-quoted when its last quote is `maxAgeMs` old, when that price is
+     * within `nearStopPts` of its stop or `nearTargetPts` of its target, or moved `movePct` since the last quote. Exits are
+     * still decided and booked on an executable Jupiter quote. Trailing stops once active, market-cap levels and
+     * scale-ins are quoted at every check.
+     */
+    quote: { maxAgeMs: 10_000, nearStopPts: 12, nearTargetPts: 15, movePct: 5 },
   },
   momentum: { minObservations: 2, minAcceleration: 1, minPriceChange5mPct: 0 },
   /** Candidates kept in memory and on the status API. */

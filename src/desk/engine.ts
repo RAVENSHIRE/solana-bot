@@ -157,6 +157,10 @@ export class DeskEngine {
   private copycatSearches = new Map<string, { at: number; pairs: DexPair[] }>();
   /** Alert keys already raised, with when: saved to alerts-sent-<MODE>.json so a restart neither re-alerts nor resets the OPEN cap. */
   private launchAlerts = new Map<string, number>();
+  /** The last Jupiter valuation per held token, with the DexScreener price at that moment (quoteDue). */
+  private readonly lastQuote = new Map<string, { at: number; dexPrice: number | null }>();
+  /** Position checks that needed no Jupiter quote (shown in the data sources line). */
+  private quotesSkipped = 0;
   private alertWrite: Promise<void> = Promise.resolve();
   /** When the last hour's OPEN alerts went to the phone (the hourly cap). */
   private readonly openPhoneSent: number[] = [];
@@ -933,15 +937,33 @@ export class DeskEngine {
     await tracked;
   }
 
-  /** Current pool liquidity for all held tokens in one request. */
-  private async poolLiquidity(mints: string[]): Promise<Map<string, number | null>> {
-    const out = new Map<string, number | null>();
-    if (!mints.length) return out;
+  /** Current pool liquidity and DexScreener price for all held tokens in one request. */
+  private async poolMarket(mints: string[]): Promise<{ liquidity: Map<string, number | null>; price: Map<string, number | null> }> {
+    const liquidity = new Map<string, number | null>(), price = new Map<string, number | null>();
+    if (!mints.length) return { liquidity, price };
     try {
       const pairs = await requestScope.run({ category: 'position' }, () => this.d.dex.getPairsForTokens(mints));
-      for (const mint of mints) out.set(mint, selectPair(pairs, mint, Date.now())?.liquidity?.usd ?? null);
+      for (const mint of mints) { const pair = selectPair(pairs, mint, Date.now()); liquidity.set(mint, pair?.liquidity?.usd ?? null); price.set(mint, pair?.priceUsd ?? null); }
     } catch { /* market data outage: the executable-quote rules still apply */ }
-    return out;
+    return { liquidity, price };
+  }
+
+  /**
+   * Whether a position needs a Jupiter quote this check (DESK.exits.quote): always for exits that depend on every
+   * price (an active trailing stop or profit lock, market-cap levels, scale-ins), otherwise when the last quote is old or
+   * the DexScreener price is near the stop or the target or moved since the last quote.
+   */
+  private quoteDue(p: DeskPosition, profile: StrategyProfile, dexPrice: number | null): boolean {
+    const q = DESK.exits.quote, last = this.lastQuote.get(p.mint), x = profile.exits, now = Date.now();
+    if (!last || now - last.at >= q.maxAgeMs || dexPrice === null || !p.entryPriceUsd) return true;
+    const cost = exactNumber(BigInt(p.costLamports)), peakPct = (exactNumber(BigInt(p.peakValueLamports)) - cost) / cost * 100;
+    if ((x.trailing && peakPct >= x.trailing.activationPct) || (x.giveback && peakPct >= x.giveback.lockPeakPct)) return true;
+    if (x.marketCap || p.stopUsd != null || p.targetUsd != null || profile.scaleIn?.length || x.holdUntilMultiple !== undefined) return true;
+    const implied = (dexPrice / p.entryPriceUsd - 1) * 100;
+    if (implied <= -(x.stopLossPct - q.nearStopPts)) return true;
+    if (Number.isFinite(x.takeProfitPct) && implied >= x.takeProfitPct - q.nearTargetPts) return true;
+    if (last.dexPrice !== null && Math.abs(dexPrice / last.dexPrice - 1) * 100 >= q.movePct) return true;
+    return now - p.openedAt >= x.maxHoldMin * 60_000 - q.maxAgeMs;
   }
 
   /**
@@ -976,17 +998,20 @@ export class DeskEngine {
 
   private async managePositions(id: StrategyId, ledger: DeskLedger, stopped: () => boolean, manualOnly = false): Promise<void> {
     const profile = this.profile(id), positions = ledger.state.positions.filter(p => !manualOnly || this.manualExits.has(p.mint));
-    const liquidity = await this.poolLiquidity(positions.filter(p => p.entryLiquidityUsd).map(p => p.mint));
+    const { liquidity, price } = await this.poolMarket(positions.map(p => p.mint));
     for (const p of positions) {
       if (stopped()) return;
       const ctx = { mint: p.mint, symbol: p.symbol, detail: { strategy: id } };
       const manual = this.manualExits.has(p.mint), noRoute = DESK.exits.noRoute;
       if (p.noRouteSince && !manual && Date.now() - (this.noRouteChecks.get(p.mint) ?? 0) < noRoute.retryMs) continue;
       const warning = manual ? 'EXIT NOW (manual)' : await this.earlyWarning(p, liquidity, profile.preGraduationExit !== false);
+      const dexPrice = price.get(p.mint) ?? null;
+      if (!warning && !this.quoteDue(p, profile, dexPrice)) { this.quotesSkipped++; continue; }
       let value: bigint;
       try {
         const q = await requestScope.run({ category: 'position' }, () => this.d.jupiter.quote({ inputMint: p.mint, outputMint: SOL_MINT, amountRaw: BigInt(p.qtyRaw), slippageBps: profile.slippageBps }));
         value = BigInt(q.outAmount);
+        this.lastQuote.set(p.mint, { at: Date.now(), dexPrice });
       } catch (error) {
         if (refused(error)) { await this.unroutable(id, ledger, p, error); continue; }
         if (Date.now() - (this.valuationLog.get(p.mint) ?? 0) >= DESK.exits.valuationLogMs) {
@@ -1870,7 +1895,7 @@ export class DeskEngine {
       { layer: 'Scanners', provider: screens },
       { layer: `Strategies (${on.length} on${off ? `, ${off} off` : ''})`, provider: on.map(p => p.label).join(' · ') || 'none on' },
       { layer: 'Risk engine', provider: `Hard gates per strategy + execution guard: reserve ${sol(DESK.reserveLamports)} SOL · max entry cost ${on.map(p => `${p.label} ${Number(p.maxDragBps) / 100}%`).join(', ')}` },
-      { layer: 'Quote', provider: 'Jupiter Swap API /quote: the best route over Solana DEXs' },
+      { layer: 'Quote', provider: `Jupiter Swap API /quote: the best route over Solana DEXs · ${d.cfg.jupiter.maxRps}/s, orders and stops first · held positions re-quoted when due (${this.quotesSkipped} checks needed no quote)` },
       { layer: 'DEX', provider: 'Where Jupiter routes each order (pump.fun curve, PumpSwap, Raydium, Meteora …), shown per order' },
       { layer: 'Transaction builder', provider: `Jupiter /swap for ${short ?? 'the desk wallet'}` },
       { layer: 'RPC', provider: rpc.join(', ') || 'not configured' },

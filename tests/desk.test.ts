@@ -769,6 +769,33 @@ test('RIDE mode has no take profit and trails the move; CRASH may re-enter after
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
+test('held positions ask Jupiter only when due: a quiet price is re-quoted every 10 s, a price near the stop at every check', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-quote-')), patch: Record<string, unknown> = { ...YOUNG_PUMP }, { w, shared } = world(patch, 'insider');
+  try {
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    const inner = engine as unknown as { lastPositionCheckAt: Record<string, number>; lastQuote: Map<string, { at: number; dexPrice: number | null }> };
+    const check = async () => { inner.lastPositionCheckAt.CRASH = 0; engine.tick(); await engine.settled(); };
+    engine.start(); await engine.pulse();
+    assert.deepEqual(engine.status({ connected: false, address: null }).positions.map(p => p.strategy), ['CRASH']);
+    await check();
+    const quoted = w.sellQuotes;
+    await check(); await check(); await check();
+    assert.equal(w.sellQuotes, quoted, 'DexScreener shows the entry price: no Jupiter quote within 10 s of the last one');
+    assert.match(engine.status({ connected: false, address: null }).path.find(s => s.layer === 'Quote')!.provider, /\(3 checks needed no quote\)/);
+    inner.lastQuote.get(MINT)!.at -= 10_000; await check();
+    assert.equal(w.sellQuotes, quoted + 1, 'a 10-second-old quote is renewed');
+    patch.priceUsd = '0.00048'; await check();
+    assert.equal(w.sellQuotes, quoted + 1, 'a 4 % move is under the 5 % trigger');
+    patch.priceUsd = '0.00045'; await check();
+    assert.equal(w.sellQuotes, quoted + 2, '−10 % since the last quote is over it');
+    patch.priceUsd = '0.00037'; await check(); await check();
+    assert.equal(w.sellQuotes, quoted + 4, '−26 % on DexScreener is within 12 points of the 35 % stop: quoted at every check');
+    w.priceFactor = 0.6; patch.priceUsd = '0.0003'; await check();
+    assert.equal(engine.status({ connected: false, address: null }).positions.length, 0);
+    assert.ok(engine.events.list().some(e => /^CRASH · exit signal: STOP_LOSS -4\d\.\d\d% ≤ -35%/.test(e.message)), 'the stop is decided on the Jupiter quote');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
 test('pausing stops entries only: an open position still takes its exit', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-pause-')), { w, shared } = world(YOUNG_PUMP, 'insider');
   try {
