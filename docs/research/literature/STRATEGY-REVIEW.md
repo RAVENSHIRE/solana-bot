@@ -20,6 +20,7 @@ Sources:
 | **GOLDEN** (graduated pools, only-up) | OFF | backtest −33 %/trade once gapped stops sell at the minute's close; −57 % on 5 live TEST trades; a TEST trade on 5 Oct sold at −91 % after a large gain | **Fails as is. Could work narrowly**: three owner cases fit P2 (pool opens ≤ 3× its graduation value), with a take profit (exits b/c) |
 | **OPEN** (opening breakout) | OFF | TEST: **58 trades, 2 % won, −66.8 % avg, PF 0.12**; earlier 7 of 7 lost; alert audit 59 of 65 dead or −70 % within an hour | **Fails. Retire it.** |
 | **LAUNCH** (radar: own X + site) | TEST | not backtested; audit 23 of 23 entry-ready dead or −70 % within an hour; −22 % with OPEN-like exits, +8–9 % with a trailing stop carried by two outliers | **Fails as an alert.** Its good part, a project posting its CA, is measured more cleanly by INFO F1a/F1c |
+| **MIGRATION** (custom: graduations $60–300K in their first hour, Vol/MC > 30 %, holders, no whale; trail 30 % from 2×, stop −50 %, 3 days) | TEST | owner's card, 5 Oct: **66 trades, 24 % won, −16.4 % avg, PF 0.61**, best +542.3 %, worst −99.3 %, average hold 698 s, realised −$21.73 | **Fails today, but has real upside.** The single +542 % trade is worth about +$10.8. Without it the other 65 average about −25 %. The losers are the problem: a −50 % stop that rugs gap through to −99 % |
 | **FAIR** (fair launch, two-scan momentum) | ON | no record in the repository | **Unknown**: paste its card |
 | MIGRATION · CONSOL · SCALP · RUNNER presets | custom, TEST | not backtested | **Unknown.** CONSOL and RUNNER are the owner's range idea: test them through TA4 |
 | Research gate rules (42) | shadow | 0 of 42 qualify. Best: organicX@120 s −0.9 %; R1 undecided (needs ~13 days); R2 failed; sprintBroad@60 s −3.6 % | **None works yet** |
@@ -53,6 +54,9 @@ Sources:
 | C3 | CRASH | B1: buy/sell ratio and buy count without the frozen bot list (R) | stops bots from passing the "≥ 40 buys, buy/sell ≥ 1.3" gate |
 | C4 | CRASH_70K | unchanged, judged on its own trades from 5 Oct | confirms or kills the one filter found so far |
 | G-b/c | GOLDEN | P2 filter (pool opens ≤ 3× graduation value) with exits (b) +100 % take profit or (c) half at +100 % | the three 5 Oct cases: sane openers ran and 100× openers rugged. The take profit locks the gain before a rug |
+| MG1 | MIGRATION | **TA2**: skip entries whose structural stop is > 25 % below, or with no structure | the losers are wide and gappy (−50 % stop, −99 % worst). Skipping far-structure entries cuts them, and the trailing exit still rides the winners |
+| MG2 | MIGRATION | sell **half at 2×**, the rest on the 30 % trail as now | banks part of each runner before a one-block rug. The +542 % kind of trade still keeps half its run |
+| MG3 | MIGRATION | P1 ceiling: skip pools whose first minute opened ≥ 3× the graduation value | the 100× openers were rugs (GOLDEN cases) |
 | F1c | INFO | 40–160 SOL band, 30 min, +100 %/−35 % | the band where 2× comes first about a third of the time |
 
 The CRASH variants run in TEST beside CRASH on the same signals, like CRASH_70K. Each needs ≥ 100 trades and the
