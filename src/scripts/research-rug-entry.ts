@@ -95,12 +95,12 @@ async function main(): Promise<void> {
   fs.writeFileSync(path.join(dir, 'rug-entry.json'), JSON.stringify({ generatedAt: new Date(now).toISOString(), since: new Date(since).toISOString(), thresholds: RUG_THRESHOLDS, label: RUG_LABEL, rows: out }, null, 1));
 
   const pct = (v: number | null | undefined, d = 0) => v == null ? '--' : `${(v * 100).toFixed(d)}`;
-  console.log('\ntime  symbol        label    min/max %   insider top10 sniper bot  sellSh serial holders breaks  desk');
+  console.log('\ntime  symbol        label    min/max %   insider top10 sniper bot  sellSh serial holders breaks  grad s  desk');
   for (const r of out) {
     const f = r.f;
     console.log(`${new Date(r.at).toISOString().slice(11, 16)} ${(r.symbol ?? r.mint.slice(0, 6)).slice(0, 12).padEnd(13)} ${r.label.padEnd(8)} ${r.minPct === null ? '--' : r.minPct.toFixed(0)}/${r.maxPct === null ? '--' : `+${r.maxPct.toFixed(0)}`}`.padEnd(46) +
-      (f?.gradAt ? `${pct(f.insiderAtGrad).padStart(5)} ${pct(f.top10AtGrad).padStart(5)} ${pct(f.sniperAtGrad).padStart(6)} ${pct(f.botAtGrad).padStart(4)} ${pct(f.preGradSellShare).padStart(6)} ${String(f.serialCreator ?? '--').padStart(6)} ${String(f.holdersAtGrad ?? '--').padStart(7)} ${String(f.chainBreaks).padStart(6)}`
-        : '  (no graduation in the observer ledger)'.padEnd(58)) + `  ${r.taken.join(', ') || 'not taken'}`);
+      (f?.gradAt ? `${pct(f.insiderAtGrad).padStart(5)} ${pct(f.top10AtGrad).padStart(5)} ${pct(f.sniperAtGrad).padStart(6)} ${pct(f.botAtGrad).padStart(4)} ${pct(f.preGradSellShare).padStart(6)} ${String(f.serialCreator ?? '--').padStart(6)} ${String(f.holdersAtGrad ?? '--').padStart(7)} ${String(f.chainBreaks).padStart(6)} ${String(f.gradSeconds ?? '--').padStart(7)}`
+        : '  (no graduation in the observer ledger)'.padEnd(66)) + `  ${r.taken.join(', ') || 'not taken'}`);
   }
   const judged = out.filter(r => (r.label === 'RUG' || r.label === 'NO') && r.f?.gradAt);
   console.log(`\nPast the pre-registered threshold vs not (descriptive, ${judged.length} labelled signals, ${judged.filter(r => r.label === 'RUG').length} rugs; RG1 needs ≥ 20 rugs):`);

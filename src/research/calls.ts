@@ -4,6 +4,7 @@ import { GROUPS, describeExit } from './rules';
 import type { Qualification, RuleEvidence } from './qualify';
 import type { ResearchLedger } from './ledger';
 import type { XRead } from './xread';
+import { brandName } from '../desk/brands';
 
 /**
  * Live calls from the research layer. At each rule's decision time the observer's facts about a launch go through the
@@ -114,6 +115,8 @@ export class CallEngine {
       this.d.link ? this.d.link(l.mint) : `https://pump.fun/coin/${l.mint}`,
     ].join('\n');
     this.d.ledger.put(['INFO', now, { $m: l.mint }, handle, { badge: p.verifiedType ?? (p.verified ? 'blue' : null), f: p.followers, ownCa: 1, mcSol }]);
+    // Coins named after a real company never reach the phone (owner, 5 Oct: brand-name coins are scams); the record stays.
+    if (brandName(l.symbol, l.name)) return;
     void this.d.notify(`INFO ${l.symbol ?? l.mint.slice(0, 6)}: project posted its CA${org ? ` (${badge})` : ''}`, body).catch(() => undefined);
   }
   qualification(): Qualification | null { return this.q; }
@@ -146,7 +149,7 @@ export class CallEngine {
     const f = features(l, delayS, this.creatorHistory(l, at), []);
     if (f.mcapSol === null) return;
     for (const rule of q.rules.filter(r => r.delayS === delayS && GROUPS[r.group].test(f))) {
-      const qualified = rule.qualified, sent = qualified && !!this.d.notify;
+      const qualified = rule.qualified, sent = qualified && !!this.d.notify && !brandName(l.symbol, l.name);
       if (qualified) this.stats.calls++; else this.stats.shadows++;
       this.d.ledger.put(['SIG', this.now, { $m: l.mint }, rule.id, qualified ? 1 : 0, Math.round(f.mcapSol * 1000) / 1000, sent ? 1 : 0,
         { b: f.buyers, top1: f.top1, eff: f.effectiveBuyers, v60: f.velocity60, p: f.progress, dev: f.devBuySol, devSold: f.devSold, x: f.hasX, site: f.hasSite,

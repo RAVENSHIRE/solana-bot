@@ -227,9 +227,12 @@ These rules come from one example. The alert audit of 1–2 Oct (65 breakouts, s
 ### GOLDEN POCKET: graduated pools, only up and break and retest
 
 > **5 Oct changes (research P1/P2):**
-> - **10× ceiling:** a fill on a pool whose first minute topped more than 10× its graduation value (a pump.fun curve
->   completes at about 410.9 SOL) is not alerted and not bought: the $5.25M-first-candle "golden" fills were rugs
->   (CTi9…pump, ~100×).
+> - **3× ceiling:** a fill on a pool whose first minute topped more than 3× its graduation value (a pump.fun curve
+>   completes at about 410.9 SOL, so about $270K at $220/SOL) is not alerted and not bought. First 10×, after the
+>   $5.25M-first-candle "golden" fills that were rugs (CTi9…pump, ~100×); then 3× for the owner the same night:
+>   "entries at $360K are too big for day scouting" (Addidas opened at 7.2×, NVIDIA at 6.6×). The shadow records
+>   still follow every fill, so research can compare the groups.
+> - **Brand-name coins** (Addidas, NVIDIA, AAPLE AI, Grok AI…) are never alerted or bought: see *Brand-name coins*.
 > - **Alerts say what they are:** market cap, how far the pool opened above its graduation value, the previous
 >   resistance and its stop, and "Not a qualified call".
 > - **Shadow trades (no money):** every only-up fill is followed at bot speed (+2 s) and phone speed (+45 s) with
@@ -484,6 +487,16 @@ The position shows **NO ROUTE since …** under *Open positions*. It is re-quote
 ### Scale-up ladder ($10 → $100 → $1K → $10K per entry)
 
 Advisory only — the desk never changes a size by itself. A strategy shows READY for the next rung after ≥ 20 closed trades with positive net PnL, profit factor ≥ 1.3 and a max drawdown within half its sleeve. Paper fills ignore latency and MEV, so confirm with LIVE fills before sizing up real money. The next size also needs pool liquidity of about 50× the entry (≈ 2 % impact); most sub-$1M meme pools cannot absorb $1K+ orders.
+
+### Brand-name coins
+
+The owner, 5 Oct: "these are scam coins, not interested in trading memecoin APPLE NVIDIA, makes no sense". A coin
+whose name or symbol names a real company or one of its products (desk/brands.ts: Apple, NVIDIA, Adidas, Google and
+Gemini, OpenAI and ChatGPT, Anthropic and Claude, xAI and Grok, Tesla, SpaceX, Amazon, Meta, …) is skipped by every
+strategy (`BRAND_NAME` on the candidate's entry note), never shortlisted by the launch radar, and never sent to the
+phone, neither as a GOLDEN/OPEN alert nor as a research call or INFO (the research records stay). Common misspellings
+match ("Addidas", "AAPLE"); ordinary words do not ("Finance", "Phone", "Pineapple"). That evening AAPLE AI fell −89 %
+and Grok AI −98 % within a minute of a TEST entry. Positions already open keep their exit rules.
 
 ### Level 1: Solana (the Levels card, under Capital)
 

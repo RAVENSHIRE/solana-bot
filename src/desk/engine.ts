@@ -38,6 +38,7 @@ import { OPENING, openingSpeed, type OpeningState, type OpeningTracker } from '.
 import { GOLDEN, PUMP_QUOTE_MINT, WSOL_MINT, type GoldenSignal, type GoldenTracker } from './golden-pocket';
 import { structure, structureLine } from './structure';
 import { byProgress, LEVEL1, levelRow, levelTrades, type LevelRow } from './levels';
+import { brandName } from './brands';
 /** CRASH's window: pools are sampled for structure up to 15 minutes after their graduation. */
 const STRUCTURE_FOLLOW_MS = 15 * 60_000;
 
@@ -1158,7 +1159,7 @@ export class DeskEngine {
     const fresh: OpeningSignal[] = [];
     for (const state of await tracker.poll(now, this.solUsd)) {
       const launch = feed?.recent(now).find(l => l.mint === state.mint) ?? null, ctx = { mint: state.mint, symbol: state.symbol };
-      const block = launch?.rug ?? (launch?.ca.status === 'IMPERSONATOR' ? launch.ca.detail : null) ?? this.launchCopycats.get(state.mint)
+      const block = launch?.rug ?? (launch?.ca.status === 'IMPERSONATOR' ? launch.ca.detail : null) ?? this.launchCopycats.get(state.mint) ?? brandName(state.symbol, state.name)
         ?? await this.launchCopycat({ mint: state.mint, name: state.name, symbol: state.symbol, at: state.at });
       if (block) { this.event('FILTERED', `OPEN screen: ${state.symbol} broke out (${state.detail}) but ${block} — no alert, never bought`, ctx); continue; }
       const signal = { state, launch, at: now };
@@ -1222,7 +1223,8 @@ export class DeskEngine {
     for (const s of await tracker.poll(now, quoteUsd)) {
       const launch = this.launchList.get(s.mint) ?? d.launches?.recent(now).find(l => l.mint === s.mint) ?? null, ctx = { mint: s.mint, symbol: s.symbol };
       const label = s.symbol ?? `${s.mint.slice(0, 4)}…${s.mint.slice(-4)}`;
-      const block = launch?.rug ?? (launch?.ca.status === 'IMPERSONATOR' ? launch.ca.detail : null) ?? this.launchCopycats.get(s.mint) ?? null;
+      const block = launch?.rug ?? (launch?.ca.status === 'IMPERSONATOR' ? launch.ca.detail : null) ?? this.launchCopycats.get(s.mint)
+        ?? brandName(s.symbol, launch?.name, this.candidates.get(s.mint)?.name) ?? null;
       if (block) { this.event('FILTERED', `GOLDEN POCKET: ${label} filled (${s.entry.detail}) but ${block} — no alert, never bought`, ctx); continue; }
       // Fills of a pattern GOLDEN does not buy (the retest, unless switched on) are shown, never alerted.
       if (!(this.strategies.GOLDEN.entryKinds ?? ['ONLY_UP']).includes(s.entry.kind)) { this.event('WATCHLIST', `GOLDEN POCKET (shown only): ${label} · ${s.entry.detail}`, ctx); continue; }
@@ -1275,6 +1277,8 @@ export class DeskEngine {
         continue;
       }
       if (l.score < LAUNCH_ENTRY.minScore || this.launchCopycats.has(l.mint)) continue;
+      const brand = brandName(l.symbol, l.name);
+      if (brand) { this.launchCopycats.set(l.mint, brand); this.event('FILTERED', `LAUNCH radar: ${l.symbol} ${brand} — not shortlisted`, ctx); continue; }
       // A new launch named like a bigger, older token is a copycat: never shortlisted, never alerted (the FIX6900 clone
       // of 1 Oct came 8 minutes after the real one graduated; a restart had cleared the radar's memory of it).
       const copy = await this.launchCopycat(l);
@@ -1465,6 +1469,9 @@ export class DeskEngine {
     const pool: Candidate[] = [];
     for (const c of list) {
       if (ledger.position(c.mint)) continue;
+      // Coins named after a real company are scams (owner, 5 Oct): no strategy buys them.
+      const brand = brandName(c.symbol, c.name);
+      if (brand) { note(c, brand); continue; }
       const holder = this.blockingHolder(c.mint, id), exitBlock = blockedExit(c.mint, c.updatedAt), skip = this.entrySkips.get(`${id}:${c.mint}`);
       if (holder) { note(c, `held by ${holder}`); continue; }
       if (exitBlock) { note(c, exitBlock); continue; }

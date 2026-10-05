@@ -48,7 +48,7 @@ test('rug features at graduation: insiders, snipers, the top 10, bots, sells int
     const history = creatorHistory(scan.launches, a, a.complete!);
     assert.deepEqual(history, { launches: 1, graduations: 0 });
     const f = gradFeatures(a, scan.trades.get('MINT_A')!, new Set(['BOT']), history);
-    assert.equal(f.chainBreaks, 0); assert.equal(f.trades, 5);
+    assert.equal(f.chainBreaks, 0); assert.equal(f.trades, 5); assert.equal(f.gradSeconds, 20 * 60);
     const near = (x: number | null, y: number) => assert.ok(x !== null && Math.abs(x - y) < 1e-9, `${x} vs ${y}`);
     near(f.insiderAtGrad, 0.11);   // creator 5 % + sniper 10 % − 4 % sold
     near(f.sniperAtGrad, 0.18);    // sniper 6 % + bot 12 %, creator excluded
@@ -67,6 +67,9 @@ test('a coin without a graduation has no features; a serial creator is one with 
   assert.equal(gradFeatures(l, [], new Set(), { launches: 3, graduations: 0 }).insiderAtGrad, null);
   const g = gradFeatures({ ...l, complete: T0 + 60_000 }, [], new Set(), { launches: 3, graduations: 0 });
   assert.equal(g.serialCreator, true); assert.equal(g.holdersAtGrad, 0); assert.equal(g.preGradSellShare, null);
+  // Curve trades observed after the migration message still count: the curve only trades before it completes.
+  const late = gradFeatures({ ...l, complete: T0 + 6_000 }, [{ obs: T0 + 9_000, ts: Math.floor(T0 / 1000), slot: 1, wallet: 'C', buy: true, lamports: 85e9, tok: 793e12, vSol: 115e9 }], new Set(), { launches: 0, graduations: 0 });
+  assert.equal(late.gradSeconds, 6); assert.equal(late.holdersAtGrad, 1); assert.ok(Math.abs(late.insiderAtGrad! - 0.793) < 1e-9, 'the creator bought the whole curve');
 });
 
 test('the 10-minute rug label from pool minute candles', () => {

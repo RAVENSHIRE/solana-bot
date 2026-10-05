@@ -598,6 +598,18 @@ test('CRASH enters a young pump in its first scan (no fair launch needed), exits
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
+test('a coin named after a real company is never bought (owner, 5 Oct: brand-name coins are scams)', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-brand-')), { shared } = world({ ...YOUNG_PUMP, baseToken: { address: MINT, symbol: 'NVDA', name: 'NVIDIA AI' } }, 'insider');
+  try {
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    engine.start(); await engine.pulse();
+    const view = engine.status({ connected: false, address: null });
+    assert.equal(view.positions.length, 0, 'CRASH signals it, but no strategy buys it');
+    assert.equal(view.candidates[0]!.crash!.signal, true);
+    assert.match(view.candidates[0]!.entryNotes!.CRASH!, /^BRAND_NAME: "nvidia" names NVIDIA/);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
 test('with the optional profit lock configured, CRASH locks the profit when a +60% spike fades to +40%', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-lock-')), { w, shared } = world(YOUNG_PUMP, 'insider');
   try {
@@ -1317,7 +1329,7 @@ test('GOLDEN POCKET: an only-up fill on a fresh pool is alerted, bought in TEST 
     assert.deepEqual(fresh.map(f => f.symbol), ['ABC'], 'the retest is not a GOLDEN entry by default');
     assert.deepEqual(alerts, ['GOLDEN POCKET: ABC at $112.0K'], 'the pool that opened at 109× its graduation value is not alerted');
     assert.match(bodies[0]!, /pool opened at 1\.1× its graduation value/); assert.match(bodies[0]!, /Not a qualified call/);
-    assert.ok(engine.events.list().some(e => /^GOLDEN POCKET: RUG filled .* but its pool opened at 109\.0× its graduation value \(> 10×\) — no alert, never bought$/.test(e.message)));
+    assert.ok(engine.events.list().some(e => /^GOLDEN POCKET: RUG filled .* but its pool opened at 109\.0× its graduation value \(> 3×\) — no alert, never bought$/.test(e.message)));
     assert.ok(engine.events.list().some(e => /^GOLDEN POCKET \(shown only\): RET · \$162\.8K/.test(e.message)));
     await engine.pulse();
     let view = engine.status({ connected: false, address: null });

@@ -19,7 +19,8 @@ export const RUG_THRESHOLDS = Object.freeze({ insiderAtGrad: 0.10, top10AtGrad: 
 export const RUG_LABEL = Object.freeze({ dropPct: 70, withinMin: 10 });
 
 export interface CurveLaunch { mint: string; created: number; createdSlot: number | null; creator: string | null; complete: number | null }
-export interface CurveTrade { obs: number; slot: number; wallet: string; buy: boolean; lamports: number; tok: number; vSol: number }
+/** `ts`: chain time in seconds. */
+export interface CurveTrade { obs: number; ts: number; slot: number; wallet: string; buy: boolean; lamports: number; tok: number; vSol: number }
 
 export interface LedgerScan {
   launches: Map<string, CurveLaunch>;
@@ -85,7 +86,7 @@ export function scanLedger(files: readonly string[], mints: ReadonlySet<string>,
         if (e && buy && obs <= e.created + windowMs) e.spent.set(wallet, (e.spent.get(wallet) ?? 0) + lamports);
         if (mints.has(mint)) {
           const list = trades.get(mint) ?? [];
-          list.push({ obs, slot: (r[3] as number | null) ?? 0, wallet, buy, lamports, tok: r[8] as number, vSol: r[9] as number });
+          list.push({ obs, ts: (r[2] as number | null) ?? Math.floor(obs / 1000), slot: (r[3] as number | null) ?? 0, wallet, buy, lamports, tok: r[8] as number, vSol: r[9] as number });
           trades.set(mint, list);
         }
       } else {
@@ -107,6 +108,8 @@ export function botList(scan: Pick<LedgerScan, 'topBuyer'>, minLaunches = BOT_LI
 
 export interface GradFeatures {
   gradAt: number | null;
+  /** From the creation to the graduation, observed (descriptive; not pre-registered). 5 Oct: COMEPUMP 6 s, Catoppy 1 s, ROOMS 3 s. */
+  gradSeconds: number | null;
   /** Curve trades up to the graduation, and how many did not follow from an earlier curve state (missed trades). */
   trades: number; chainBreaks: number;
   insiderAtGrad: number | null; top10AtGrad: number | null; sniperAtGrad: number | null; botAtGrad: number | null;
@@ -122,11 +125,15 @@ export function creatorHistory(launches: ReadonlyMap<string, CurveLaunch>, l: Cu
   return { launches: n, graduations: g };
 }
 
-/** RUG-AT-ENTRY's seven features at the graduation, from the curve trades. */
+/**
+ * RUG-AT-ENTRY's seven features at the graduation, from the curve trades. Every curve trade is before the graduation
+ * (the curve stops trading when it completes), so all of them count: their observed time can be seconds after the
+ * migration message (5 Oct: COMEPUMP's 26 curve trades arrived after PumpPortal reported the pool).
+ */
 export function gradFeatures(l: CurveLaunch, all: readonly CurveTrade[], bots: ReadonlySet<string>, history: { launches: number; graduations: number }): GradFeatures {
-  const g = l.complete, base = { gradAt: g, creatorLaunches: history.launches, creatorGraduations: history.graduations };
+  const g = l.complete, base = { gradAt: g, gradSeconds: g === null ? null : Math.max(0, Math.round((g - l.created) / 1000)), creatorLaunches: history.launches, creatorGraduations: history.graduations };
   if (g === null) return { ...base, trades: 0, chainBreaks: 0, insiderAtGrad: null, top10AtGrad: null, sniperAtGrad: null, botAtGrad: null, preGradSellShare: null, serialCreator: null, holdersAtGrad: null };
-  const seen = all.filter(t => t.obs <= g), net = new Map<string, number>(), states = new Set<number>();
+  const seen = all, net = new Map<string, number>(), states = new Set<number>(), lastTs = seen.length ? Math.max(...seen.map(t => t.ts)) : 0;
   const slot0 = l.createdSlot ?? (seen.length ? Math.min(...seen.map(t => t.slot)) : 0);
   const insiders = new Set<string>(l.creator ? [l.creator] : []), snipers = new Set<string>();
   let breaks = 0, buyLam = 0, sellLam = 0;
@@ -137,7 +144,7 @@ export function gradFeatures(l: CurveLaunch, all: readonly CurveTrade[], bots: R
     net.set(t.wallet, (net.get(t.wallet) ?? 0) + (t.buy ? t.tok : -t.tok));
     if (t.buy && t.slot <= slot0 + 1) insiders.add(t.wallet);
     if (t.buy && t.slot <= slot0 + 2 && t.wallet !== l.creator) snipers.add(t.wallet);
-    if (t.obs > g - 120_000) { if (t.buy) buyLam += t.lamports; else sellLam += t.lamports; }
+    if (t.ts > lastTs - 120) { if (t.buy) buyLam += t.lamports; else sellLam += t.lamports; }
   }
   const held = [...net].filter(([, v]) => v > 0), share = (ws: Iterable<string>) => { let s = 0; for (const w of ws) s += Math.max(0, net.get(w) ?? 0); return s / SUPPLY_RAW; };
   const top10 = held.map(([, v]) => v).sort((a, b) => b - a).slice(0, 10).reduce((a, v) => a + v, 0) / SUPPLY_RAW;

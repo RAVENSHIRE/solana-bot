@@ -325,8 +325,12 @@ export const GOLDEN_RULES: Readonly<PocketRules> = Object.freeze({
   stopBelowPct: 5, retestWindowMin: 20, maxPatternMin: 60, onlyUp: { bars: 2, ref: 2, chasePct: 12, windowMin: 10, stopBelowPct: 5 }, floorUsd: 0 });
 /** GOLDEN POCKET exits: the pattern's stop (per position), a trailing stop, out after an hour; a retest sells just under the breakout high. */
 export const GOLDEN_EXIT = Object.freeze({ trailing: { activationPct: 50, stopPct: 25 }, maxHoldMin: 60, belowResistancePct: 5,
-  /** No alert and no entry when the pool's first minute topped this many times its graduation value (research P1, 5 Oct). */
-  maxPoolJumpX: 10 });
+  /**
+   * No alert and no entry when the pool's first minute topped this many times its graduation value: 10× from research P1
+   * (5 Oct, the ~100× rugs), then 3× for the owner the same night ("entries at $360K are too big for day scouting";
+   * Addidas opened at 7.2×, NVIDIA 6.6×). 3× is research P2's group; the shadow records keep every fill for comparison.
+   */
+  maxPoolJumpX: 3 });
 
 /** The opening screen's price rules (see opening.ts), shared with the OPEN strategy's floor. */
 export const OPENING_RULES = Object.freeze({ minOpenUsd: 10_000, floorUsd: 6_700, breakoutOverOpen: 1.3 });
