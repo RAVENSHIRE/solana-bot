@@ -39,3 +39,19 @@ known at 13:07:57 UTC, evidence `al_1302f2d0…`, data UNKNOWN, with no market c
 | # | Hypothesis | Feature (no look-ahead) | Decision | Passes if | Cost |
 | --- | --- | --- | --- | --- | --- |
 | P1 | **A pool that opens far above its graduation value is a rug.** New feature `poolJumpX`: the high of the first pool minute divided by the graduation market cap (the last curve state before the `X` record) | at the G1 decision point, after the first pool minute | as an exclusion on G1: G1 with `poolJumpX` ≥ 10 removed beats G1, and the excluded group's +1 h mean is below −50 % on ≥ 30 cases | needs pool prices (gate gap 5), like G1 |
+
+## The contrasting case, the same day: GOLDEN on "Using" (`6MLPGnAi…dpump`, `CASE-2026-10-05-USING.md`)
+
+Alert at 12:54:27 UTC, 75 s after graduation (12:53:12): "first 2 candles only up to $42.7K → back to $37.2K, within
+12 % of candle 2 ($36.7K), stop $34.8K". Market cap $42.0K, liquidity $16.7K, 5-minute volume $22.8K, 5 minutes −16 %.
+Data DEGRADED (15 issues), oldest input 66 s. The owner: no rug, and "would have been a great play if a bot entered
+right when sent to ntfy". The outcome is not in the ledger (pool prices are not observed, gate gap 5).
+
+What separates it from the $5.25M alert: **its pool opened near its graduation value** (about $42K against
+411 SOL at graduation), not 100× above it, and the entry was a real dip (−13 % from the $42.7K high). Two cases do
+not make a rule, but they point at the same split as P1. GOLDEN's −33 % backtest already used bot-speed fills, so
+"a bot would have made it" has to be measured, not assumed.
+
+| # | Hypothesis | Test | Passes if | Cost |
+| --- | --- | --- | --- | --- |
+| P2 | **GOLDEN only-up works only near the graduation value.** Shadow-trade (no money) every only-up fill with `poolJumpX` ≤ 3, at bot speed (2 s after the alert) and at phone speed (45 s), with GOLDEN's own exits | `SIG`/`RES`-style shadow records for the golden tracker, judged on the pool's minute candles | after ≥ 30 shadow trades: mean after costs > 0 at the fill speed the desk would use, and the `poolJumpX` > 3 group is worse | the golden tracker writes shadow records (it already has the pool candles); no new feed |
