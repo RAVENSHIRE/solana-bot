@@ -78,3 +78,16 @@ test('CTO-05: X account facts read after the decision time do not leak into its 
   const at600 = features(l, 600, { creatorLaunches: 0, creatorGraduations: 0 }, []);
   assert.equal(at600.xFollowers, 5_000);
 });
+
+test('CTO-06 (Q-19): a failed event-log write is retried on the next flush, and no history row is lost', async () => {
+  const { EventLog } = await import('../src/desk/events');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cto-events-')), dir = path.join(root, 'later'), file = path.join(dir, 'events-PAPER.json');
+  const log = new EventLog('PAPER', file, () => 1_000);
+  log.add('SYSTEM', 'first');
+  await assert.rejects(log.flush(), 'the folder does not exist yet');
+  await fs.mkdir(dir);
+  await log.flush();
+  assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).length, 1, 'retried without a new event');
+  const history = (await fs.readFile(path.join(dir, 'events-PAPER.log.jsonl'), 'utf8')).trim().split('\n');
+  assert.equal(history.length, 1);
+});
