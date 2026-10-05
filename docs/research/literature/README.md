@@ -159,7 +159,8 @@ count in the Holm family.
 | F1b | **INFO coin after graduation**: an INFO coin whose curve completes within 6 h of its INFO, excluding a pool that opens ≥ 10× its graduation value (P1) | the `X`/`G` record's obs (like G1) | 45 s later, on the pump-amm pool | +100 % target, −30 % stop, 60 min and 24 h | post-graduation pool prices (gate gap 5) |
 
 A coin can be traded by both: F1a in its first 30 minutes, then F1b after graduation. They are judged separately.
-CRWLR and Web are known cases and are excluded from both.
+CRWLR and Web are known cases and are excluded from both. First look at all 243 INFO flags, and F1c (the 40–160 SOL
+band, judged only on later flags): [INFO-SCORECARD-2026-10-05.md](INFO-SCORECARD-2026-10-05.md).
 
 Kept out of the gate for now:
 - W1 (tracked wallets) waits for the wallet addresses.
