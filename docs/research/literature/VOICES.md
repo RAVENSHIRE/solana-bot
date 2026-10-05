@@ -70,3 +70,27 @@ grows from the ledger itself, and every voice has a measured track record.
 
 The video's main points in a few lines, or its transcript as a file in the repo. Then a card can be written from
 it. Also TJR's exact X handle, and any voices you trust, for `voices.json`.
+
+## Case of 5 Oct: Sir Cat, a pre-announced launch (owner's ledger extract)
+
+What the ledger shows (`ev-20261005-10`, launch index 630):
+
+- A pump.fun launch at **10:28 UTC** linked `@Sir_Cat_solana` in its metadata.
+- The account at 10:31: blue check (individual), **53,766 followers**, following 128, **6 posts**, joined 6 Jan 2022.
+  Its bio says "$SirCat will launch at **16:00 UTC, Oct. 5th**".
+- Its four posts, at 04:00, 06:00, 08:00 and 10:00 UTC, all announce the 16:00 launch with "Drop $sol address, first
+  100 wallets…". None contains a contract address (`mint 0`, `ca null`).
+
+So the 10:28 launch came **5.5 h before the announced time**, and the account never posted its address. Most likely
+it is a copycat riding the announcement. The desk was right not to send an INFO: the rule "only the project's own CA
+post counts" (`calls.ts`) is what blocked it. Red flags on the account itself: 53K followers with only 6 posts, an
+account from 2022 repurposed for a launch, and "drop your address, first 100 wallets" reply farming. The
+@massivedotgg post of 3 Oct ("this is massive. 10.10.26 Drop your $SOL address") follows the same pattern.
+
+What Raven lacks: the observer reads the account only when a launch links it, and only up to +30 min. **The real
+launch at 16:00 is outside every read** unless a new launch links the account again.
+
+| # | Hypothesis | Test | Passes if | Cost |
+| --- | --- | --- | --- | --- |
+| V5 | Pre-announced launches: when an account's bio or posts announce a launch time ("launch at HH:MM UTC"), the launch that the account itself confirms with a CA post within 30 min of that time beats the average launch; launches linking the account **before** the announced time (copycats) rug | parse announced times from `XP` bio and `XT` text; re-read the account at T − 5 min, T, T + 2 min, T + 5 min, T + 15 min; label launches confirmed / early copycat | confirmed group's +1 h mean after costs > 0 on ≥ 30 cases; the early-copycat group's mean is below the `all` group's | low: two parsers and a scheduled read |
+| V6 | Reply farming ("drop your address", "first 100 wallets") in the account's posts before launch predicts a worse +24 h outcome | a boolean feature from `XT` text by T | the flagged group's +24 h mean is below the rest on ≥ 100 launches each | low |
