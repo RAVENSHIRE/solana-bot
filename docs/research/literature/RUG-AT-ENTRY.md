@@ -56,3 +56,46 @@ and exits (`exitReason` on SELL rows since 22:46 UTC) or pool candles.
 **The first step needs no new strategy.** Compute the seven features for every CRASH signal since 5 Oct 21:00 UTC,
 including CRYPTO, Catoppy, ROOMS and COMEPUMP, and show rugs against non-rugs. That is descriptive and judges
 nothing. RG1 then runs on signals from the moment the features are recorded.
+
+## Step 1 result (CTO, 5 Oct 23:30 UTC; `npm run research:rug-entry`, descriptive only)
+
+**Bot list R**, frozen in `bots-R.json`: 62 wallets from 74,276 launches before 5 Oct 17:00 UTC.
+- The top buyer is the wallet with the most SOL bought in the first 120 s, in at least 100 launches.
+- Accepted as the definition: it matches M2b's decision time.
+- Most frequent: `BwWK17…de6s` with 14,189 launches.
+
+**CRASH signals since 21:00 UTC.** Label: −70 % or worse within 10 min, from pool candles.
+
+| Coin | Label | Insider | Top 10 | Sniper | Sell share | Holders | s to graduation |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| COMEPUMP | RUG | 79 % | 80 % | 80 % | 7 % | 21 | 6 |
+| CRYPTO | RUG | 15 % | 18 % | 15 % | 37 % | 375 | 137 |
+| Catoppy | RUG | no curve trades recorded | | | | | 1 |
+| ROOMS | RUG | 78 % | 78 % | 74 % | 31 % | 21 | 3 |
+| PC | RUG | 79 % | 79 % | 79 % | 0 % | 6 | 0 |
+| INUGENCY | no (CRASH +124 %) | 79 % | 79 % | 79 % | 0 % | 7 | 1 |
+| cityofagents | no | 18 % | 37 % | 14 % | 100 % | 171 | 8,415 |
+
+**Reading (no judgement: 5 rugs, far below RG1's 20):**
+- **Instant graduations dominate.** Five of seven graduated 0–6 s after creation, with about 79 % of supply in
+  insider hands. That is the whole for-sale share of the curve: the creator's bundle bought out the curve at launch.
+  Four of those five rugged within 10 min. CRASH then buys them 1–4 min later as "fresh graduations".
+- **No single feature separates these few cases.** `insiderAtGrad` ≥ 10 % flags every coin, including both
+  non-rugs, and `holdersAtGrad` < 150 flags INUGENCY (+124 %) too.
+- **Coverage gap.** Catoppy has no curve trades, and CRYPTO has 53 chain breaks. Instant graduations arrive after the
+  migration message. Observer completeness (a gRPC feed is planned) is part of RG1's validity.
+
+**Added to RG1 (5 Oct 23:40 UTC).** The threshold was chosen *after* seeing these 7 coins, so it is judged only on
+CRASH signals from now on. These 7 coins are known cases and are excluded.
+
+| Feature | Definition | Threshold |
+| --- | --- | --- |
+| `gradSeconds` | graduation time (`X`) − creation time (`C`/`PC`), in seconds | ≤ 30 ("instant graduation, the curve bought out at launch") |
+
+RG1 now has 8 features, with Holm across all 8.
+
+**Owner decisions recorded:**
+- Brand-name coins (`src/desk/brands.ts`) are never bought and never reach the phone. They are still recorded, so the
+  research rows keep them.
+- GOLDEN's live pool-jump ceiling is now 3×. P2's shadow records still cover every fill, so the > 3× comparison group
+  stays measurable.
