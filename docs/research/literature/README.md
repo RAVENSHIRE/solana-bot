@@ -63,6 +63,10 @@ over all rules in the run, and drops a rule that is carried by its best 1 % of t
    periods do not overlap before the first CALL.
 4. **One split, no gap between the periods.** A 60-minute hold from the last tuning launches can overlap the first
    validation launches. A one-hour embargo at the cut would remove that.
+5. **No price after graduation.** A held coin that graduates is sold at the graduation price in the simulation
+   (`direct.ts`), so a coin that graduates and then runs on the pool scores about 0 %. The 5 Oct case "Web"
+   graduated 56 s after launch, and every rule judged it at −0.36 % ([CASE-2026-10-05-WEB.md](CASE-2026-10-05-WEB.md)).
+   Fix: post-graduation pool prices, at least as labels (G1).
 
 ### Hypotheses (from the desk's own design, not the literature)
 
@@ -114,6 +118,10 @@ use the existing exit menu, chosen on the tuning period as usual.
 | R1 | `steady300`: steady, broadly held curves | 300 s (a new catalog delay; 300 is already a `DECISION_S` time) | `progress` 0.15–0.60 · `velocity60` > 0 and ≤ 0.15 (rising under 15 % of the curve per minute) · `effectiveBuyers` ≥ 10 · `top1` < 0.15 · `top5` < 0.45 · `devSold` false · `sellShare` < 0.45 · not `mayhem` · not `gapInWindow` | The 45 s delay costs most on fast curves: the price runs while the owner opens FOMO. A slow, rising curve loses little in 45 s. By 300 s most sniper and bundle dumps have happened, and broad holding with the dev still in is the organic profile without the sprint. My inference: the best rule today is at the latest delay offered (120 s), which fits "later is better at phone speed" | `EXITS` menu: +40/+100 %, stop −20/−35 %/none, 15/60 min | ≥ 100 later trades, realistically 300+ (mean ≥ +6.6 %). Count the matches in the last 48 h first; under 250 means the window must grow | none new; one catalog delay |
 | R2 | `organicXClean`: the best rule minus its rug markers | 120 s | `organic` and `hasX` (today's best group), excluding `creatorLaunches` ≥ 2 with `creatorGraduations` = 0 (serial creators, H1), and excluding `top5` ≥ 0.6 (concentration, H2) | It starts closest (−0.9 %, 1 point of hit rate short of break-even). The exclusions remove launches whose losses are structural (repeat creators who never graduate, a few wallets holding the supply). It only needs to remove losers faster than winners | Fixed in advance to today's best: +100 % target, −20 % stop, 60 min (no exit search, which also removes tuning freedom) | It loses sample (95 → fewer). At ~5 later trades an hour, n ≈ 300 needs about 6 days of data and n ≈ 1,000 about 3 weeks | none new |
 | R3 | `ownCaSeen`: the project posted its own CA, as the live observer saw it | 420 s (after the +6 min X read plus fetch time) | `organic` and a new feature `xCaPostSeen`: an `XT` record by the launch's own linked handle, with `mint` = 1, **observed (obs) ≤ T** and posted ≤ T · and `xFollowers` ≥ 300 from an `XP` read with obs ≤ T | A team that posts its own address is the strongest non-chart signal in the desk's cases (AGENCY; the Sir Cat copycat had no own CA post and was rightly skipped). Using the read time removes the look-ahead in `xCaPost` (gate gap 2) | `EXITS` menu | Probably small, because own CA posts by 6 min are rare. Count them in the ledger first; likely 1–2 weeks of data for n ≥ 100 | one new feature with a live-parity test, one catalog delay |
+
+**R1–R3 cannot catch fast graduates.** A coin like "Web" (5 Oct) has already graduated at 120–420 s, so it is
+not simulated at all. G1 in [CASE-2026-10-05-WEB.md](CASE-2026-10-05-WEB.md) (a decision at graduation, priced on
+the pool) is the candidate for that class. It needs post-graduation prices first (gate gap 5).
 
 Kept out of the gate for now:
 - W1 (tracked wallets) waits for the wallet addresses.
