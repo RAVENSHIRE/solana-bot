@@ -165,3 +165,25 @@ test('CTO-10 (Q-11): the requalification heap is a share of free memory, capped,
   assert.equal(qualifyHeapMb(1_700 * MB), 1_020, 'Raven with 1.7 GB free: 60 % of it, not 1.5 GB');
   assert.equal(qualifyHeapMb(600 * MB), null, 'under ~850 MB free: postponed, the previous qualification stays');
 });
+
+test('CTO-11 (Q-16): by default no desk alert reaches the phone; it is still recorded once; a selected kind is sent', async () => {
+  const { DEFAULT_ALERTS } = await import('../src/desk/engine');
+  assert.equal(DEFAULT_ALERTS.size, 0, 'owner, 2 Oct: nothing on the phone unless chosen');
+  const proto = DeskEngine.prototype as unknown as Record<string, (...a: unknown[]) => unknown>;
+  const fake = (alerts?: Set<string>) => {
+    const sent: string[] = [];
+    const e: Record<string, unknown> = { d: { notify: async (t: string) => { sent.push(t); }, alerts, research: null, mode: 'PAPER' }, launchAlerts: new Map(), saveAlertMemory: () => undefined };
+    for (const m of ['alertOnce', 'recordAlert']) e[m] = proto[m]!.bind(e);
+    return { e: e as { alertOnce: (k: string, t: string, b: string, kind: string, phone?: boolean) => void; launchAlerts: Map<string, number> }, sent };
+  };
+  const quiet = fake();
+  for (const kind of ['golden', 'rug', 'open', 'launch', 'radar']) quiet.e.alertOnce(`${kind}:MINT`, `${kind} title`, 'body', kind);
+  await new Promise(r => setImmediate(r));
+  assert.deepEqual(quiet.sent, [], 'DEFAULT_ALERTS: nothing sent');
+  assert.equal(quiet.e.launchAlerts.size, 5, 'each alert is still remembered (dashboard, event log)');
+  const chosen = fake(new Set(['rug']));
+  chosen.e.alertOnce('rug:MINT', 'RUG', 'b', 'rug'); chosen.e.alertOnce('rug:MINT', 'RUG again', 'b', 'rug'); chosen.e.alertOnce('radar:MINT', 'radar', 'b', 'radar');
+  chosen.e.alertOnce('rug:OTHER', 'RUG over the cap', 'b', 'rug', false);
+  await new Promise(r => setImmediate(r));
+  assert.deepEqual(chosen.sent, ['RUG'], 'once per key, only selected kinds, never when the caller says no phone');
+});
