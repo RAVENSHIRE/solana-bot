@@ -74,7 +74,9 @@ blocked in this session.
 - correction (owner, 5 Oct): it **is** a pump.fun coin ("Human", Team Human), even though the address does not end
   in `pump`, so a missing `pump` suffix proves nothing. More likely, **the observer was not running**: the
   owner's INFO list has no INFO at all between 4 Oct 00:44 and 5 Oct 08:57 UTC, and the launch at 22:30 on 4 Oct
-  falls inside that gap. The case extract (whether a `PC` record exists for this mint) would confirm it. A launch
+  falls inside that gap. **Confirmed by the owner's file listing:** the ledger has `ev-20261004-00` (closed only at 10:56 local, 08:56 UTC on
+  5 Oct), then nothing until `ev-20261005-08`. The observer stopped during the first hour of 4 Oct and restarted
+  about 32 h later, with no alert to the owner. A launch
   INFO also needs the project's own account to post the CA;
 - the verified-coin INFO needs ≥ $1M market cap, a Jupiter check, a place on Jupiter's trending/organic/traded lists
   (or the watchlist), **and** +15 % in the hour. A coin ranging at $500–800K fails on market cap and on movement.

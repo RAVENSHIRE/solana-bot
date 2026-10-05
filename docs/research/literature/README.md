@@ -63,6 +63,12 @@ over all rules in the run, and drops a rule that is carried by its best 1 % of t
    periods do not overlap before the first CALL.
 4. **One split, no gap between the periods.** A 60-minute hold from the last tuning launches can overlap the first
    validation launches. A one-hour embargo at the cut would remove that.
+6. **Observer downtime went unnoticed for ~32 h.** No ledger file exists between `ev-20261004-00` and
+   `ev-20261005-08` (owner's listing, 5 Oct). The observer stopped in the first hour of 4 Oct UTC and restarted at
+   about 08:56 UTC on 5 Oct, and no alert reached the owner. A daily ALIVE message finds this a day late. The fix:
+   a dead-man check from a separate process (the desk reading the observer's `/health`) that sends ntfy once the
+   ledger has been silent for more than 10 minutes. Data from that window is missing, not zero: the gate must not
+   treat it as quiet hours.
 5. **No price after graduation.** A held coin that graduates is sold at the graduation price in the simulation
    (`direct.ts`), so a coin that graduates and then runs on the pool scores about 0 %. The 5 Oct case "Web"
    graduated 56 s after launch, and every rule judged it at −0.36 % ([CASE-2026-10-05-WEB.md](CASE-2026-10-05-WEB.md)).
