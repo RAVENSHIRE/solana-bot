@@ -13,6 +13,7 @@ evidence.
 | 12:27:14 | +21 s | X read: paid blue check (individual), **2 followers**, 0 posts, account **2.4 h old** |
 | 12:27:36 | +43 s | @crwlronsol posts "ca:" followed by this address on a new line |
 | 12:26–12:28 | | first minutes: high 99 SOL, back to 56–76, then 120 |
+| 12:28:24 | +91 s | **OPEN alert to the phone** (the owner's "called at 12K"): "$9.0K → $13.5K in 91 s (×1.5); $10.1K open → low $8.8K → $13.5K: broke above the opening high; **insiders hold 39.2 %: dev 12.5 % + 3 wallets in the creation slot**"; data UNKNOWN (the empty evidence line, FLAG-LEDGER quick win 4) |
 | 12:29:32 | +2.7 min | **INFO sent** at 99.6 SOL (own CA post, blue check) |
 | 12:31 | | low **53 SOL** (−47 % from the INFO) |
 | 12:44 | | 197 SOL; the 15-min rule exits at TIME, +27 % at best, −14 % for 60 s entries |
@@ -24,8 +25,11 @@ Over the extract: 2,009 buys and 1,460 sells. The project posted a 50M-token Str
 
 ## What it shows
 
-1. **The call was INFO, as with Web.** A project account posted its own CA, and a paid check was enough
-   (2 followers). Two of the owner's cases today came through this one path. The owner sends the winners, so the
+1. **The phone got OPEN first (12:28:24, $13.5K), then INFO (12:29:32, $11.8K).** OPEN is the path that lost all
+   7 TEST trades. INFO came through a project account posting its own CA with a paid check (2 followers), the same
+   path as Web. **The insider line was a bundle warning that did not come true here.** Three wallets bought in the
+   creation slot (about 27 %, plus the dev's 12.5 %), and the coin still ran 4×. That is one counterexample to H3
+   (bundles mark rugs), not a refutation. The owner sends the winners, so the
    losing INFOs are not in view. The INFO scorecard below gives the denominator.
 2. **The winner needed an hour and survived a −47 % drop.** The gate's exits (15–60 min, stops at −20/−25 %) would
    have stopped out at 12:31 or sold at TIME for a small gain. Coins like this pay only with long holds and no
@@ -49,4 +53,5 @@ Over the extract: 2,009 buys and 1,460 sells. The project posted a 50M-token Str
 | # | Hypothesis | Test | Passes if | Cost |
 | --- | --- | --- | --- | --- |
 | F1′ | **INFO flags pay with a long hold, not with the gate's short exits** (F1 with exits fixed in advance): buy 45 s after the INFO; exit at graduation, at +6 h, or at −60 % | every `INFO` record, curve candles from the ledger (pool after graduation once gate gap 5 is closed) | ≥ 100 INFO flags, mean after costs > 0, bootstrap 90 % interval above 0, and true without the best 2 % | nothing new up to graduation |
+| O1 | **OPEN alerts, scored like INFO**: every OPEN breakout the desk recorded, bought 45 s after the alert, with F1′'s long exits against OPEN's own | the desk's recorded breakouts ("every breakout is still shown and recorded"), curve candles from the ledger | as F1′; and OPEN with insider ≥ 30 % against < 30 % | the desk's breakout records joined to the ledger: a script for the CTO |
 | I2 | **Young paid-check accounts (under 24 h, under 100 followers) are no worse than established ones among INFO flags**: CRWLR (2.4 h, 2 followers) and Web (1.4 h, 64) both ran | INFO split by `xAccountAgeH` and followers at the read | either way, it decides whether INFO should require reach | as F1′ |
