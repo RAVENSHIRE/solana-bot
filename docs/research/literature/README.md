@@ -119,11 +119,47 @@ use the existing exit menu, chosen on the tuning period as usual.
 | R2 | `organicXClean`: the best rule minus its rug markers | 120 s | `organic` and `hasX` (today's best group), excluding `creatorLaunches` ≥ 2 with `creatorGraduations` = 0 (serial creators, H1), and excluding `top5` ≥ 0.6 (concentration, H2) | It starts closest (−0.9 %, 1 point of hit rate short of break-even). The exclusions remove launches whose losses are structural (repeat creators who never graduate, a few wallets holding the supply). It only needs to remove losers faster than winners | Fixed in advance to today's best: +100 % target, −20 % stop, 60 min (no exit search, which also removes tuning freedom) | It loses sample (95 → fewer). At ~5 later trades an hour, n ≈ 300 needs about 6 days of data and n ≈ 1,000 about 3 weeks | none new |
 | R3 | `ownCaSeen`: the project posted its own CA, as the live observer saw it | 420 s (after the +6 min X read plus fetch time) | `organic` and a new feature `xCaPostSeen`: an `XT` record by the launch's own linked handle, with `mint` = 1, **observed (obs) ≤ T** and posted ≤ T · and `xFollowers` ≥ 300 from an `XP` read with obs ≤ T | A team that posts its own address is the strongest non-chart signal in the desk's cases (AGENCY; the Sir Cat copycat had no own CA post and was rightly skipped). Using the read time removes the look-ahead in `xCaPost` (gate gap 2) | `EXITS` menu | Probably small, because own CA posts by 6 min are rare. Count them in the ledger first; likely 1–2 weeks of data for n ≥ 100 | one new feature with a live-parity test, one catalog delay |
 
+**Results, gate run of 5 Oct 13:25 UTC** (main session; 48 h, 26,295 normal launches, phone fill 45 s, Holm over 42
+rules): 0 of 42 qualified.
+
+| Rule | Tuning | Later | Hit vs needed | Luck p | Status |
+| --- | --- | --- | --- | --- | --- |
+| R1 `steady300` (chosen exit: +40 %, −20 %, 60 min) | n 25, −18.3 % | n 15, +1.9 % (−0.3 % without its best trade) | 47 % vs 43 % | 0.41 | **Undecided: too rare for 48 h.** About 40 matches per 48 h (≈ 20 a day). 100 later trades means ≈ 250 matches in the window (later = 40 %), so **≈ 13 days of data**. Re-judge then, unchanged |
+| R2 `organicXClean` (fixed +100 %, −20 %, 60 min) | n 160, −1.5 % | n 42, −8.4 % | 14 % vs 22 % | 0.91 | **Failed as registered.** Worse than `organicX` alone. Do not tune it |
+| R3 `ownCaSeen` | — | — | — | — | **Dropped in this form** (owner, 5 Oct): a CA in the bio or a post is not a safe signal, rather the opposite, unless the project is an established brand or company. What is kept is the inverse: **R3-inv**, own CA in the bio or a post as a *risk flag*, unless the brand is established. "Established" is not yet defined as a feature: it needs a definition fixed before testing, for example a gold or grey check, or an account older than 180 days with ≥ 10K followers |
+
+Best other rule in the run: `sprintBroad@60s`, −3.6 % later (n 195).
+
 **R1–R3 cannot catch fast graduates.** A coin like "Web" (5 Oct) has already graduated at 120–420 s, so it is
 not simulated at all. G1 in [CASE-2026-10-05-WEB.md](CASE-2026-10-05-WEB.md) (a decision at graduation, priced on
 the pool) is the candidate for that class. It needs post-graduation prices first (gate gap 5). The 5 Oct case "Using"
 ([CASE-2026-10-05-USING.md](CASE-2026-10-05-USING.md)) adds a cheap feature family, tweet coins (T1, T2), and a
-test of the dev-sold filter (D1).
+test of the dev-sold filter (D1). The GOLDEN POCKET alerts on $1M+ openers
+([CASE-2026-10-05-GOLDEN.md](CASE-2026-10-05-GOLDEN.md)) add an exclusion for G1 (P1). CRWLR ([CASE-2026-10-05-CRWLR.md](CASE-2026-10-05-CRWLR.md)): an OPEN alert at $13.5K, then an INFO at $12K, that
+ran 4× to graduation through a −47 % dip; a CA-detection bug (`xCaPost` misses a CA on its own line); F1′, I2.
+The execution path, ranked changes for the CTO:
+[EXECUTION.md](EXECUTION.md) (X1–X8).
+
+**Pre-registered 5 Oct 13:05 UTC (fast graduates).** Both rules count in the Holm family when tested, and neither
+threshold moves after this date. Neither can be tested until the gate has post-graduation pool prices (gate gap 5),
+which is code work for the main session.
+
+| # | Rule | Decision | Definition (no look-ahead) | Exits | Gate |
+| --- | --- | --- | --- | --- | --- |
+| G1 | Fast graduate, ≤ 180 s | at graduation (the `X`/`G` record's obs), filled 45 s later | curve completed ≤ 180 s after creation · `top1` < 0.10 · `effectiveBuyers` ≥ 30 at graduation · `devSold` false · not `mayhem` | +40/+100 % targets, −30 % stop, 60 min and 24 h, on pump-amm pool prices | standard gate on pool prices |
+| G1b | Fast graduate, ≤ 300 s | as G1 | as G1, completed ≤ 300 s after creation | as G1 | as G1 |
+
+**INFO as two strategies (owner, 5 Oct: "within the first 30 min, more time is more risk"; an INFO coin needs a
+check after graduation).** These replace F1/F1′ and are pre-registered on 5 Oct before scoring any INFO data. Both
+count in the Holm family.
+
+| # | Rule | Decision | Entry | Exits (fixed) | Data |
+| --- | --- | --- | --- | --- | --- |
+| F1a | **INFO, early trade**: every `INFO` (own CA post by the project account, checkmark or ≥ 1,000 followers) | the INFO record's obs | 45 s later (phone) and 2 s later (bot), on the curve | +100 % target, −35 % stop, **30 min max**; a graduation inside the hold sells at the graduation price | the ledger as it is (curve candles, `INFO`) |
+| F1b | **INFO coin after graduation**: an INFO coin whose curve completes within 6 h of its INFO, excluding a pool that opens ≥ 10× its graduation value (P1) | the `X`/`G` record's obs (like G1) | 45 s later, on the pump-amm pool | +100 % target, −30 % stop, 60 min and 24 h | post-graduation pool prices (gate gap 5) |
+
+A coin can be traded by both: F1a in its first 30 minutes, then F1b after graduation. They are judged separately.
+CRWLR and Web are known cases and are excluded from both.
 
 Kept out of the gate for now:
 - W1 (tracked wallets) waits for the wallet addresses.
