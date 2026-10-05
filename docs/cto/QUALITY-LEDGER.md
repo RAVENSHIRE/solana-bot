@@ -33,28 +33,33 @@ Severity: **P0** money or safety at risk · **P1** wrong data or silent failure 
 | Q-08 | P1 | Qualification | `src/research/qualify.ts:15, 47-66`, `src/research/rules.ts:42-47` | ~45 (group × delay) candidates, each with the best of 6 or 12 exits chosen on the tuning split, are each tested at "later mean > 0 with n ≥ 100". No correction for the number of candidates: with 45 tries, one passing by chance is likely. `forward` uses mean ≥ 0 after 30 live calls — the same, no interval. | Require the later-period mean's lower 95 % bound (bootstrap) > 0, Bonferroni/Holm across candidates, or a deflated Sharpe as the experiment engine already does (`src/research/experiments/`). Criteria change: the owner decides. | S | **FIXED** (owner yes, 3 Oct): bootstrap p-value with Holm over every rule of the run, and no rule carried by its best 1 % of trades; test luck |
 | Q-09 | P1 | Alert quality | `src/research/calls.ts:139, 164` | A live signal that cannot be filled is dropped without a `RES` record (`notFilled++` only), and when 50,000 signals are open new ones are never judged. The forward record — the input to the precision metric and to the gate's live check — only sees calls that filled. | Write `RES` with `reason: NOT_FILLED` (netPct null) and a `GAP` when the cap is hit; readers already skip non-numeric netPct. Format change: coordinate with research. | S | Research |
 | Q-10 | P1 | Operations | `src/desk/engine.ts:536`, `src/desk/events.ts:65`, `src/research/ledger.ts` (no pruning), `dashboard/start-background.cmd:6` | Rotated `events-*.log.jsonl.*` and `tape-*.jsonl.*` are never deleted (the AUDIT #1 fix made every rotation permanent); hourly research files are never pruned; `dashboard.log` and `observer.log` are appended with `>>` forever. Raven has ~1.5 GB free. Bulk research records pause at 700 MB free, but the desk's ledgers and the dashboard keep writing until the disk is full — then Q-01-type failures hit everything. | Retention policy: keep N rotations / D days locally, move older files off the box (owner decides where); rotate the two `.log` files at start; dashboard disk gauge. | M | Owner |
-| Q-11 | P1 | Operations | `src/scripts/research-observe.ts:74`, `package.json:45` | Requalification runs every 6 h as a child with `--max-old-space-size=1536` next to the dashboard and the observer, on a box with ~1.7 GB RAM free. It can push Raven into swap or the OOM path while LIVE exits are running. | Cap the child at what the dataset needs (measure: `qualify.log` peak RSS), stream files instead of `readDataset` of 48 h at once, or run it at a quiet hour with lower priority. | M | CTO next |
+| Q-11 | P1 | Operations | `src/scripts/research-observe.ts:74`, `package.json:45` | Requalification runs every 6 h as a child with `--max-old-space-size=1536` next to the dashboard and the observer, on a box with ~1.7 GB RAM free. It can push Raven into swap or the OOM path while LIVE exits are running. | Cap the child at what the dataset needs (measure: `qualify.log` peak RSS), stream files instead of `readDataset` of 48 h at once, or run it at a quiet hour with lower priority. | M | **FIXED** `5b7cc45`: heap = 60 % of free memory (≤ 1,536 MB), postponed under ~850 MB free, below-normal priority, peak RSS in `qualify.log`; test CTO-10 |
 | Q-12 | P1 | Look-ahead / parity | `src/research/dataset.ts:12, 111-116`, `src/research/rules.ts:31-32` | Metadata (X link, website) is treated as "known from creation"; the `META` record's own `obs` is ignored. Live, the observer has it only after the pump.fun gateway answers. For the 5 s and 15 s decision times of `ownX` / `ownXSite`, the look-back can put a launch in the group that the live engine could not. | Keep the META `obs` in `LaunchFacts` and gate `hasX`/`hasSite` on `obs <= T` in `features()`; measure how often META arrives after 5 s first. | S | Research |
 | Q-13 | P2 | Data integrity | `src/research/qualify.ts:42-50`, `src/research/dataset.ts:189-198` | The gate simulates every launch including those with `gapInWindow` or `chainBreaks > 0` (missing trades); only the report has `--strict`. `blindSpots()` ignores the new `GAP source=ledger` (Q-04). | Exclude, or report separately, launches with a blind spot in [creation, exit]; count `ledger` gaps as blind spots. | S | Research |
 | Q-14 | P2 | Alert quality | `src/research/calls.ts:130-141` | A launch matching several qualified rules at one decision time sends one CALL per rule. | One phone message per launch and decision time, listing the rules. | S | Research |
-| Q-15 | P2 | Tests | `src/desk/guard.ts:64` | `DeskGuard` (reserve, max drag, simulation checks, signature state) has no unit tests of its own; it is exercised only through whole-engine scenarios in `tests/desk.test.ts`. A boundary (exactly at max drag, reserve − 1 lamport, simulation with a foreign account change) is not pinned. | Table-driven tests per guard check at its boundary, like `tests/micro.test.ts` does for `MicroGuard`. | M | CTO next |
-| Q-16 | P2 | Tests | `src/desk/engine.ts:1180-1193`, `dashboard/server/trading.ts:215-219` | The phone filter's default (`DEFAULT_ALERTS` = none) is never asserted; no test runs `alertOnce` with the default set, and the dashboard's `phone-alerts` action has no server test. | Engine test: default set → nothing sent, alert recorded as suppressed; server test for the action and `INVALID_ALERT_KINDS`. | S | CTO next |
-| Q-17 | P2 | Observability | `dashboard/src/Desk.tsx:59, 142`, `src/research/observability/` | The dashboard shows HALTED, last scan time and the pump-stream source line. It does not show: whether the observer is writing (ledger bytes/min, write errors), phone delivery health (Q-03 now has the data), provider error rates, disk free. The health registry exists but is not on the page. "Is the phone still receiving?" cannot be answered within a minute. No dead-man alert if the desk or observer stops. | A health strip: observer heartbeat age, phone last-ok, providers, disk; plus an external dead-man (e.g. a daily "alive" ntfy, or healthchecks.io ping). | M | CTO next |
+| Q-15 | P2 | Tests | `src/desk/guard.ts:64` | `DeskGuard` (reserve, max drag, simulation checks, signature state) has no unit tests of its own; it is exercised only through whole-engine scenarios in `tests/desk.test.ts`. A boundary (exactly at max drag, reserve − 1 lamport, simulation with a foreign account change) is not pinned. | Table-driven tests per guard check at its boundary, like `tests/micro.test.ts` does for `MicroGuard`. | M | **FIXED** `027ba2b`: `tests/desk-guard.test.ts`, every gate at its limit and one lamport past it |
+| Q-16 | P2 | Tests | `src/desk/engine.ts:1180-1193`, `dashboard/server/trading.ts:215-219` | The phone filter's default (`DEFAULT_ALERTS` = none) is never asserted; no test runs `alertOnce` with the default set, and the dashboard's `phone-alerts` action has no server test. | Engine test: default set → nothing sent, alert recorded as suppressed; server test for the action and `INVALID_ALERT_KINDS`. | S | **FIXED** `70cf9f5`: test CTO-11 (default sends nothing, recorded once) and the dashboard action test |
+| Q-17 | P2 | Observability | `dashboard/src/Desk.tsx:59, 142`, `src/research/observability/` | The dashboard shows HALTED, last scan time and the pump-stream source line. It does not show: whether the observer is writing (ledger bytes/min, write errors), phone delivery health (Q-03 now has the data), provider error rates, disk free. The health registry exists but is not on the page. "Is the phone still receiving?" cannot be answered within a minute. No dead-man alert if the desk or observer stops. | A health strip: observer heartbeat age, phone last-ok, providers, disk; plus an external dead-man (e.g. a daily "alive" ntfy, or healthchecks.io ping). | M | **FIXED** `a7b3b8c`: daily ALIVE dead-man (07:00 UTC), observer `GET /health`, health strip on the Trading desk (observer heartbeat age, both phones' last ok and failures); tests CTO-08, CTO-09. Providers and disk free not on the strip yet |
 | Q-18 | P2 | Tests / process | repo root | No CI. Dashboard tests are a separate `npm test`. Nothing runs typecheck + both suites on a push. | GitHub Actions: `npm ci && npm run typecheck && npm test`, `dashboard: npm ci && npm run build && npm test`. | S | Owner (Actions minutes) |
-| Q-19 | P2 | Failure handling | `src/desk/events.ts:58-60` | `flush()` clears `dirty` before the atomic write; a failed write is not retried until another event arrives. | Clear `dirty` after the write. | S | Open |
-| Q-20 | P2 | Alert quality | `src/desk/engine.ts:153, 1181` | Alert de-duplication (`launchAlerts`) is in memory: a restart re-alerts everything still live (the FIX6900 copycat alert after a restart, DESK.md). | Seed from the research store's `AlertGenerated` events of the last hours. | S | Open |
-| Q-21 | P2 | Failure handling | `src/desk/engine.ts:472` | A failed save after a TEST probe is swallowed (`persist().catch(() => undefined)`), unlike `pulse()` which records it. | Record a FAILED event like `pulse()`. | S | Open |
+| Q-19 | P2 | Failure handling | `src/desk/events.ts:58-60` | `flush()` clears `dirty` before the atomic write; a failed write is not retried until another event arrives. | Clear `dirty` after the write. | S | **FIXED** `eaefc25`, test CTO-06 |
+| Q-20 | P2 | Alert quality | `src/desk/engine.ts:153, 1181` | Alert de-duplication (`launchAlerts`) is in memory: a restart re-alerts everything still live (the FIX6900 copycat alert after a restart, DESK.md). | Seed from the research store's `AlertGenerated` events of the last hours. | S | **FIXED** `9227116` with Q-31: `data-desk/alerts-sent-<MODE>.json`, keys of the last 6 h; test CTO-07 |
+| Q-21 | P2 | Failure handling | `src/desk/engine.ts:472` | A failed save after a TEST probe is swallowed (`persist().catch(() => undefined)`), unlike `pulse()` which records it. | Record a FAILED event like `pulse()`. | S | **FIXED** `1dea9a0`, test CTO-12 |
 | Q-22 | P3 | Parity | `src/research/calls.ts:132` | Live features pass `creatorLaunches: 0`, the look-back passes the creator's history. No group uses it today; the first one that does will drift. | Keep a creator index in the observer. | S | Open |
 | Q-23 | P3 | Structure | `src/desk/engine.ts` (1,799 lines) | Discovery, five strategies, alerts, positions, tape and persistence in one class (AUDIT §2B). | Split along the AUDIT §2F plan when the swarm work touches it. | L | Open |
 | Q-24 | P3 | Type safety | `src/desk/*.ts` | 54 non-null assertions in `src/desk`, several on parsed external data (e.g. `launches.ts:399 l.x.handle!`, `engine.ts:1176 original.pairCreatedAt!`). `any` is almost absent (2). | Replace the external-data ones with guards when touched. | M | Open |
-| Q-25 | P3 | Docs drift | `src/desk/engine.ts:86` | Says the default is "rug sales of held positions only"; `DEFAULT_ALERTS` is empty (owner, 2 Oct). | Fix the comment. | S | Open |
-| Q-26 | P3 | Docs drift | `docs/DESK.md:502` vs `:434` | "Known limits" says empty token accounts are never closed; *Costs per trade* says the local key closes them after each exit. | Limit the sentence to Phantom. | S | Open |
+| Q-25 | P3 | Docs drift | `src/desk/engine.ts:86` | Says the default is "rug sales of held positions only"; `DEFAULT_ALERTS` is empty (owner, 2 Oct). | Fix the comment. | S | **FIXED** `5975e30`, test CTO-13 |
+| Q-26 | P3 | Docs drift | `docs/DESK.md:502` vs `:434` | "Known limits" says empty token accounts are never closed; *Costs per trade* says the local key closes them after each exit. | Limit the sentence to Phantom. | S | **FIXED** `5975e30`, test CTO-13 |
 | Q-27 | P3 | Hygiene | `solana-bot-v4.b64.txt`, `solana-playbook-update.zip`, `dashboard-backups/`, `.dashboard-update-20260925/` | Old snapshots of the code committed (AUDIT §2C). | Delete in one commit (they are in history). | S | Owner OK needed |
-| Q-28 | P3 | Dependencies | root, `dashboard/` | `npm audit`: 3 high (root), 6 high (dashboard). Not triaged. | Triage; `npm audit fix` where non-breaking. | S | Open |
+| Q-28 | P3 | Dependencies | root, `dashboard/` | `npm audit`: 3 high (root), 6 high (dashboard). Not triaged. | Triage; `npm audit fix` where non-breaking. | S | Triaged 5 Oct: root has no non-breaking fix (all need `@solana/web3.js` 3 or `@solana/spl-token` 0.1.8). The dashboard's only non-breaking fix moves the Phantom wallet SDK's internals (`@phantom/*` 2.0.3 → 2.0.4), the browser signing path: **not applied**, owner / main session to decide with a LIVE Phantom check |
 | Q-29 | P3 | Tests | `tests/micro.test.ts:22-23, 54` | **The flake:** snapshots were built with `at: Date.now(), receivedAt: Date.now()`. `equityUsd()` validates prices as of `s.at`; when the two calls straddled a millisecond, `receivedAt` was 1 ms in the future → `PRICE_UNAVAILABLE_OR_STALE`. Reproduced deterministically with `receivedAt = at + 1`. Production (`src/micro/market.ts:30`) sets `at` after `receivedAt` and is not affected. | One clock reading per snapshot. | S | **FIXED** `78ea593` |
-| Q-30 | P3 | Docs drift | `ecosystem.config.js:1-15` | Describes 24/7 PM2 on Ubuntu for `solana-bot`; the live system is the desk on Windows (Raven), which has no process config at all (Q-06). | Replace with the desk + observer config when Q-06 is done. | S | Open |
+| Q-30 | P3 | Docs drift | `ecosystem.config.js:1-15` | Describes 24/7 PM2 on Ubuntu for `solana-bot`; the live system is the desk on Windows (Raven), which has no process config at all (Q-06). | Replace with the desk + observer config when Q-06 is done. | S | **FIXED** `5975e30`: marked LEGACY, points to `ops/supervise.mjs`; test CTO-13 |
+| Q-31 | P1 | Alert quality | `src/desk/engine.ts:155, 1203-1209` (base) | The OPEN phone cap (4 an hour) lived in memory and reset on every restart: 8 OPEN messages went out in under an hour on 3 Oct. An OPEN key already alerted also used up a slot. Same family as Q-20. | Persist with Q-20; check the key before taking a slot. | S | **FIXED** `9227116`, test CTO-07 |
+| Q-32 | P0 | Failure handling | `src/utils/fs.ts`, `src/desk/ledger.ts`, `src/desk/events.ts` | Incident 3 Oct: a hard shutdown left every TEST ledger and `events-PAPER.json` as zero bytes; the desk refused to open (`DESK_EVENTS_INVALID`) for 2 days. | Writes fsync before rename; unreadable TEST files moved aside (`*.damaged-*`); an unreadable LIVE ledger still stops the desk. | S | **FIXED** `1b36e14` (main session) |
+| Q-33 | P0 | Operations | `src/utils/fs.ts` (`acquireProcessLock`) | Incident 3 Oct: `desk.lock` left with zero bytes blocked every start (`INSTANCE_LOCK`). | A lock without a pid older than 60 s is stale; restore messages name the saved mode. | S | **FIXED** `d20caa1` (main session) |
+| Q-34 | P1 | Data source | dashboard coin check, holder scan | The holder scan used `rpc.primary`, picked once at startup (the public node, which refuses `getTokenLargestAccounts`). | Go through `ConnectionManager.execute` (failover, limits). | S | **FIXED** `b6b3d11` (main session) |
+| Q-35 | P2 | Time | `src/desk/launches.ts` | Radar re-score after an insider read or a Claude review used `Date.now()` instead of the poll's clock (wrong in replays and tests). | Use the poll clock. | S | **FIXED** `4eba027` (main session) |
 
-Counts: **P0 2** (1 fixed) · **P1 10** (4 fixed) · **P2 9** · **P3 9** (1 fixed). Total 30 (Q-01…Q-30; Q-29 is the flake).
+Counts (5 Oct): **P0 4** (all fixed) · **P1 12** (9 fixed) · **P2 10** (7 fixed) · **P3 9** (4 fixed). Total 35 (Q-01…Q-35), 24 fixed. Open: Q-09, Q-12, Q-13, Q-14 (research); Q-10, Q-18, Q-27, Q-28 (owner); Q-22, Q-23, Q-24.
 
 Checked and found sound (no finding): every outbound `fetch` in `src/desk`, `src/research`, `src/data` carries an
 `AbortSignal.timeout`; websocket feeds reconnect with backoff and a no-message watchdog that writes a `GAP`
@@ -67,23 +72,23 @@ unknown outcome; amounts in the guard are integer lamports (`bigint`).
 
 | # | Standard | Pass/fail | Evidence |
 | --- | --- | --- | --- |
-| 1 | The test suite is green and deterministic | PASS (after Q-29) | 3×275/275; the one known flake was a fixture bug, fixed |
+| 1 | The test suite is green and deterministic | PASS | 5 Oct: 323/323 root, 18/18 dashboard; the one known flake was a fixture bug (Q-29) |
 | 2 | Every change is gated by CI (typecheck, both suites, build) | FAIL | No `.github/`; dashboard tests not in root `npm test` (Q-18) |
-| 3 | Processes restart by themselves after a crash or reboot | FAIL | `start /min cmd /c` only (Q-06) |
+| 3 | Processes restart by themselves after a crash or reboot | PASS (5 Oct) | `ops/supervise.mjs` + autostart + session restore (Q-06); empty lock and zero-byte files no longer block a start (Q-32, Q-33) |
 | 4 | Money-critical state is persisted before anything optional | PASS (after Q-01) | Ledgers saved first, isolated from telemetry |
-| 5 | No silent failure on the alert path | PASS (after Q-03) | Delivery failures counted, logged, in the status line; not yet on the dashboard (Q-17) |
-| 6 | The owner sees within a minute that a source, the observer or the phone is down | FAIL | Desk scan staleness and HALTED are shown; observer, phone, providers, disk are not (Q-17) |
+| 5 | No silent failure on the alert path | PASS | Delivery failures counted, logged, in the status line and on the dashboard strip (Q-03, Q-17) |
+| 6 | The owner sees within a minute that a source, the observer or the phone is down | PARTIAL (5 Oct) | Health strip: observer heartbeat age, launch stream, ledger write errors, both phones; daily ALIVE dead-man (Q-17). Providers and disk free not yet on the strip |
 | 7 | Research data loss is visible in the data | PASS (after Q-04) | Write failures become `GAP source=ledger`; `blindSpots` should honour them (Q-13) |
 | 8 | Features are point in time | PARTIAL | Trades, posts, candles, creator history: yes. X profile: fixed (Q-05). Metadata: no (Q-12) |
 | 9 | Live and look-back use the same features | PARTIAL | Same code (test exists); inputs differ for metadata timing and creator history (Q-12, Q-22) |
-| 10 | Phone calls are judged as the owner would trade them | FAIL | Judged at a 2 s bot fill (Q-07) |
-| 11 | The gate controls for multiple testing | FAIL | ~45 candidates, no correction (Q-08) |
+| 10 | Phone calls are judged as the owner would trade them | PASS (5 Oct) | Bought 45 s after the call in the gate and live judging (Q-07) |
+| 11 | The gate controls for multiple testing | PASS (5 Oct) | Bootstrap p-value with Holm over all rules, best-1 % trim (Q-08) |
 | 12 | Every call has a recorded outcome | FAIL | Unfilled / over-cap calls get none (Q-09) |
-| 13 | Dangerous paths have direct tests | PARTIAL | Engine scenarios cover orders, exits, LIVE refusal, signer; guard boundaries and the phone default are untested (Q-15, Q-16) |
-| 14 | Disk and memory are bounded on Raven | FAIL | No retention (Q-10); 1.5 GB heap child (Q-11) |
+| 13 | Dangerous paths have direct tests | PASS (5 Oct) | Guard boundaries (`tests/desk-guard.test.ts`), phone filter default and action (CTO-11, dashboard), persistence order (CTO-01) |
+| 14 | Disk and memory are bounded on Raven | PARTIAL | Requalification heap follows free memory (Q-11); no retention for rotated files yet (Q-10, owner) |
 | 15 | Network calls have timeouts and bounded retries | PASS | All `fetch` with `AbortSignal.timeout`; stream retries back off |
 | 16 | Secrets stay out of logs and the browser | PASS | Allowlisted env keys (`runtime.ts:42-53`), delivery records keep error class only (`watch.ts`, parity test) |
-| 17 | Docs match the code | PARTIAL | Q-25, Q-26, Q-30 |
+| 17 | Docs match the code | PASS (5 Oct) | Q-25, Q-26, Q-30 fixed; CTO-13 checks them |
 | 18 | Repository holds only source | FAIL | Committed snapshots and zips (Q-27) |
 
 ## Daily metrics for the CTO
@@ -105,18 +110,20 @@ unknown outcome; amounts in the guard are integer lamports (`bigint`).
 | **Disk and memory** | Free disk on Raven, research folder size growth/day, peak RSS of dashboard, observer, qualify child | Observer `checkDisk`, `qualify.log`, Task Manager export (until a probe exists) |
 | **Spend** | Anthropic/Gemini reviews per day × price; Birdeye credits used | Review counters (`DESK_AI_REVIEWS_PER_HOUR`), provider dashboards |
 
-## Top 10 fixes, in order
+## Top 10 fixes, in order (5 Oct)
 
-1. **Q-06** Supervise the dashboard and the observer on Raven (restart on crash and at boot) — open LIVE positions have no exits while the process is down.
-2. **Q-17** A dead-man alert and a health strip (observer heartbeat, phone last-ok, disk, providers) — the owner must learn of an outage from the phone, not by looking.
-3. **Q-10** Retention for rotated logs, tapes and research files, and rotation of `dashboard.log` / `observer.log` — the disk is the shared failure point.
-4. **Q-07** Judge and qualify phone calls at a human fill delay — otherwise precision on paper says nothing about the owner's trades.
-5. **Q-08** Multiple-testing control in the qualification gate (lower confidence bound, Holm, or the deflated Sharpe the experiment engine already has).
-6. **Q-09** Record an outcome for every call (`NOT_FILLED`, cap hit) — precision needs a complete denominator.
-7. **Q-12** Point-in-time metadata (`META` obs) for the 5 s / 15 s groups.
-8. **Q-11** Bound the requalification child's memory on a 1.7 GB box.
-9. **Q-18** CI on every push (typecheck, both suites, dashboard build).
-10. **Q-15 / Q-16** Boundary tests for `DeskGuard` and the phone filter's default.
+Done since 3 Oct: Q-06, Q-07, Q-08 (main session), Q-11, Q-15, Q-16, Q-17 (this branch).
+
+1. **Q-10** Retention for rotated logs, tapes and research files — the disk is the shared failure point (owner: where old files go).
+2. **Q-09** Record an outcome for every call (`NOT_FILLED`, cap hit) — precision needs a complete denominator.
+3. **Q-12** Point-in-time metadata (`META` obs) for the 5 s / 15 s groups.
+4. **Q-18** CI on every push (owner: Actions minutes).
+5. **Q-17 (rest)** Providers' error rates and disk free on the health strip.
+6. **Q-13** Blind spots (incl. `GAP source=ledger`) out of the gate's sample.
+7. **Q-28** Phantom SDK patch (`@phantom/*` 2.0.4) with a LIVE Phantom check by the owner.
+8. **Q-14** One phone message per launch and decision time.
+9. **Q-24** Guards instead of non-null assertions on external data.
+10. **Q-27** Delete the committed snapshots (owner OK).
 
 ## Changes on this branch
 
@@ -133,3 +140,23 @@ Each regression test fails on the base branch and passes here. No strategy param
 criterion, LIVE behaviour or signing/sending path was changed. Two changes alter what the owner sees: a corrupt
 `phone-alerts.json` now means "nothing to the phone" (Q-02), and research reports at 60–300 s no longer see X
 followers read later (Q-05).
+
+### Second pass (5 Oct, after merging the desk branch at `b6b3d11`)
+
+| Commit | Finding | Test |
+| --- | --- | --- |
+| `eaefc25` desk events: a failed flush is retried, history rows kept | Q-19 | CTO-06 |
+| `9227116` desk alerts: sent-alert keys and the OPEN phone cap survive a restart | Q-20, Q-31 | CTO-07 |
+| `a7b3b8c` health: daily ALIVE dead-man, observer `/health`, health strip | Q-17 | CTO-08, CTO-09 |
+| `5b7cc45` research: requalification heap follows free memory | Q-11 | CTO-10 |
+| `70cf9f5` tests: phone filter default and the dashboard action | Q-16 | CTO-11, `dashboard/tests/trading.test.ts` |
+| `1dea9a0` desk: a failed save after a TEST probe is logged | Q-21 | CTO-12 |
+| `027ba2b` tests: DeskGuard boundaries | Q-15 | `tests/desk-guard.test.ts` |
+| `5975e30` docs: alert default, account closing, PM2 file | Q-25, Q-26, Q-30 | CTO-13 |
+
+The fixes' regression tests (CTO-06, -07, -08, -10, -12) fail without the change; CTO-11, CTO-13, the guard and
+dashboard tests pin behaviour that was already right. What the owner will notice: one **ALIVE** message a day from
+07:00 UTC (if it is missing, something is down); a health strip at the top of the Trading desk; a restart no longer
+repeats alerts or resets the OPEN cap (new file `data-desk/alerts-sent-<MODE>.json`); `qualify.log` shows the heap cap
+and peak memory. Not done, by instruction: Q-10, Q-18, Q-27; Q-28 left for the owner (it touches the Phantom SDK).
+No strategy parameter, entry/exit, qualification criterion, LIVE behaviour or signing/sending path was changed.

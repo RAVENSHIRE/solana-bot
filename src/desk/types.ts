@@ -218,4 +218,6 @@ export interface DeskStatus {
   events: DeskEvent[]; candidates: Candidate[]; preflights: Preflight[];
   positions: DeskPosition[]; ledger: LedgerEntry[]; sources: Record<string, string>;
   path: Array<{ layer: string; provider: string }>;
+  /** Observer heartbeat and phone delivery, shown at the top of the desk (desk/health.ts). */
+  health?: import('./health').HealthLine[];
 }

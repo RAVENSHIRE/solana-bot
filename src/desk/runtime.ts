@@ -165,7 +165,7 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
       : await DeskResearchRecorder.open(path.join(o.dataDir, 'research-store'), { enrichMessages: env.DESK_ALERT_EVIDENCE?.trim().toLowerCase() !== 'off',
         recordTape: env.DESK_RESEARCH?.trim().toLowerCase() === 'full' })
         .catch((error: unknown) => { logger.warn('Research recorder unavailable; the desk runs without it', { error: error instanceof Error ? error.message : String(error) }); return null; });
-    const recorder = research, researchDeps = { research: recorder, deliver: alerts.deliver, alertChannels: alerts.channels };
+    const recorder = research, researchDeps = { research: recorder, deliver: alerts.deliver, alertChannels: alerts.channels, phoneHealth: alerts.health };
     // Which alerts reach the phone: none by default; DESK_ALERTS=rug, golden, open, launch, radar — or "all". The dashboard
     // switch (data-desk/phone-alerts.json) wins; both engines share this one set, so a change applies at once.
     const phoneFile = path.join(o.dataDir, 'phone-alerts.json');

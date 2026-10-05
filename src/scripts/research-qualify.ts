@@ -38,6 +38,8 @@ function main(): void {
       `${r.forward.n ? ` · live ${r.forward.n} results ${pct(r.forward.meanPct ?? 0)}` : ''}${r.reasons.length ? ` · ${r.reasons.join('; ')}` : ''}`);
   }
   console.log(`${q.rules.filter(r => r.qualified).length} qualified of ${q.rules.length} → ${out}`);
+  // Peak memory of this run, so the heap cap (research/qualify.ts QUALIFY_MEMORY) can be set from measurements.
+  console.log(`peak memory ${Math.round(process.resourceUsage().maxRSS / 1024)} MB RSS`);
 }
 
 main();

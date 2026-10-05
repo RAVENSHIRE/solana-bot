@@ -78,3 +78,137 @@ test('CTO-05: X account facts read after the decision time do not leak into its 
   const at600 = features(l, 600, { creatorLaunches: 0, creatorGraduations: 0 }, []);
   assert.equal(at600.xFollowers, 5_000);
 });
+
+test('CTO-06 (Q-19): a failed event-log write is retried on the next flush, and no history row is lost', async () => {
+  const { EventLog } = await import('../src/desk/events');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cto-events-')), dir = path.join(root, 'later'), file = path.join(dir, 'events-PAPER.json');
+  const log = new EventLog('PAPER', file, () => 1_000);
+  log.add('SYSTEM', 'first');
+  await assert.rejects(log.flush(), 'the folder does not exist yet');
+  await fs.mkdir(dir);
+  await log.flush();
+  assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).length, 1, 'retried without a new event');
+  const history = (await fs.readFile(path.join(dir, 'events-PAPER.log.jsonl'), 'utf8')).trim().split('\n');
+  assert.equal(history.length, 1);
+});
+
+test('CTO-07 (Q-20, OPEN cap): sent alerts and the OPEN phone cap survive a restart', async () => {
+  const { ALERT_MEMORY } = await import('../src/desk/engine');
+  const proto = DeskEngine.prototype as unknown as Record<string, (...a: unknown[]) => unknown>;
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cto-alerts-')), now = Date.now();
+  const engine = () => {
+    const e: Record<string, unknown> = { d: { dir, mode: 'PAPER', alerts: new Set(['open']) }, launchAlerts: new Map<string, number>(), openPhoneSent: [] as number[],
+      alertWrite: Promise.resolve(), event: () => undefined };
+    for (const m of ['alertMemoryFile', 'loadAlertMemory', 'saveAlertMemory', 'openPhoneSlot']) e[m] = proto[m]!.bind(e);
+    return e as { launchAlerts: Map<string, number>; openPhoneSent: number[]; alertWrite: Promise<void>; loadAlertMemory: () => Promise<void>; saveAlertMemory: () => void; openPhoneSlot: (n: number) => boolean };
+  };
+  const before = engine();
+  for (let i = 0; i < 4; i++) assert.equal(before.openPhoneSlot(now - 50 * 60_000 + i * 60_000), true);
+  assert.equal(before.openPhoneSlot(now), false, '4 an hour');
+  before.launchAlerts.set('open:MINT1', now - 60_000);
+  before.launchAlerts.set('radar:OLD', now - ALERT_MEMORY.keepMs - 60_000);
+  before.saveAlertMemory(); await before.alertWrite;
+  const after = engine();
+  await after.loadAlertMemory();
+  assert.ok(after.launchAlerts.has('open:MINT1'), 'a coin alerted before the restart is not alerted again');
+  assert.ok(!after.launchAlerts.has('radar:OLD'), 'keys older than the memory window are dropped');
+  assert.equal(after.openPhoneSent.length, 4);
+  assert.equal(after.openPhoneSlot(now), false, 'the restart does not reset the OPEN cap');
+  assert.equal(after.openPhoneSlot(now + 11 * 60_000), true, 'the oldest slot expires after an hour');
+});
+
+test('CTO-08 (Q-17): the daily ALIVE message goes out once a day from 07:00 UTC, also across restarts', async () => {
+  const { AliveReporter } = await import('../src/research/alive');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cto-alive-')), file = path.join(dir, 'alive.json'), sent: string[] = [];
+  let now = Date.parse('2026-10-05T06:59:00Z');
+  const reporter = () => new AliveReporter({ file, now: () => now, notify: async (t, b) => { sent.push(`${t}|${b}`); }, lines: () => ['desk last read the feed 2 s ago'] });
+  const a = reporter();
+  assert.equal(await a.tick(), false, 'not before 07:00 UTC');
+  now = Date.parse('2026-10-05T07:00:30Z');
+  assert.equal(await a.tick(), true); assert.equal(await a.tick(), false, 'once a day');
+  assert.equal(await reporter().tick(), false, 'a restart the same day does not send it again');
+  now = Date.parse('2026-10-06T09:15:00Z');
+  assert.equal(await reporter().tick(), true, 'the next day');
+  assert.equal(sent.length, 2); assert.match(sent[0]!, /^ALIVE: research observer\|desk last read the feed/);
+});
+
+test('CTO-09 (Q-17): the desk reads the observer\'s /health and the dashboard strip flags a silent observer or a failing phone', async () => {
+  const { LocalFeed } = await import('../src/research/local-feed');
+  const { LocalPumpStream } = await import('../src/desk/pump-stream');
+  const { healthLines } = await import('../src/desk/health');
+  const feed = new LocalFeed(() => true, () => ({ startedAt: Date.now() - 3_600_000, ledger: { writeErrors: 2 }, phone: { sent: 3, delivered: 2, failed: 1, lastOkAt: 1, lastFailureAt: 2, lastError: 'ntfy HTTP 429' } }));
+  await feed.listen(0);
+  const port = ((feed as unknown as { server: { address(): { port: number } } }).server).address().port;
+  try {
+    const stream = new LocalPumpStream(`http://127.0.0.1:${port}/pump/events`);
+    await stream.poll();
+    assert.ok(feed.lastPollAt !== null, 'the observer knows when the desk last read it');
+    const seen = stream.observer();
+    assert.ok(seen.seenAt !== null && seen.report !== null);
+    const now = Date.now(), lines = healthLines({ observer: seen, streamOff: false, phone: null, channels: 0 }, now);
+    const obs = lines.find(l => l.label === 'Research observer')!, phone = lines.find(l => l.label.startsWith('Observer phone'))!;
+    assert.equal(obs.bad, true, '2 ledger write errors'); assert.match(obs.text, /2 ledger write errors/);
+    assert.equal(phone.bad, true, 'the last delivery failed'); assert.match(phone.text, /ntfy HTTP 429/);
+    const later = healthLines({ observer: seen, streamOff: false, phone: null, channels: 0 }, now + 5 * 60_000);
+    assert.match(later.find(l => l.label === 'Research observer')!.text, /DOWN\?/, 'no answer for 5 min');
+    const never = healthLines({ observer: { seenAt: null, streamHealthy: false, report: null, reportAt: null }, streamOff: false, phone: null, channels: 0 }, now);
+    assert.equal(never[0]!.bad, true);
+    const recovered = healthLines({ observer: null, streamOff: true, channels: 1, phone: { sent: 2, delivered: 1, failed: 1, lastOkAt: now, lastFailureAt: now - 1_000, lastError: 'ntfy TypeError' } }, now);
+    assert.equal(recovered.find(l => l.label.startsWith('Desk phone'))!.bad, false, 'a delivery after the failure clears the warning');
+  } finally { feed.close(); }
+});
+
+test('CTO-10 (Q-11): the requalification heap is a share of free memory, capped, and postponed when memory is short', async () => {
+  const { qualifyHeapMb, QUALIFY_MEMORY } = await import('../src/research/qualify');
+  const MB = 1048576;
+  assert.equal(qualifyHeapMb(4_000 * MB), QUALIFY_MEMORY.maxHeapMb, 'plenty free: the old 1.5 GB cap');
+  assert.equal(qualifyHeapMb(1_700 * MB), 1_020, 'Raven with 1.7 GB free: 60 % of it, not 1.5 GB');
+  assert.equal(qualifyHeapMb(600 * MB), null, 'under ~850 MB free: postponed, the previous qualification stays');
+});
+
+test('CTO-11 (Q-16): by default no desk alert reaches the phone; it is still recorded once; a selected kind is sent', async () => {
+  const { DEFAULT_ALERTS } = await import('../src/desk/engine');
+  assert.equal(DEFAULT_ALERTS.size, 0, 'owner, 2 Oct: nothing on the phone unless chosen');
+  const proto = DeskEngine.prototype as unknown as Record<string, (...a: unknown[]) => unknown>;
+  const fake = (alerts?: Set<string>) => {
+    const sent: string[] = [];
+    const e: Record<string, unknown> = { d: { notify: async (t: string) => { sent.push(t); }, alerts, research: null, mode: 'PAPER' }, launchAlerts: new Map(), saveAlertMemory: () => undefined };
+    for (const m of ['alertOnce', 'recordAlert']) e[m] = proto[m]!.bind(e);
+    return { e: e as { alertOnce: (k: string, t: string, b: string, kind: string, phone?: boolean) => void; launchAlerts: Map<string, number> }, sent };
+  };
+  const quiet = fake();
+  for (const kind of ['golden', 'rug', 'open', 'launch', 'radar']) quiet.e.alertOnce(`${kind}:MINT`, `${kind} title`, 'body', kind);
+  await new Promise(r => setImmediate(r));
+  assert.deepEqual(quiet.sent, [], 'DEFAULT_ALERTS: nothing sent');
+  assert.equal(quiet.e.launchAlerts.size, 5, 'each alert is still remembered (dashboard, event log)');
+  const chosen = fake(new Set(['rug']));
+  chosen.e.alertOnce('rug:MINT', 'RUG', 'b', 'rug'); chosen.e.alertOnce('rug:MINT', 'RUG again', 'b', 'rug'); chosen.e.alertOnce('radar:MINT', 'radar', 'b', 'radar');
+  chosen.e.alertOnce('rug:OTHER', 'RUG over the cap', 'b', 'rug', false);
+  await new Promise(r => setImmediate(r));
+  assert.deepEqual(chosen.sent, ['RUG'], 'once per key, only selected kinds, never when the caller says no phone');
+});
+
+test('CTO-12 (Q-21): a save that fails after a TEST probe is reported in the event log, not swallowed', async () => {
+  const proto = DeskEngine.prototype as unknown as { probe: (this: unknown, mint: string) => Promise<void> };
+  const events: string[] = [];
+  const e = { d: { mode: 'PAPER' }, work: null as Promise<void> | null, candidates: new Map(),
+    syncWallet: async () => { throw new Error('wallet unavailable'); },
+    persist: async () => { throw new Error('EPERM: ledger-PAPER.json'); },
+    event: (stage: string, message: string) => { events.push(`${stage} ${message}`); } };
+  await assert.rejects(proto.probe.call(e, 'MINT'), /wallet unavailable/);
+  assert.ok(events.some(x => x.startsWith('FAILED Saving desk state failed: EPERM')), events.join(' | '));
+  assert.equal(e.work, null);
+});
+
+test('CTO-13 (Q-25, Q-26, Q-30): the docs say what the code does', async () => {
+  const { DEFAULT_ALERTS } = await import('../src/desk/engine');
+  const desk = await fs.readFile(path.join(process.cwd(), 'docs', 'DESK.md'), 'utf8');
+  const engine = await fs.readFile(path.join(process.cwd(), 'src', 'desk', 'engine.ts'), 'utf8');
+  assert.equal(DEFAULT_ALERTS.size, 0);
+  assert.match(desk, /The default is \*\*none\*\*/, 'DESK.md: no desk alert on the phone by default');
+  assert.doesNotMatch(engine, /Default: rug sales of held positions only/, 'engine comment matches DEFAULT_ALERTS');
+  assert.doesNotMatch(desk, /^- Empty token accounts are not closed automatically/m, 'the local key closes them after each exit');
+  const pm2 = await fs.readFile(path.join(process.cwd(), 'ecosystem.config.js'), 'utf8');
+  assert.match(pm2, /LEGACY/);
+  assert.deepEqual([...pm2.matchAll(/script: '([^']+)'/g)].map(m => m[1]), ['./dist/index.js', './dist/dashboard/server.js'], 'PM2 runs only the legacy bot and its dashboard');
+});

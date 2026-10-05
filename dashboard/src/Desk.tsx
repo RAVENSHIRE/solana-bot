@@ -58,6 +58,8 @@ export function DeskPanel({ t }: { t: TradingSession }) {
     {v?.deskError && <p className="trading-error" role="alert">Desk unavailable: {describe(v.deskError)}</p>}
     {t.error && <p className="trading-error" role="alert">{describe(t.error)}</p>}
     {d?.halted && <p className="trading-error" role="alert">HALTED: {describe(d.halted)}</p>}
+    {d?.health && <dl className="kv two health-strip" aria-label="Health">{d.health.map(h => <div key={h.label}><dt>{h.label}</dt>
+      <dd className={h.bad ? 'trading-error' : ''} role={h.bad ? 'alert' : undefined}>{h.text}</dd></div>)}</dl>}
     {live && v?.pending && <div className="signature-request" role="status">
       <strong>AWAITING PHANTOM SIGNATURE</strong>
       <span>A pre-flight-checked transaction is waiting. Expires {time(new Date(v.pending.expiresAt).toISOString())}; expired quotes are never sent.</span>

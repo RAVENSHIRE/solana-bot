@@ -14,6 +14,7 @@
  * Helius may bill websocket traffic against the plan's credits, so it is off unless asked for.
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { Connection } from '@solana/web3.js';
@@ -24,9 +25,10 @@ import { ResearchObserver, PUBLIC_RPC_WS, PUBLICNODE_WS } from '../research/obse
 import { CallEngine } from '../research/calls';
 import { LocalFeed, LOCAL_FEED } from '../research/local-feed';
 import { VerifiedWatch } from '../research/verified';
+import { AliveReporter, aliveFile } from '../research/alive';
 import { LadderWatch } from '../research/ladder';
 import { rpcHolders } from '../research/holders';
-import type { Qualification } from '../research/qualify';
+import { QUALIFY_MEMORY, qualifyHeapMb, type Qualification } from '../research/qualify';
 
 const arg = (name: string) => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : undefined; };
 const REQUALIFY_MS = 6 * 3_600_000;
@@ -74,10 +76,18 @@ async function main(): Promise<void> {
   let qualifying = false;
   const requalify = () => {
     if (!calls || qualifying) return;
+    const heapMb = qualifyHeapMb(os.freemem());
+    if (heapMb === null) {
+      console.log(`${stamp()} qualification postponed ${QUALIFY_MEMORY.retryMs / 60_000} min: only ${Math.round(os.freemem() / 1048576)} MB of memory free`);
+      setTimeout(requalify, QUALIFY_MEMORY.retryMs).unref();
+      return;
+    }
     qualifying = true;
-    const child = spawn(process.execPath, ['--max-old-space-size=1536', '--import', 'tsx', path.join(repo, 'src', 'scripts', 'research-qualify.ts'), '--dir', dir],
+    const child = spawn(process.execPath, [`--max-old-space-size=${heapMb}`, '--import', 'tsx', path.join(repo, 'src', 'scripts', 'research-qualify.ts'), '--dir', dir],
       { cwd: repo, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-    let out = '';
+    // Below normal priority: the desk's exits and the observer's streams come first.
+    try { if (child.pid) os.setPriority(child.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); } catch { /* not permitted: normal priority */ }
+    let out = `heap cap ${heapMb} MB (${Math.round(os.freemem() / 1048576)} MB free at start)\n`;
     child.stdout.on('data', b => { out += String(b); });
     child.stderr.on('data', b => { out += String(b); });
     child.on('exit', code => {
@@ -116,7 +126,11 @@ async function main(): Promise<void> {
 
   // New launches and migrations for the desk on this machine (it stops polling the RPC for them while this runs).
   let observer: ResearchObserver | null = null;
-  const feed = new LocalFeed(() => observer?.streamHealthy() ?? false);
+  const startedAt = Date.now();
+  // The desk's dashboard reads this (GET /health): observer heartbeat, research-ledger writes, phone deliveries.
+  const feed = new LocalFeed(() => observer?.streamHealthy() ?? false, () => ({ startedAt,
+    ledger: { bytes: ledger.bytes, records: ledger.records, writeErrors: ledger.writeErrors, lastWriteError: ledger.lastWriteError, lowDisk: ledger.lowDisk },
+    phone: phone?.channels.length ? phone.health() : null }));
   await feed.listen(Number(env.RESEARCH_FEED_PORT) || LOCAL_FEED.port).catch((error: Error) => console.log(`local feed for the desk not started: ${error.message}`));
   observer = new ResearchObserver({ ledger, tradeSources: sources, calls, feed, log: line => console.log(line) });
   observer.start();
@@ -125,6 +139,17 @@ async function main(): Promise<void> {
   const stop = async () => { observer?.stop(); verified?.stop(); ladder?.stop(); feed.close(); await ledger.close(); await ladderLedger?.close(); process.exit(0); };
   process.on('SIGINT', () => void stop());
   process.on('SIGTERM', () => void stop());
+  // Dead-man: one ALIVE message a day (07:00 UTC or later); when it does not arrive, something is down.
+  const ago = (at: number | null, now: number) => at === null ? 'never' : now - at < 120_000 ? `${Math.round((now - at) / 1000)} s ago` : now - at < 7_200_000 ? `${Math.round((now - at) / 60_000)} min ago` : `${((now - at) / 3_600_000).toFixed(1)} h ago`;
+  const alive = phone?.channels.length ? new AliveReporter({ file: aliveFile(dir), notify: phone.notify, lines: now => {
+    const h = phone.health();
+    return [`Observer up ${((now - startedAt) / 3_600_000).toFixed(1)} h · launch stream ${observer?.streamHealthy() ? 'live' : 'DOWN'}.`,
+      `Desk last read the feed ${ago(feed.lastPollAt, now)}.`,
+      `Phone: ${h.delivered}/${h.sent} delivered since start${h.failed ? `, ${h.failed} failed (last: ${h.lastError})` : ''}.`,
+      `Research ledger: ${(ledger.bytes / 1048576).toFixed(0)} MB written${ledger.writeErrors ? `, ${ledger.writeErrors} write errors` : ''}${ledger.lowDisk ? ', LOW DISK' : ''}.`,
+      calls ? `Calls: ${calls.stats.calls} sent, ${calls.stats.judged} judged.` : 'Calls: off.'];
+  } }) : null;
+  if (alive) { void alive.tick(); setInterval(() => void alive.tick(), 60_000).unref(); }
   setInterval(() => console.log(`${observer!.status()}${verified ? ` · ${verified.status()}` : ''}${ladder ? ` · ${ladder.status()}` : ''}${phoneStatus()}`), 60_000).unref();
 }
 

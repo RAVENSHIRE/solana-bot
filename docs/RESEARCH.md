@@ -114,8 +114,16 @@ The desk sends nothing to ntfy by default (no rug confirmations). The research o
 
 3. **Research** — when a rule starts or stops calling, and once a day (first requalification after 00:00 UTC): how
    many rules qualify and the closest candidate with its later-period result and the hit rate it still needs.
+4. **ALIVE** — a dead-man message once a day at 07:00 UTC or later (once per day, also across restarts;
+   `data-desk/research/alive.json`): observer uptime, whether the launch stream is live, when the desk last read the
+   local feed, phone deliveries and failures, research-ledger write errors. **If it does not arrive, something is
+   down** (the observer, the PC, the network or ntfy).
 
-`--no-phone` keeps all three off the phone (records are still written); `--no-calls` turns the call engine off,
+Failed phone deliveries are logged at once (`phone delivery failed: ntfy HTTP 429`) and counted in the minute status
+line. The observer also answers `GET 127.0.0.1:3101/health` (uptime, ledger writes, phone deliveries); the desk reads it
+every 30 s and shows it, with the desk's own phone deliveries, in the health strip at the top of the Trading desk.
+
+`--no-phone` keeps all of these off the phone (records are still written); `--no-calls` turns the call engine off,
 `--no-verified` the verified-coin watch.
 
 **Rules** (`src/research/rules.ts`, fixed in code): a group of launches, a decision time after creation (5, 15, 30, 60

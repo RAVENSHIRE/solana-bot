@@ -318,3 +318,22 @@ test('coin check API: a Solana address only, one check at a time, the same coin 
     assert.equal((await (await post('coin-check', { mint }, headers)).json()).watched, true, 'the cached result knows it is watched now');
   } finally { await close(); }
 });
+
+test('phone alerts (CTO Q-16): capability-checked, only known kinds, saved through the desk handle', async () => {
+  let saved: string[] | null = null;
+  const { trading } = service('PHANTOM', false, {}, { phoneAlerts: { kinds: () => [], set: async kinds => { saved = [...kinds]; } } });
+  const { base, post, close } = await serve(trading);
+  try {
+    assert.equal((await post('desk', { action: 'phone-alerts', kinds: ['open'] })).status, 403, 'capability required');
+    assert.equal(saved, null);
+    const { capability } = await (await fetch(`${base}/api/trading/bootstrap`)).json();
+    const headers = { 'X-Local-Capability': capability };
+    const bad = await post('desk', { action: 'phone-alerts', kinds: ['open', 'everything'] }, headers);
+    assert.notEqual(bad.status, 200); assert.equal((await bad.json()).message, 'INVALID_ALERT_KINDS'); assert.equal(saved, null);
+    assert.equal((await (await post('desk', { action: 'phone-alerts', kinds: 'open' }, headers)).json()).message, 'INVALID_ALERT_KINDS');
+    assert.equal((await post('desk', { action: 'phone-alerts', kinds: ['open', 'rug'] }, headers)).status, 200);
+    assert.deepEqual(saved, ['open', 'rug']);
+    assert.equal((await post('desk', { action: 'phone-alerts', kinds: [] }, headers)).status, 200, 'switching every kind off is allowed');
+    assert.deepEqual(saved, []);
+  } finally { await close(); }
+});

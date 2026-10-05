@@ -60,13 +60,17 @@ export class EventLog {
 
   async flush(): Promise<void> {
     if (!this.file || !this.dirty) return;
+    // Cleared before the write (events added meanwhile set it again) and restored when the write fails, so the next
+    // flush retries instead of waiting for another event.
     this.dirty = false;
-    await atomicWriteFile(this.file, JSON.stringify(this.events));
+    try { await atomicWriteFile(this.file, JSON.stringify(this.events)); } catch (error) { this.dirty = true; throw error; }
     const rows = this.unlogged.splice(0), history = this.file.replace(/\.json$/, '.log.jsonl');
     if (!rows.length) return;
-    const size = await fs.stat(history).then(st => st.size, () => 0);
-    // A unique suffix: renaming to `.1` overwrote the previous rotation and destroyed older history.
-    if (size > 20 * 1024 * 1024) await fs.rename(history, `${history}.${new Date().toISOString().replace(/[:.]/g, '-')}`).catch(() => undefined);
-    await fs.appendFile(history, rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+    try {
+      const size = await fs.stat(history).then(st => st.size, () => 0);
+      // A unique suffix: renaming to `.1` overwrote the previous rotation and destroyed older history.
+      if (size > 20 * 1024 * 1024) await fs.rename(history, `${history}.${new Date().toISOString().replace(/[:.]/g, '-')}`).catch(() => undefined);
+      await fs.appendFile(history, rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+    } catch (error) { this.unlogged.unshift(...rows); this.dirty = true; throw error; }
   }
 }
