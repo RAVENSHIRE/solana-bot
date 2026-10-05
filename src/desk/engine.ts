@@ -158,6 +158,7 @@ export class DeskEngine {
   /** Alert keys already raised, with when: saved to alerts-sent-<MODE>.json so a restart neither re-alerts nor resets the OPEN cap. */
   private launchAlerts = new Map<string, number>();
   private alertWrite: Promise<void> = Promise.resolve();
+  private alertSavePending = false;
   /** When the last hour's OPEN alerts went to the phone (the hourly cap). */
   private readonly openPhoneSent: number[] = [];
   private launchPoll: Promise<void> | null = null;
@@ -430,13 +431,19 @@ export class DeskEngine {
   private async loadAlertMemory(now = Date.now()): Promise<void> {
     let saved: { keys?: unknown; openPhone?: unknown };
     try { saved = JSON.parse(await fs.readFile(this.alertMemoryFile(), 'utf8')); } catch { return; }
+    // A damaged file (null, an array, a hand edit) starts with an empty memory; it never stops the desk.
+    if (!saved || typeof saved !== 'object') return;
     if (Array.isArray(saved.keys)) for (const row of saved.keys) {
       if (Array.isArray(row) && typeof row[0] === 'string' && typeof row[1] === 'number' && now - row[1] <= ALERT_MEMORY.keepMs) this.launchAlerts.set(row[0], row[1]);
     }
     if (Array.isArray(saved.openPhone)) this.openPhoneSent.push(...saved.openPhone.filter((t): t is number => typeof t === 'number' && now - t <= 3_600_000).sort((a, b) => a - b));
   }
+  /** One write covers every alert raised before it runs: a burst of radar alerts costs one or two writes, not one each. */
   private saveAlertMemory(): void {
+    if (this.alertSavePending) return;
+    this.alertSavePending = true;
     this.alertWrite = this.alertWrite.then(async () => {
+      this.alertSavePending = false;
       const now = Date.now(), keys = [...this.launchAlerts].filter(([, at]) => now - at <= ALERT_MEMORY.keepMs);
       await atomicWriteFile(this.alertMemoryFile(), JSON.stringify({ keys, openPhone: this.openPhoneSent }) + '\n');
     }).catch(error => { this.event('FAILED', `Saving sent alerts failed: ${errorMessage(error)}`); });
@@ -1086,11 +1093,11 @@ export class DeskEngine {
       const age = Math.max(1, Math.round((now - state.at) / 60_000)), speed = openingSpeed(state);
       this.event('QUALIFIED', `OPEN screen: ${state.symbol} "${state.name}" ${age} min old · ${state.detail}${speed ? ` · ${speed.text}` : ''}`, ctx);
       const secs = Math.max(0, Math.round(((state.signalAt ?? now) - state.at) / 1000));
-      // A key already alerted (e.g. before a restart) never uses up one of the hour's phone slots.
+      // The phone slot is taken inside alertOnce, after its checks: a key already alerted (e.g. before a restart) never uses one.
       this.alertOnce(`open:${state.mint}`, `OPEN ${state.symbol}: $${((state.signalUsd ?? 0) / 1000).toFixed(1)}K, ${secs < 120 ? `${secs} s` : `${Math.round(secs / 60)} min`} after launch`,
         [`${state.name}${speed ? ` · ${speed.text}` : ''}`, state.detail, launch?.insiders?.detail ?? '',
           'Not a qualified call. Fast openers often rug within minutes: take profit early.', fomoUrl(state.mint)].filter(Boolean).join('\n'), 'open',
-        !this.launchAlerts.has(`open:${state.mint}`) && secs * 1000 <= OPENING.phoneWithinMs && this.openPhoneSlot(now));
+        () => secs * 1000 <= OPENING.phoneWithinMs && this.openPhoneSlot(now));
     }
     // A breakout is traded fresh: start a scan now instead of waiting for the next one.
     if (fresh.length && this.strategies.OPEN.enabled && !this.work) this.nextScanAt = Date.now();
@@ -1236,9 +1243,13 @@ export class DeskEngine {
     return true;
   }
 
-  /** `phone` false: recorded (and on the dashboard) like any alert, but not sent. */
-  private alertOnce(key: string, title: string, body: string, kind: AlertKind, phone = true): void {
+  /**
+   * `phone` false: recorded (and on the dashboard) like any alert, but not sent. A function is asked only for a new key
+   * with a notifier, so a limit it enforces (the OPEN cap) is never used up by an alert that is dropped anyway.
+   */
+  private alertOnce(key: string, title: string, body: string, kind: AlertKind, phoneOk: boolean | (() => boolean) = true): void {
     if (this.launchAlerts.has(key) || !this.d.notify) return;
+    const phone = typeof phoneOk === 'function' ? phoneOk() : phoneOk;
     this.launchAlerts.set(key, Date.now());
     if (this.launchAlerts.size > ALERT_MEMORY.maxKeys) this.launchAlerts.delete(this.launchAlerts.keys().next().value!);
     this.saveAlertMemory();

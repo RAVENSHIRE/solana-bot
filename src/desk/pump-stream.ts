@@ -44,7 +44,11 @@ export class LocalPumpStream implements PumpEventSource {
   healthy(now = Date.now()): boolean { return this.upstreamHealthy && now - this.lastOkAt < 10_000; }
   drainCreates(): LaunchEvent[] { const out = this.creates; this.creates = []; return out; }
   migrations(): Graduation[] { return this.recentMigrations; }
-  observer(): ObserverHealth { return { seenAt: this.lastOkAt || null, streamHealthy: this.upstreamHealthy, report: this.report, reportAt: this.reportAt }; }
+  /** The /health report only while it is recent: a stopped observer's last report is never shown as current. */
+  observer(now = Date.now()): ObserverHealth {
+    const fresh = this.reportAt !== null && now - this.reportAt < 90_000;
+    return { seenAt: this.lastOkAt || null, streamHealthy: this.upstreamHealthy, report: fresh ? this.report : null, reportAt: fresh ? this.reportAt : null };
+  }
 
   /** The observer's GET /health, at most every 30 s; an observer without it (older version) just has no report. */
   private async readReport(): Promise<void> {
@@ -82,7 +86,8 @@ export class LocalPumpStream implements PumpEventSource {
       if (this.creates.length > 5_000) this.creates.splice(0, this.creates.length - 5_000);
       if (this.recentMigrations.length > 2_000) this.recentMigrations.splice(0, this.recentMigrations.length - 2_000);
       this.after = j.seq; this.upstreamHealthy = j.healthy; this.lastOkAt = Date.now();
-      await this.readReport();
+      // Not awaited: a slow /health never delays the next launch poll.
+      void this.readReport();
     } catch { this.failures++; }
     finally { this.busy = false; }
   }

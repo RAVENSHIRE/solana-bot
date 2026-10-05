@@ -142,6 +142,8 @@ test('CTO-09 (Q-17): the desk reads the observer\'s /health and the dashboard st
   try {
     const stream = new LocalPumpStream(`http://127.0.0.1:${port}/pump/events`);
     await stream.poll();
+    // /health is read beside the poll (never blocking it): wait for it.
+    for (let i = 0; i < 50 && !stream.observer().report; i++) await new Promise(r => setTimeout(r, 20));
     assert.ok(feed.lastPollAt !== null, 'the observer knows when the desk last read it');
     const seen = stream.observer();
     assert.ok(seen.seenAt !== null && seen.report !== null);
@@ -211,4 +213,71 @@ test('CTO-13 (Q-25, Q-26, Q-30): the docs say what the code does', async () => {
   const pm2 = await fs.readFile(path.join(process.cwd(), 'ecosystem.config.js'), 'utf8');
   assert.match(pm2, /LEGACY/);
   assert.deepEqual([...pm2.matchAll(/script: '([^']+)'/g)].map(m => m[1]), ['./dist/index.js', './dist/dashboard/server.js'], 'PM2 runs only the legacy bot and its dashboard');
+});
+
+test('CTO-14 (review): ALIVE never throws on a damaged alive.json or a failing status, and the alert memory survives a null file', async () => {
+  const { AliveReporter } = await import('../src/research/alive');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cto-review-')), file = path.join(dir, 'alive.json'), sent: string[] = [];
+  const now = Date.parse('2026-10-05T08:00:00Z');
+  for (const damaged of ['', 'null', '{"day":', '[1,2]']) {
+    await fs.writeFile(file, damaged);
+    const a = new AliveReporter({ file, now: () => now, notify: async t => { sent.push(t); }, lines: () => { throw new Error('observer not ready'); } });
+    assert.equal(await a.tick(), true, `damaged file ${JSON.stringify(damaged)} means "not sent today"`);
+  }
+  assert.equal(sent.length, 4);
+  const proto = DeskEngine.prototype as unknown as Record<string, (...a: unknown[]) => unknown>;
+  await fs.writeFile(path.join(dir, 'alerts-sent-PAPER.json'), 'null');
+  const e: Record<string, unknown> = { d: { dir, mode: 'PAPER' }, launchAlerts: new Map(), openPhoneSent: [] };
+  for (const m of ['alertMemoryFile', 'loadAlertMemory']) e[m] = proto[m]!.bind(e);
+  await (e.loadAlertMemory as () => Promise<void>)();
+  assert.equal((e.launchAlerts as Map<string, number>).size, 0, 'a null file starts empty instead of stopping the desk');
+});
+
+test('CTO-15 (review): the OPEN phone slot is only taken for a new alert; a burst of alerts is saved in one or two writes', async () => {
+  const proto = DeskEngine.prototype as unknown as Record<string, (...a: unknown[]) => unknown>;
+  let asked = 0, writes = 0;
+  const e: Record<string, unknown> = { d: { notify: async () => undefined, alerts: new Set(['open']), research: null, mode: 'PAPER', dir: os.tmpdir() },
+    launchAlerts: new Map([['open:MINT', Date.now()]]), alertWrite: Promise.resolve(), alertSavePending: false, event: () => undefined,
+    alertMemoryFile: () => { writes++; return path.join(os.tmpdir(), `cto-alerts-${process.pid}.json`); }, openPhoneSent: [] };
+  for (const m of ['alertOnce', 'recordAlert', 'saveAlertMemory']) e[m] = proto[m]!.bind(e);
+  const alertOnce = e.alertOnce as (k: string, t: string, b: string, kind: string, phone?: boolean | (() => boolean)) => void;
+  alertOnce('open:MINT', 'again', 'b', 'open', () => { asked++; return true; });
+  assert.equal(asked, 0, 'an alert already sent never asks for (and uses up) a phone slot');
+  for (let i = 0; i < 40; i++) alertOnce(`radar:M${i}`, 't', 'b', 'radar');
+  await (e.alertWrite as Promise<void>);
+  assert.ok(writes >= 1 && writes <= 2, `${writes} writes for 40 alerts`);
+});
+
+test('CTO-16 (review): a channel that always fails is flagged even while another delivers; stale observer reports and failed qualifications show', async () => {
+  const { healthLines } = await import('../src/desk/health');
+  const { LocalPumpStream } = await import('../src/desk/pump-stream');
+  const n = notifier({ DESK_NTFY_TOPIC: 'raven-desk-8f3k2', DESK_TELEGRAM_BOT_TOKEN: '123:abc_DEF', DESK_TELEGRAM_CHAT_ID: '-42' },
+    (async (url: string) => new Response('', { status: String(url).includes('telegram') ? 401 : 200 })) as unknown as typeof fetch);
+  await n.notify('A', 'b'); await n.notify('B', 'b');
+  assert.deepEqual(n.health().failing, ['Telegram']);
+  const now = Date.now(), desk = healthLines({ observer: null, streamOff: true, phone: n.health(), channels: 2 }, now).find(l => l.label.startsWith('Desk phone'))!;
+  assert.equal(desk.bad, true); assert.match(desk.text, /FAILING: Telegram/);
+  // A report older than 90 s is dropped by the stream; the strip then shows no uptime or counters for a dead observer.
+  const stream = new LocalPumpStream('http://127.0.0.1:9/pump/events');
+  Object.assign(stream as unknown as Record<string, unknown>, { lastOkAt: now - 120_000, upstreamHealthy: true, report: { startedAt: now - 3_600_000 }, reportAt: now - 120_000 });
+  assert.equal(stream.observer(now).report, null);
+  const lines = healthLines({ observer: { seenAt: now - 120_000, streamHealthy: true, report: { startedAt: now - 3_600_000 }, reportAt: now - 120_000 }, streamOff: false, phone: null, channels: 0 }, now);
+  assert.doesNotMatch(lines[0]!.text, /up \d/, 'no uptime for an observer that stopped answering');
+  const q = healthLines({ observer: { seenAt: now, streamHealthy: true, reportAt: now, report: { qualification: { okAt: now - 7 * 3_600_000, failedAt: now - 60_000, error: 'exit 134 (out of heap)' } } }, streamOff: false, phone: null, channels: 0 }, now)
+    .find(l => l.label.startsWith('Qualification'))!;
+  assert.equal(q.bad, true); assert.match(q.text, /out of heap/);
+});
+
+test('CTO-17 (review): event history kept for retry is bounded while the history file stays unwritable', async () => {
+  const { EventLog, EVENT_HISTORY_MAX_PENDING } = await import('../src/desk/events');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cto-history-'));
+  await fs.mkdir(path.join(dir, 'events-PAPER.log.jsonl')); // a directory in its place: every append fails
+  const log = new EventLog('PAPER', path.join(dir, 'events-PAPER.json'), () => 1_000);
+  const priv = log as unknown as { unlogged: unknown[]; droppedHistory: number };
+  for (let round = 0; round < 3; round++) {
+    for (let i = 0; i < EVENT_HISTORY_MAX_PENDING / 2; i++) log.add('FILTERED', `token ${i}`);
+    await assert.rejects(log.flush());
+  }
+  assert.equal(priv.unlogged.length, EVENT_HISTORY_MAX_PENDING, 'bounded');
+  assert.equal(priv.droppedHistory, EVENT_HISTORY_MAX_PENDING / 2, 'the oldest rows are dropped and counted');
 });

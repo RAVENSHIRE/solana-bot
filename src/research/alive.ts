@@ -30,14 +30,25 @@ export class AliveReporter {
     try {
       const now = (this.d.now ?? Date.now)(), day = new Date(now).toISOString().slice(0, 10);
       if (new Date(now).getUTCHours() < (this.d.hourUtc ?? ALIVE.hourUtc)) return false;
-      if (this.lastDay === undefined) this.lastDay = await fs.readFile(this.d.file, 'utf8').then(t => (JSON.parse(t) as { day?: string }).day ?? null, () => null);
+      // A missing, empty or damaged file (power cut) means "not sent today yet".
+      if (this.lastDay === undefined) this.lastDay = await savedDay(this.d.file);
       if (this.lastDay === day) return false;
       this.lastDay = day;
       await atomicWriteFile(this.d.file, `${JSON.stringify({ day, at: now })}\n`).catch(() => undefined);
-      await this.d.notify('ALIVE: research observer', this.d.lines(now).join('\n')).catch(() => undefined);
+      let lines: string[];
+      try { lines = this.d.lines(now); } catch (error) { lines = [`(status unavailable: ${error instanceof Error ? error.message : String(error)})`]; }
+      await this.d.notify('ALIVE: research observer', lines.join('\n')).catch(() => undefined);
       return true;
-    } finally { this.busy = false; }
+    } catch { return false; } finally { this.busy = false; }
   }
 }
 
 export const aliveFile = (dir: string) => path.join(dir, 'alive.json');
+
+async function savedDay(file: string): Promise<string | null> {
+  try {
+    const saved = JSON.parse(await fs.readFile(file, 'utf8')) as unknown;
+    const day = saved && typeof saved === 'object' ? (saved as { day?: unknown }).day : null;
+    return typeof day === 'string' ? day : null;
+  } catch { return null; }
+}

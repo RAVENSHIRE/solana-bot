@@ -201,7 +201,11 @@ export interface NotifyOptions { click?: string | null; tags?: string[] }
 export type Notify = (title: string, body: string, options?: NotifyOptions) => Promise<void>;
 
 /** Delivery record of one notifier: a message counts as delivered when at least one channel accepted it. */
-export interface NotifyHealth { sent: number; delivered: number; failed: number; lastOkAt: number | null; lastFailureAt: number | null; lastError: string | null }
+export interface NotifyHealth {
+  sent: number; delivered: number; failed: number; lastOkAt: number | null; lastFailureAt: number | null; lastError: string | null;
+  /** Channels whose latest attempt failed (e.g. Telegram refusing while ntfy delivers): the phone warning keys on this. */
+  failing?: string[];
+}
 
 /**
  * Phone notifications, opt-in through .env: DESK_NTFY_TOPIC (the ntfy app, no account; pick a long random topic) and/or
@@ -231,6 +235,7 @@ export function notifier(env: NodeJS.ProcessEnv, fetcher: typeof fetch = fetch, 
   }
   // Each channel's outcome (HTTP status, error class; never a message, which could contain the bot token) for the alert record.
   const health: NotifyHealth = { sent: 0, delivered: 0, failed: 0, lastOkAt: null, lastFailureAt: null, lastError: null }, now = o.now ?? Date.now;
+  const failing = new Set<string>();
   const deliver = async (title: string, body: string, options?: NotifyOptions): Promise<ChannelResult[]> => {
     const results = (await Promise.allSettled(send.map(f => f(title, body, options)))).map((r, i): ChannelResult => {
       if (r.status === 'rejected') return { channel: channels[i]!, ok: false, status: null, error: r.reason instanceof Error ? r.reason.name : 'error' };
@@ -240,13 +245,14 @@ export function notifier(env: NodeJS.ProcessEnv, fetcher: typeof fetch = fetch, 
     if (!results.length) return results;
     health.sent++;
     if (results.some(r => r.ok)) { health.delivered++; health.lastOkAt = now(); } else health.failed++;
+    for (const r of results) if (r.ok) failing.delete(r.channel); else failing.add(r.channel);
     for (const r of results.filter(x => !x.ok)) {
       health.lastFailureAt = now(); health.lastError = `${r.channel} ${r.status !== null ? `HTTP ${r.status}` : r.error}`;
       try { o.onFailure?.(r); } catch { /* a logging callback never breaks delivery */ }
     }
     return results;
   };
-  return { channels, deliver, health: () => ({ ...health }), notify: async (title, body, options) => { await deliver(title, body, options); } };
+  return { channels, deliver, health: () => ({ ...health, failing: [...failing] }), notify: async (title, body, options) => { await deliver(title, body, options); } };
 }
 
 export interface Holding { mint: string; symbol: string | null; balance: number; valueUsd: number | null; marketCapUsd: number | null; fomoUrl: string }

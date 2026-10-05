@@ -11,6 +11,9 @@ const eventSchema = z.object({ id: z.number().int().nonnegative(), at: z.number(
 /** Per-token scanner outcomes: dozens per scan. Kept in their own window so they never push out execution events. */
 const NOISE = new Set<string>(['FILTERED', 'WATCHLIST', 'SCANNING']);
 
+/** History rows kept for retry while the .log.jsonl cannot be written; older ones are dropped and counted. */
+export const EVENT_HISTORY_MAX_PENDING = 20_000;
+
 /** Timestamped pipeline telemetry for one mode. Persisted so stopping never loses it. */
 export class EventLog {
   private events: DeskEvent[] = [];
@@ -18,6 +21,8 @@ export class EventLog {
   private dirty = false;
   /** Every event is also appended to a JSONL history so long runs are reviewable beyond the on-screen window. */
   private unlogged: DeskEvent[] = [];
+  /** History rows dropped because the history file stayed unwritable. */
+  droppedHistory = 0;
   constructor(readonly mode: DeskMode, private readonly file: string | null, private readonly now: () => number = Date.now) {}
 
   /** Where an unreadable events file was moved before this log started empty. */
@@ -71,6 +76,11 @@ export class EventLog {
       // A unique suffix: renaming to `.1` overwrote the previous rotation and destroyed older history.
       if (size > 20 * 1024 * 1024) await fs.rename(history, `${history}.${new Date().toISOString().replace(/[:.]/g, '-')}`).catch(() => undefined);
       await fs.appendFile(history, rows.map(r => JSON.stringify(r)).join('\n') + '\n');
-    } catch (error) { this.unlogged.unshift(...rows); this.dirty = true; throw error; }
+    } catch (error) {
+      // Kept for the next flush, but bounded: a history file that stays locked must not grow memory without end.
+      this.unlogged.unshift(...rows);
+      if (this.unlogged.length > EVENT_HISTORY_MAX_PENDING) { this.droppedHistory += this.unlogged.length - EVENT_HISTORY_MAX_PENDING; this.unlogged.splice(0, this.unlogged.length - EVENT_HISTORY_MAX_PENDING); }
+      this.dirty = true; throw error;
+    }
   }
 }

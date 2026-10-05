@@ -73,13 +73,21 @@ async function main(): Promise<void> {
     log: line => console.log(`${new Date().toISOString().slice(0, 19)} ${line}`) });
   const file = path.join(dir, 'qualified.json');
   const load = () => { try { calls?.setQualification(JSON.parse(fs.readFileSync(file, 'utf8')) as Qualification); } catch { calls?.setQualification(null); } };
-  let qualifying = false;
+  let qualifying = false, retry: NodeJS.Timeout | null = null;
+  // The last successful and failed run (qualified.json's age counts as the last success): on /health, the dashboard
+  // strip and the ALIVE message, so a qualification that keeps failing (e.g. out of heap) is seen.
+  const qualifyStatus: { okAt: number | null; failedAt: number | null; error: string | null } = {
+    okAt: fs.existsSync(file) ? fs.statSync(file).mtimeMs : null, failedAt: null, error: null };
   const requalify = () => {
     if (!calls || qualifying) return;
+    if (retry) { clearTimeout(retry); retry = null; }
     const heapMb = qualifyHeapMb(os.freemem());
     if (heapMb === null) {
+      // One pending retry at most, whichever timer asked.
       console.log(`${stamp()} qualification postponed ${QUALIFY_MEMORY.retryMs / 60_000} min: only ${Math.round(os.freemem() / 1048576)} MB of memory free`);
-      setTimeout(requalify, QUALIFY_MEMORY.retryMs).unref();
+      Object.assign(qualifyStatus, { failedAt: Date.now(), error: `postponed: ${Math.round(os.freemem() / 1048576)} MB free` });
+      retry = setTimeout(() => { retry = null; requalify(); }, QUALIFY_MEMORY.retryMs);
+      retry.unref();
       return;
     }
     qualifying = true;
@@ -93,7 +101,11 @@ async function main(): Promise<void> {
     child.on('exit', code => {
       qualifying = false;
       fs.writeFile(path.join(dir, 'qualify.log'), out, () => undefined);
-      if (code === 0) load(); else console.log(`qualification failed (exit ${code}); see ${path.join(dir, 'qualify.log')}`);
+      if (code === 0) { load(); qualifyStatus.okAt = Date.now(); }
+      else {
+        Object.assign(qualifyStatus, { failedAt: Date.now(), error: `exit ${code}${/heap out of memory/i.test(out) ? ' (out of heap)' : ''}` });
+        console.log(`qualification failed (exit ${code}); see ${path.join(dir, 'qualify.log')}`);
+      }
     });
   };
   if (calls) {
@@ -130,7 +142,7 @@ async function main(): Promise<void> {
   // The desk's dashboard reads this (GET /health): observer heartbeat, research-ledger writes, phone deliveries.
   const feed = new LocalFeed(() => observer?.streamHealthy() ?? false, () => ({ startedAt,
     ledger: { bytes: ledger.bytes, records: ledger.records, writeErrors: ledger.writeErrors, lastWriteError: ledger.lastWriteError, lowDisk: ledger.lowDisk },
-    phone: phone?.channels.length ? phone.health() : null }));
+    phone: phone?.channels.length ? phone.health() : null, qualification: calls ? { ...qualifyStatus } : null }));
   await feed.listen(Number(env.RESEARCH_FEED_PORT) || LOCAL_FEED.port).catch((error: Error) => console.log(`local feed for the desk not started: ${error.message}`));
   observer = new ResearchObserver({ ledger, tradeSources: sources, calls, feed, log: line => console.log(line) });
   observer.start();
@@ -147,7 +159,7 @@ async function main(): Promise<void> {
       `Desk last read the feed ${ago(feed.lastPollAt, now)}.`,
       `Phone: ${h.delivered}/${h.sent} delivered since start${h.failed ? `, ${h.failed} failed (last: ${h.lastError})` : ''}.`,
       `Research ledger: ${(ledger.bytes / 1048576).toFixed(0)} MB written${ledger.writeErrors ? `, ${ledger.writeErrors} write errors` : ''}${ledger.lowDisk ? ', LOW DISK' : ''}.`,
-      calls ? `Calls: ${calls.stats.calls} sent, ${calls.stats.judged} judged.` : 'Calls: off.'];
+      calls ? `Calls: ${calls.stats.calls} sent, ${calls.stats.judged} judged. Qualification last ok ${ago(qualifyStatus.okAt, now)}${qualifyStatus.failedAt !== null && (qualifyStatus.okAt === null || qualifyStatus.failedAt > qualifyStatus.okAt) ? `, LAST RUN FAILED (${qualifyStatus.error})` : ''}.` : 'Calls: off.'];
   } }) : null;
   if (alive) { void alive.tick(); setInterval(() => void alive.tick(), 60_000).unref(); }
   setInterval(() => console.log(`${observer!.status()}${verified ? ` · ${verified.status()}` : ''}${ladder ? ` · ${ladder.status()}` : ''}${phoneStatus()}`), 60_000).unref();

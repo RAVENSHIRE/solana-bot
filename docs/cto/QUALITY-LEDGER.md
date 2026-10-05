@@ -72,7 +72,7 @@ unknown outcome; amounts in the guard are integer lamports (`bigint`).
 
 | # | Standard | Pass/fail | Evidence |
 | --- | --- | --- | --- |
-| 1 | The test suite is green and deterministic | PASS | 5 Oct: 323/323 root, 18/18 dashboard; the one known flake was a fixture bug (Q-29) |
+| 1 | The test suite is green and deterministic | PASS | 5 Oct: 327/327 root, 18/18 dashboard; the one known flake was a fixture bug (Q-29) |
 | 2 | Every change is gated by CI (typecheck, both suites, build) | FAIL | No `.github/`; dashboard tests not in root `npm test` (Q-18) |
 | 3 | Processes restart by themselves after a crash or reboot | PASS (5 Oct) | `ops/supervise.mjs` + autostart + session restore (Q-06); empty lock and zero-byte files no longer block a start (Q-32, Q-33) |
 | 4 | Money-critical state is persisted before anything optional | PASS (after Q-01) | Ledgers saved first, isolated from telemetry |
@@ -160,3 +160,22 @@ dashboard tests pin behaviour that was already right. What the owner will notice
 repeats alerts or resets the OPEN cap (new file `data-desk/alerts-sent-<MODE>.json`); `qualify.log` shows the heap cap
 and peak memory. Not done, by instruction: Q-10, Q-18, Q-27; Q-28 left for the owner (it touches the Phantom SDK).
 No strategy parameter, entry/exit, qualification criterion, LIVE behaviour or signing/sending path was changed.
+
+### Review of the second pass (5 Oct)
+
+An independent code review of `claude/session-title-unavailable-wennx2...claude/cto-quality-audit` found ten defects in
+the second pass. All ten were confirmed by reading the code and fixed in one commit; tests CTO-14…17 fail on the
+reviewed code and pass after it.
+
+| # | Defect in the second pass | Fix |
+| --- | --- | --- |
+| 1 | `AliveReporter.tick()` threw on a damaged `alive.json` (power cut) or a failing status line; called with `void`, the unhandled rejection would crash-loop the observer | Damaged file = not sent today; every path caught |
+| 2 | Phone warning compared timestamps set in the same millisecond; a channel that always fails (Telegram 401 while ntfy works) was hidden | Notifier tracks `failing` channels; the strip names them |
+| 3 | Event-history rows kept for retry grew without bound while the history file stayed locked | At most 20,000 kept, older ones dropped and counted |
+| 4 | Requalification at 60 % of free memory (~1 GB on Raven) could fail every run unseen | Last ok / last failure (with "out of heap") on `/health`, the strip and the ALIVE message. **Watch `qualify.log` peak RSS after the first deploy**; raise the share if runs fail |
+| 5 | A postponed requalification started a second retry chain next to the 6 h timer | One pending retry at most |
+| 6 | `/health` was read inside the launch poll and could delay new launches up to 3 s | Read beside the poll |
+| 7 | A stopped observer's last report kept showing as current (uptime kept rising) | Reports older than 90 s are dropped |
+| 8 | `alerts-sent-<MODE>.json` containing `null` stopped the desk from starting | Treated as empty |
+| 9 | Every alert rewrote the whole alert memory | Writes coalesce: a burst costs one or two |
+| 10 | The OPEN phone slot was taken before `alertOnce`'s checks (patched only at the call site) | `alertOnce` takes a lazy phone predicate, asked only for a new alert |
