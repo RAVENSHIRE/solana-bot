@@ -66,3 +66,24 @@ own graduation price is not in the alert). That puts it in P2's `poolJumpX` ≤ 
 the $5.25M rug. The entry was again a real dip: −15 % from the high. So far three cases, all consistent with P2:
 two sane openers ran, one 100× opener rugged. **Three known cases are still not evidence.** P2's shadow test
 (≥ 30 trades, bot and phone speed) decides.
+
+## TEST trade, 5 Oct 18:53 UTC: `7PUJBf…ipump` ("fomocoin"), a winner sold at −91 %
+
+Owner: GOLDEN's paper position showed a large unrealised gain ("4.9"), then sold for −$1.83 on about $2 (the sell
+line: Jupiter via the Pump.fun AMM, PAPER FILLED). "Why didn't it close at +100 %?"
+
+- **By design GOLDEN has no take profit.** `config.ts` sets `takeProfitPct: Infinity`, with a 25 % trailing stop
+  after +50 %, a 40 % stop and 60 min at most. `strategies.ts` describes it: "No take profit: the trailing stop rides
+  the move".
+- **The trailing stop should have sold about 25 % under the peak.** It sold at about −91 %. The position is checked
+  every 3 s (`positionCheckMs` 3,000), and once the trail is active every check takes a Jupiter quote
+  (`engine.ts`, `quoteDue`). A fall from a large gain to −91 % between two checks means the price gapped, most
+  likely a rug in one or a few transactions. That is the failure `config.ts` already records for GOLDEN: "rugs fall
+  through the stop in seconds". It could also be a gap in the quotes (an outage). The desk's event log for this
+  position (QUOTE and EXIT lines with times) would tell which.
+- **Lesson:** a trailing stop cannot protect a position against a one-block rug. Only an exit taken *before* the rug
+  protects it. For coins this volatile that means taking part of the profit at a fixed level.
+
+**Added to P2's shadow test (pre-registered 5 Oct, before any P2 data): three exits on the same entries.**
+(a) as now: trail 25 % after +50 %, stop −40 %, 60 min; (b) a +100 % take profit plus (a); (c) sell half at +100 %,
+the rest as (a). Judged together at bot and phone speed. The gate picks none of them unless it passes on its own.
