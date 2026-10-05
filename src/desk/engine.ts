@@ -162,6 +162,7 @@ export class DeskEngine {
   private loggedSkips = new Map<string, string>();
   /** TEST: sleeves that ran dry and were re-funded; their trades still count in the strategy stats. */
   private cycles = new Map<StrategyId, LedgerState[]>();
+  private readonly damagedCycles: string[] = [];
   private currentScanAt = 0;
   private readonly graduations: GraduationFeed;
   private lastCompletedScanAt = 0;
@@ -229,6 +230,9 @@ export class DeskEngine {
     for (const error of custom.errors) engine.event('FAILED', `Custom strategy not loaded: ${error}`);
     if (d.operational?.deploymentMode !== 'LOCKED') await engine.loadSettings();
     if (d.mode === 'PAPER') for (const id of engine.ids()) { await engine.ledgerFor(id, null); await engine.loadCycles(id); }
+    // Files a power cut left unreadable were moved aside (events.ts, ledger.ts): said once, so a fresh TEST is explained.
+    const damaged = [engine.events.damaged, ...[...engine.ledgers.values()].map(l => l.damaged), ...engine.damagedCycles].filter((f): f is string => !!f);
+    if (damaged.length) engine.event('FAILED', `Unreadable files moved aside (power cut?); ${d.mode === 'PAPER' ? 'TEST starts fresh' : 'the event log starts empty'}: ${damaged.map(f => path.basename(f)).join(', ')}`);
     return engine;
   }
 
@@ -1425,7 +1429,10 @@ export class DeskEngine {
   }
   private async loadCycles(id: StrategyId): Promise<void> {
     const states: LedgerState[] = [];
-    for (const name of await this.cycleFiles(id)) states.push((await DeskLedger.open(path.join(this.d.dir, name), 'PAPER', null, Date.now())).state);
+    for (const name of await this.cycleFiles(id)) {
+      const cycle = await DeskLedger.open(path.join(this.d.dir, name), 'PAPER', null, Date.now());
+      if (cycle.damaged) this.damagedCycles.push(cycle.damaged); else states.push(cycle.state);
+    }
     this.cycles.set(id, states);
   }
 

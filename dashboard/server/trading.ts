@@ -30,6 +30,11 @@ function rejectCode(error: unknown): string | null {
   const code: unknown = (error as Error & { code?: unknown }).code;
   return typeof code === 'string' ? code : null;
 }
+/** Why the desk did not open, for the log and the page: a reject code, or a plain error whose message is a code (LEDGER_INVALID). */
+function openCode(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : '';
+  return rejectCode(error) ?? (/^[A-Z][A-Z0-9_]{2,63}$/.test(message) ? message : null);
+}
 /** The human-readable part of a rejection (`CODE: detail`), e.g. which field of a strategy spec is invalid. */
 function rejectDetail(error: unknown, code: string): string | undefined {
   const message = error instanceof Error ? error.message : '';
@@ -108,7 +113,7 @@ export class TradingService {
     try { saved = JSON.parse(await fs.readFile(file, 'utf8')) as SavedSession; } catch { /* nothing saved yet */ }
     if (!saved?.running || (saved.mode !== 'PAPER' && saved.mode !== 'LIVE')) { this.restoring = false; return null; }
     let handle: DeskHandle;
-    try { handle = await this.ensureDesk(); } catch (error) { return this.retryRestore(saved.mode, attempt, `desk unavailable: ${rejectCode(error) ?? 'error'}`); }
+    try { handle = await this.ensureDesk(); } catch (error) { return this.retryRestore(saved.mode, attempt, `desk unavailable: ${openCode(error) ?? 'error'}`); }
     const tell = (title: string, body: string) => { log(`${title}: ${body}`); void handle.notify?.(title, body).catch(() => undefined); };
     if (saved.mode === 'PAPER') {
       const paper = handle.engines.PAPER;
@@ -174,7 +179,7 @@ export class TradingService {
       if (this.closed) return handle.close().then(() => { throw new DeskReject('SERVICE_CLOSED'); });
       this.desk = handle; this.deskError = null; return handle;
     }).catch(error => {
-      this.deskError = rejectCode(error) ?? 'DESK_UNAVAILABLE';
+      this.deskError = openCode(error) ?? 'DESK_UNAVAILABLE';
       throw error;
     }).finally(() => { this.opening = null; });
     return this.opening;

@@ -67,9 +67,22 @@ async function deadLockOwner(file: string): Promise<number | null> {
   }
 }
 
+/**
+ * Legt eine unlesbare Datei beiseite (`<file>.damaged-<Zeit>`), damit eine neue beginnen kann; die beschädigte bleibt
+ * zum Nachsehen liegen. Gibt den neuen Namen zurück.
+ */
+export async function setAside(file: string, now = Date.now()): Promise<string> {
+  const to = `${file}.damaged-${new Date(now).toISOString().replace(/[:.]/g, '-')}`;
+  await fs.promises.rename(file, to);
+  return to;
+}
+
 async function writeOnce(file: string, data: string, attempts: number): Promise<void> {
   const tmp = `${file}.tmp-${process.pid}`;
-  await fs.promises.writeFile(tmp, data, { encoding: 'utf8', mode: 0o600 });
+  // Auf die Platte zwingen, bevor umbenannt wird: sonst kann ein Stromausfall den neuen Namen mit Nullen statt Daten
+  // hinterlassen (Raven, 3 Oct: alle TEST-Ledger nur noch Null-Bytes, der Desk startete nicht mehr).
+  const handle = await fs.promises.open(tmp, 'w', 0o600);
+  try { await handle.writeFile(data, 'utf8'); await handle.sync(); } finally { await handle.close(); }
   for (let i = 1; ; i++) {
     try {
       await fs.promises.rename(tmp, file);

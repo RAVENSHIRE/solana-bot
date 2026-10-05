@@ -37,6 +37,11 @@ research observer and the dashboard running:
   press *Resume*. If the reconciliation fails it is retried every 30 s for 5 minutes, then the phone is told. LIVE with
   Phantom cannot sign by itself and is never resumed; the phone is told that its positions have no exits.
 - Logs over 50 MB are moved to `.1` at a restart. The supervisor's own log is `data-desk\supervisor.log`.
+- **A power cut or hard shutdown does not keep the desk down.** The desk's files are written to disk before they replace
+  the old ones. A lock file that holds no process number and is older than a minute counts as left over. An unreadable TEST
+  ledger or event file (on Raven on 3 Oct, every file written in the last second held only zero bytes) is moved aside
+  as `<name>.damaged-<time>`, and TEST starts fresh; the desk log says which files it moved. An unreadable LIVE ledger
+  still stops the desk (`LEDGER_INVALID`), because it is a record of real money: look at it before you remove it.
 
 Commands: `node ops\supervise.mjs --status` (last heartbeat), `--restart` (after a `git pull`: restarts the supervisor too, so its own new code applies; no phone message),
 `--stop` (stops everything and keeps the watchdog off), `--start`. `ops\uninstall-autostart.cmd` removes it. While it

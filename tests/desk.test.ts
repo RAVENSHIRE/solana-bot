@@ -161,6 +161,27 @@ test('ledger: TEST PnL books both network fees once and account rent until it is
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
+test('power cut: zero-byte TEST ledgers and event files are moved aside and start fresh; a damaged LIVE ledger still stops the desk', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-damaged-')), NOW = Date.parse('2026-10-05T12:00:00Z');
+  try {
+    // Raven, 3 Oct: every file written in the last second before the shutdown held only zero bytes.
+    for (const f of ['ledger-PAPER.json', 'ledger-PAPER-CRASH.json', 'ledger-LIVE-x.json', 'events-PAPER.json']) await fs.writeFile(path.join(dir, f), Buffer.alloc(3_672));
+    const paper = await DeskLedger.open(path.join(dir, 'ledger-PAPER.json'), 'PAPER', null, NOW);
+    assert.equal(paper.state.entries.length, 0); assert.equal(paper.state.createdAt, NOW);
+    assert.equal(paper.damaged, path.join(dir, 'ledger-PAPER.json.damaged-2026-10-05T12-00-00-000Z'));
+    assert.equal((await fs.stat(paper.damaged!)).size, 3_672, 'kept for a look');
+    await paper.save();
+    assert.equal((await DeskLedger.open(path.join(dir, 'ledger-PAPER.json'), 'PAPER', null, NOW)).damaged, null, 'the fresh one reads back');
+    await assert.rejects(DeskLedger.open(path.join(dir, 'ledger-LIVE-x.json'), 'LIVE', 'x', NOW), /LEDGER_INVALID/);
+    assert.equal((await fs.stat(path.join(dir, 'ledger-LIVE-x.json'))).size, 3_672, 'a LIVE ledger is never moved');
+    // The whole TEST engine opens, and says once what it moved.
+    const engine = await DeskEngine.create({ ...world().shared, mode: 'PAPER', dir, sender: null, wallet: () => null });
+    const said = engine.status({ connected: false, address: null }).events.filter(e => e.stage === 'FAILED' && /moved aside/.test(e.message));
+    assert.equal(said.length, 1); assert.match(said[0]!.message, /TEST starts fresh: events-PAPER\.json\.damaged-.*ledger-PAPER-CRASH\.json\.damaged-/);
+    assert.ok((await fs.readdir(dir)).some(f => f.startsWith('events-PAPER.json.damaged-')));
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
 test('process lock: a crashed owner is recovered; a live owner or a fresh empty lock still blocks; an old empty lock is stale', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-lock-')), lock = path.join(dir, 'desk.lock');
   try {
@@ -174,7 +195,11 @@ test('process lock: a crashed owner is recovered; a live owner or a fresh empty 
     // An empty lock from before a hard shutdown (Raven, 3 Oct): stale after a minute, so the desk can start again.
     const old = new Date(Date.now() - 2 * 60_000); await fs.utimes(lock, old, old);
     const again = await acquireProcessLock(lock); assert.equal(await fs.readFile(lock, 'utf8'), String(process.pid));
-    await again.close();
+    await again.close(); await fs.unlink(lock);
+    // What Raven's lock actually held after the shutdown: five zero bytes, not nothing.
+    await fs.writeFile(lock, Buffer.alloc(5)); await fs.utimes(lock, old, old);
+    const zeros = await acquireProcessLock(lock); assert.equal(await fs.readFile(lock, 'utf8'), String(process.pid));
+    await zeros.close();
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
