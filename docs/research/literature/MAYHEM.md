@@ -63,3 +63,32 @@ min).
 - add both groups to the catalog.
 
 The two of the owner's 5 Oct mayhem cases above are known cases and are excluded.
+
+## Diagnostic (owner's run, 5 Oct): one wallet dominates mayhem launches
+
+21,165 mayhem launches had buys within 60 s.
+
+| Measure at +60 s | Value |
+| --- | --- |
+| buyers | median 3, 90th percentile 9, max 52 |
+| top wallet's share of SOL bought | 10th percentile 0.64, median 0.66, 90th percentile 0.78 |
+| most frequent top buyer | `BwWK17…de6s`: top buyer in **12,302** launches (58 %) |
+| next | `3xtyS7…M6uc` 534 · `K6Eh9f…KHnR` 452 · `4UKLdT…hSiP` 316 · `HuBZkw…pb3S` 262 |
+
+- **M2 as registered cannot match anything.** One wallet buys about two thirds of the first minute in most mayhem
+  launches, so "top wallet < 20 %" never holds. The zero is the rule's fault, not the data's.
+- `BwWK17…de6s` looks like mayhem mode's own trading wallet. That is an inference: the code does not say, and
+  pump.fun's pages are blocked here. The other frequent wallets look like sniper bots that buy hundreds of launches.
+- **M1's 61 % "halved first" includes this wallet's trades.** They are real executions, so a holder really sees
+  those prices. But it means mayhem prices move with one actor, not with a crowd.
+- **The same bots distort normal launches too.** `top1`, `hhi` and `effectiveBuyers` count a bot that buys hundreds of
+  launches the same as a real buyer.
+
+## Pre-registered after the diagnostic (5 Oct ~17:00 UTC; the thresholds come from the buyer distribution above, not from outcomes)
+
+| # | Rule | Definition (no look-ahead) | Decision | Exits | Judged on |
+| --- | --- | --- | --- | --- | --- |
+| M2b | Mayhem with a real crowd | a frozen list **R**: wallets that were the top buyer in ≥ 100 launches before 5 Oct 17:00 UTC. At +120 s: ≥ 10 buyers not in R, and the largest buyer not in R < 30 % of the SOL bought by non-R wallets | +120 s, phone fill +45 s | as M1, on trade prices | mayhem launches after 5 Oct 17:00 UTC |
+| B1 | Bot-free breadth for normal launches | new features `buyersExR`, `top1ExR`: the same as `buyers` and `top1` with R's wallets removed (point-in-time: R frozen at a date, judged after it). `broad15` rebuilt on them | as `broad15` | as `broad15` | normal launches after the freeze |
+
+M2 stays registered as it was and fails by construction; it is not edited.
