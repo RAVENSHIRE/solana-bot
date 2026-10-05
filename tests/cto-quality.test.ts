@@ -157,3 +157,11 @@ test('CTO-09 (Q-17): the desk reads the observer\'s /health and the dashboard st
     assert.equal(recovered.find(l => l.label.startsWith('Desk phone'))!.bad, false, 'a delivery after the failure clears the warning');
   } finally { feed.close(); }
 });
+
+test('CTO-10 (Q-11): the requalification heap is a share of free memory, capped, and postponed when memory is short', async () => {
+  const { qualifyHeapMb, QUALIFY_MEMORY } = await import('../src/research/qualify');
+  const MB = 1048576;
+  assert.equal(qualifyHeapMb(4_000 * MB), QUALIFY_MEMORY.maxHeapMb, 'plenty free: the old 1.5 GB cap');
+  assert.equal(qualifyHeapMb(1_700 * MB), 1_020, 'Raven with 1.7 GB free: 60 % of it, not 1.5 GB');
+  assert.equal(qualifyHeapMb(600 * MB), null, 'under ~850 MB free: postponed, the previous qualification stays');
+});

@@ -14,6 +14,7 @@
  * Helius may bill websocket traffic against the plan's credits, so it is off unless asked for.
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { Connection } from '@solana/web3.js';
@@ -27,7 +28,7 @@ import { VerifiedWatch } from '../research/verified';
 import { AliveReporter, aliveFile } from '../research/alive';
 import { LadderWatch } from '../research/ladder';
 import { rpcHolders } from '../research/holders';
-import type { Qualification } from '../research/qualify';
+import { QUALIFY_MEMORY, qualifyHeapMb, type Qualification } from '../research/qualify';
 
 const arg = (name: string) => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : undefined; };
 const REQUALIFY_MS = 6 * 3_600_000;
@@ -75,10 +76,18 @@ async function main(): Promise<void> {
   let qualifying = false;
   const requalify = () => {
     if (!calls || qualifying) return;
+    const heapMb = qualifyHeapMb(os.freemem());
+    if (heapMb === null) {
+      console.log(`${stamp()} qualification postponed ${QUALIFY_MEMORY.retryMs / 60_000} min: only ${Math.round(os.freemem() / 1048576)} MB of memory free`);
+      setTimeout(requalify, QUALIFY_MEMORY.retryMs).unref();
+      return;
+    }
     qualifying = true;
-    const child = spawn(process.execPath, ['--max-old-space-size=1536', '--import', 'tsx', path.join(repo, 'src', 'scripts', 'research-qualify.ts'), '--dir', dir],
+    const child = spawn(process.execPath, [`--max-old-space-size=${heapMb}`, '--import', 'tsx', path.join(repo, 'src', 'scripts', 'research-qualify.ts'), '--dir', dir],
       { cwd: repo, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-    let out = '';
+    // Below normal priority: the desk's exits and the observer's streams come first.
+    try { if (child.pid) os.setPriority(child.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); } catch { /* not permitted: normal priority */ }
+    let out = `heap cap ${heapMb} MB (${Math.round(os.freemem() / 1048576)} MB free at start)\n`;
     child.stdout.on('data', b => { out += String(b); });
     child.stderr.on('data', b => { out += String(b); });
     child.on('exit', code => {

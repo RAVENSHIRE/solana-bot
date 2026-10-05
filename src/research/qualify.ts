@@ -145,3 +145,15 @@ export function qualify(ds: Dataset, costs: Omit<DirectOptions, 'delayS'>, o: { 
   rules.sort((a, b) => Number(b.qualified) - Number(a.qualified) || b.validation.meanPct - a.validation.meanPct);
   return { version: 1, generatedAt: o.now ?? Date.now(), data: { from: ds.first, to: ds.last, launches: launches.length }, cut, criteria, costs, rules };
 }
+
+/**
+ * Memory for the requalification child, which the observer starts every 6 h next to the dashboard and itself on a PC
+ * with ~1.7 GB free. The heap cap is a share of the memory free now, never above `maxHeapMb`; below `minHeapMb` the run
+ * is postponed (null) rather than pushing the PC into swap while LIVE exits run. A run that still runs out of heap fails
+ * and the previous qualified.json stays in force.
+ */
+export const QUALIFY_MEMORY = Object.freeze({ maxHeapMb: 1536, minHeapMb: 512, shareOfFree: 0.6, retryMs: 30 * 60_000 });
+export function qualifyHeapMb(freeBytes: number): number | null {
+  const mb = Math.floor(freeBytes / 1048576 * QUALIFY_MEMORY.shareOfFree);
+  return mb < QUALIFY_MEMORY.minHeapMb ? null : Math.min(QUALIFY_MEMORY.maxHeapMb, mb);
+}
