@@ -147,6 +147,7 @@ The insider-exit "RUG" that sold a runner: [CASE-2026-10-05-INSIDER-EXIT.md](CAS
 MAYHEM strategy (M1, M2, trade-price based): [MAYHEM.md](MAYHEM.md). W1 replaced by W1′ (wallets from the ledger).
 Verified-coin INFO: launch-size filter and a pool check (V-L, PL): [VERIFIED-LAUNCH-AND-POOL.md](VERIFIED-LAUNCH-AND-POOL.md).
 Technical-analysis layer (first-candle lines in alerts, stop at the previous resistance; TA1–TA3): [TA-LAYER.md](TA-LAYER.md).
+Industry report pasted by the owner (unverified; the cost-per-dollar point, K1): [INDUSTRY-REPORT-2026-10-05.md](INDUSTRY-REPORT-2026-10-05.md).
 **Strategy review (all desk strategies, verdicts, why the failing ones fail, C1–C4): [STRATEGY-REVIEW.md](STRATEGY-REVIEW.md).**
 The execution path, ranked changes for the CTO:
 [EXECUTION.md](EXECUTION.md) (X1–X8).
