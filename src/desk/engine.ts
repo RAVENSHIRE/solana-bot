@@ -29,7 +29,7 @@ import type { PumpEventSource } from './pump-stream';
 import { reclaimRent } from './rent';
 import { assessAuthenticity, checkWebsite, parseXLink, type WebsiteCheck, type XClient } from './social';
 import { analyze, type SocialEvidence, type WatchState } from './analysis';
-import { DeskGuard, DeskReject, PaperExecution, paperSigner } from './guard';
+import { DeskGuard, DeskReject, ORDER_STEPS, PaperExecution, paperSigner } from './guard';
 import { crashCheck, crashMarketHint, crashRatioOnlyMiss, goldenEntryCheck, launchEntryCheck, openEntryCheck, exitReason, exitRuleText, scaleAdvice, strategyStats } from './strategies';
 import type { Candidate, DeskEvent, DeskMode, DeskPosition, DeskStatus, Preflight, Stage, StrategyId, StrategyView, Tier } from './types';
 import type { Launch, LaunchSource } from './launches';
@@ -1583,7 +1583,7 @@ export class DeskEngine {
 
   private async executeNow(side: 'BUY' | 'SELL', t: ExecTarget,
     ledger: DeskLedger, stopped: () => boolean, probe: boolean): Promise<string | null> {
-    const d = this.d, profile = this.profile(t.strategy), ctx = { mint: t.mint, symbol: t.symbol };
+    const d = this.d, profile = this.profile(t.strategy), ctx = { mint: t.mint, symbol: t.symbol }, decidedAt = Date.now();
     const wallet = d.wallet(), solUsd = this.solUsd;
     if (!probe && stopped()) return 'STOP_REQUESTED';
     if (side === 'SELL' && !ledger.position(t.mint)) return 'UNTRACKED_POSITION';
@@ -1607,6 +1607,7 @@ export class DeskEngine {
         this.event('SUBMITTED', `Signed by ${this.localKey ? 'the local key' : 'Phantom'}; signature persisted before broadcast: ${signature}`, ctx);
       },
       event: (stage, message, detail) => this.event(stage, message, { ...ctx, detail: { ...detail, strategy: t.strategy } }) });
+    guard.mark('decision', decidedAt);
     const signer: TransactionSigner = d.mode === 'PAPER' ? paperSigner(wallet.owner) : {
       publicKey: wallet.owner,
       signTransaction: async (tx, context) => {
@@ -1634,33 +1635,60 @@ export class DeskEngine {
       record(guard.lastPreflight);
       this.event('CONFIRMED', `${side} confirmed on-chain: ${fill.signature}`, ctx);
       this.bookedEvents(side, t.strategy, row, ctx);
+      this.execRecord(side, t, guard, 'CONFIRMED', fill.outAmountRaw);
       return null;
     } catch (error) {
       record(guard.lastPreflight);
       const cause = error instanceof SwapError ? error.cause : error;
       const code = cause instanceof DeskReject || cause instanceof SigningError ? cause.code : 'ORDER_FAILED';
+      const simulatedOut = side === 'BUY' ? guard.lastSimulation.tokenDelta : null;
       if (probe && cause instanceof PaperExecution) {
         if (guard.lastPreflight) guard.lastPreflight.outcome = 'PROBE_NOT_BOOKED';
         this.event('PREFLIGHT', 'PROBE complete — pre-flight passed; stopped where LIVE would request a Phantom signature. Nothing booked.', ctx);
+        this.execRecord(side, t, guard, 'PROBE', simulatedOut);
         return null;
       } else if (probe) {
         this.event('FAILED', `PROBE stopped: ${cause instanceof DeskReject ? cause.message : errorMessage(error)}`, ctx);
       } else if (d.mode === 'PAPER' && cause instanceof PaperExecution && guard.lastOrder && guard.lastSimulation.status === 'PASSED') {
         this.paperFill(side, t, guard, ledger, solUsd, 'Filled from the passed unsigned RPC simulation');
+        this.execRecord(side, t, guard, 'PAPER_FILLED', simulatedOut);
         return null;
       } else if (d.mode === 'PAPER' && side === 'SELL' && guard.lastOrder && !(cause instanceof DeskReject && ['STOP_REQUESTED', 'UNTRACKED_POSITION'].includes(cause.code))) {
         // A TEST position is not held on-chain, so its exit cannot be simulated against the wallet.
         guard.lastSimulation = { status: 'NOT_POSSIBLE', detail: 'TEST position is not held by the wallet; exit valued at the executable Jupiter quote', solDelta: null, tokenDelta: null };
         this.event('SIMULATION', `NOT POSSIBLE — ${guard.lastSimulation.detail}`, ctx);
         this.paperFill(side, t, guard, ledger, solUsd, guard.lastSimulation.detail);
+        this.execRecord(side, t, guard, 'PAPER_FILLED', null);
         return null;
       } else {
         this.failed(side, t, guard, ledger, error, solUsd);
       }
+      if (guard.lastOrder) this.execRecord(side, t, guard, cause instanceof PaperExecution ? 'SIMULATION_NOT_PASSED' : code, null,
+        error instanceof SwapError && error.stage === 'confirm' && !!error.signature);
       return cause instanceof PaperExecution ? 'SIMULATION_NOT_PASSED' : code;
     } finally {
       await ledger.save();
     }
+  }
+
+  /**
+   * One EXEC event per order that reached a quote (TEST and LIVE): milliseconds from the decision to each step, the
+   * amount filled (or simulated) against the quote, the priority fee, and whether it reverted on chain. TEST stops
+   * where a signature would be asked, so its later steps are LIVE-only.
+   */
+  private execRecord(side: 'BUY' | 'SELL', t: ExecTarget, guard: DeskGuard, outcome: string, filled: bigint | null, reverted = false): void {
+    guard.mark('done');
+    const m = guard.marks, start = m.decision ?? Date.now(), o = guard.lastOrder;
+    const steps = ORDER_STEPS.filter(s => s !== 'decision' && m[s] !== undefined).map(s => [s, m[s]! - start] as const);
+    const quoted = o ? BigInt(o.quote.outAmount) : null;
+    const vsQuoteBps = quoted && quoted > 0n && filled !== null ? Number((filled - quoted) * 10_000n / quoted) : null;
+    const label: Record<string, string> = { quoted: 'quote', built: 'built', simulated: 'simulated', preflight: 'pre-flight', signRequested: 'signature asked',
+      signed: 'signed', sent: 'sent', done: 'done' };
+    const ms = (v: number) => v < 10_000 ? `${v} ms` : `${(v / 1000).toFixed(1)} s`;
+    this.event('EXEC', `${side} ${outcome.replaceAll('_', ' ')} · ${steps.map(([s, v]) => `${label[s]} ${ms(v)}`).join(' · ')}`
+      + `${vsQuoteBps !== null ? ` · ${vsQuoteBps >= 0 ? '+' : ''}${(vsQuoteBps / 100).toFixed(2)} % vs quote` : ''}${o ? ` · priority ${o.priority} lamports` : ''}${reverted ? ' · REVERTED on chain' : ''}`,
+      { mint: t.mint, symbol: t.symbol, detail: { strategy: t.strategy, side, outcome, ...Object.fromEntries(steps.map(([s, v]) => [`${s}Ms`, v])),
+        vsQuoteBps, priorityLamports: o ? Number(o.priority) : null, feeLamports: o ? Number(o.fee) : null, reverted } });
   }
 
   private paperFill(side: 'BUY' | 'SELL', t: ExecTarget,

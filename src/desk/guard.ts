@@ -15,6 +15,10 @@ import type { DeskMode, Preflight, SignatureState, Stage } from './types';
 export const EXIT_PRIORITY = Object.freeze({ bps: 100n, floorLamports: 50_000n });
 
 /** Stops a TEST order exactly where a LIVE order would ask Phantom for a signature. */
+/** The steps of one order, in order: the EXEC record reports each as milliseconds after the decision. */
+export const ORDER_STEPS = ['decision', 'quoted', 'built', 'simulated', 'preflight', 'signRequested', 'signed', 'sent', 'done'] as const;
+export type OrderStep = typeof ORDER_STEPS[number];
+
 export class PaperExecution extends Error {
   constructor() { super('PAPER_EXECUTION_NO_SIGNATURE_REQUESTED'); this.name = 'PaperExecution'; }
 }
@@ -61,8 +65,31 @@ const sol = (lamports: bigint) => `${(exactNumber(lamports < 0n ? -lamports : la
  * The same gates run in TEST and LIVE: quote identity, slippage, spendable capital and reserve, max drag,
  * unsigned RPC simulation with balance and authority checks, and a pre-flight record. Only the signer differs.
  */
+/**
+ * Rent-exempt minimum per account size: fixed by the cluster, so read once per connection manager instead of twice
+ * per wallet snapshot (three snapshots per buy).
+ */
+const rentMinimum = new WeakMap<object, Map<number, Promise<number>>>();
+function rentFor(rpc: ConnectionManager, size: number): Promise<number> {
+  const cache = rentMinimum.get(rpc) ?? rentMinimum.set(rpc, new Map()).get(rpc)!;
+  let read = cache.get(size);
+  if (!read) {
+    read = rpc.execute(`desk:rent-${size}`, c => c.getMinimumBalanceForRentExemption(size));
+    cache.set(size, read);
+    read.catch(() => cache.delete(size));
+  }
+  return read;
+}
+
 export class DeskGuard implements ExecutionGuard {
+  /** beforeSign simulates the built transaction with account checks: the executor's second simulation is skipped. */
+  readonly simulates = true;
   private readonly authorized = new WeakMap<SwapRequest, Authorization>();
+  /** The wallet snapshot started while the quote is requested (prefetch), used once by beforeBuild. */
+  private early: Promise<WalletSnapshot> | null = null;
+  /** When each step of the order was reached (ms since epoch): the engine's EXEC record turns them into durations. */
+  readonly marks: Partial<Record<OrderStep, number>> = {};
+  mark(step: OrderStep, at = Date.now()): void { this.marks[step] ??= at; }
   lastSimulation: SimulationResult = { status: 'NOT_POSSIBLE', detail: 'Not reached', solDelta: null, tokenDelta: null };
   lastPreflight: Preflight | null = null;
   /** Set once a quote was authorized; a TEST fill is booked from exactly this order. */
@@ -75,6 +102,7 @@ export class DeskGuard implements ExecutionGuard {
 
   async onSigned(tx: VersionedTransaction): Promise<void> {
     if (!tx.signatures[0]) throw new DeskReject('SIGNATURE_MISSING');
+    this.mark('sent');
     const signature = bs58.encode(tx.signatures[0]);
     await this.d.onSigned(signature); // Durable before broadcast; an unknown outcome is never retried.
     if (this.lastPreflight) { this.lastPreflight.signature = 'SIGNED'; this.lastPreflight.txSignature = signature; }
@@ -86,13 +114,19 @@ export class DeskGuard implements ExecutionGuard {
     const [native, accounts, rent, tempRent] = await Promise.all([
       d.rpc.execute('desk:balance', c => c.getBalance(d.owner, 'confirmed')),
       listTokenAccounts(d.rpc, d.owner),
-      d.rpc.execute('desk:rent', c => c.getMinimumBalanceForRentExemption(d.tokenProgram.equals(TOKEN_2022_PROGRAM_ID) ? 170 : 165)),
-      d.rpc.execute('desk:rent-temp', c => c.getMinimumBalanceForRentExemption(165)),
+      rentFor(d.rpc, d.tokenProgram.equals(TOKEN_2022_PROGRAM_ID) ? 170 : 165),
+      rentFor(d.rpc, 165),
     ]);
     const own = accounts.find(a => a.pubkey.equals(tokenAccount));
     return { native: BigInt(parse(safeInteger, native, 'solana-rpc')), tokenAccount, tokenRaw: own?.amountRaw ?? 0n, ataExists: !!own,
       ataRent: own ? 0n : BigInt(rent), tempRent: BigInt(tempRent),
       others: accounts.filter(a => a.amountRaw > 0n && !a.pubkey.equals(tokenAccount)).map(a => a.pubkey), at: Date.now() };
+  }
+
+  prefetch(): void {
+    const early = this.snapshot();
+    early.catch(() => undefined); // a failed read surfaces in beforeBuild, or nowhere when the quote failed first
+    this.early = early;
   }
 
   /** Router/DEX fees embedded in the quote, converted to lamports at the quote's own exchange rate. */
@@ -111,6 +145,7 @@ export class DeskGuard implements ExecutionGuard {
 
   async beforeBuild(req: SwapRequest, q: JupiterQuote): Promise<{ priorityFeeCapLamports: number }> {
     const d = this.d, buy = req.side === 'BUY';
+    this.mark('quoted');
     if (req.mint !== d.mint || q.inputMint !== (buy ? SOL_MINT : d.mint) || q.outputMint !== (buy ? d.mint : SOL_MINT) || BigInt(q.inAmount) !== req.amountRaw)
       throw new DeskReject('PAIR_OR_AMOUNT_MISMATCH');
     const allowed = buy ? d.slippageBps : Math.max(d.slippageBps, d.exitSlippageBps ?? d.slippageBps);
@@ -123,7 +158,8 @@ export class DeskGuard implements ExecutionGuard {
     this.quoted = true;
     this.lastOrder = { quote: q, fee: BASE_FEE_LAMPORTS, priority: 0n, rent: 0n, routerFee: this.routerFee(q, req.side), route };
     d.event('ROUTE', `Jupiter aggregator via ${route}`, { hops: q.routePlan.length, ammKeys: q.routePlan.map(s => s.swapInfo.ammKey).join(',') });
-    const s = await this.snapshot();
+    const s = await (this.early ?? this.snapshot());
+    this.early = null;
     const inAmt = BigInt(q.inAmount), out = BigInt(q.outAmount), min = BigInt(q.otherAmountThreshold);
     // Everything valued in lamports at the quote's own rate; no external price is needed to measure cost.
     const notional = buy ? inAmt : out;
@@ -176,6 +212,7 @@ export class DeskGuard implements ExecutionGuard {
 
   async beforeSign(req: SwapRequest, q: JupiterQuote, tx: VersionedTransaction, built: JupiterSwapResponse): Promise<void> {
     const d = this.d, a = this.authorized.get(req), buy = req.side === 'BUY';
+    this.mark('built');
     if (!a) throw new DeskReject('MISSING_AUTHORIZATION');
     if (tx.message.header.numRequiredSignatures !== 1 || !tx.message.staticAccountKeys[0]?.equals(d.owner)) throw new DeskReject('INVALID_PAYER');
     if (built.prioritizationFeeLamports === undefined || BigInt(built.prioritizationFeeLamports) > a.priority) throw new DeskReject('PRIORITY_CAP');
@@ -222,6 +259,7 @@ export class DeskGuard implements ExecutionGuard {
     if (buy && native < d.reserveLamports) fail('PROJECTED_RESERVE_FLOOR', `wallet would hold ${sol(native)}`);
     this.lastSimulation = { status: 'PASSED', detail: `SOL ${sol(solDelta)} · tokens ${tokenDelta >= 0n ? '+' : ''}${tokenDelta}`, solDelta, tokenDelta };
     d.event('SIMULATION', `PASSED — ${this.lastSimulation.detail}`, { solDelta: String(solDelta), tokenDelta: String(tokenDelta), fee: String(a.fee) });
+    this.mark('simulated');
     a.message = Buffer.from(tx.message.serialize()).toString('base64');
   }
 
@@ -253,7 +291,11 @@ export class DeskGuard implements ExecutionGuard {
     };
     d.event('PREFLIGHT', `${req.side} ${d.symbol ?? d.mint.slice(0, 6)} · ${a.preflight.amountIn} → ≥ ${a.preflight.minimumOut} · drag ${a.preflight.dragPct!.toFixed(2)}% · ${a.preflight.route}`,
       { impactPct: Number(a.preflight.priceImpactPct.toFixed(4)), priorityFee: String(a.priority), networkFee: String(a.fee) });
+    this.mark('preflight');
   }
 
-  signatureState(state: SignatureState): void { if (this.lastPreflight) this.lastPreflight.signature = state; }
+  signatureState(state: SignatureState): void {
+    if (state === 'AWAITING_PHANTOM') this.mark('signRequested'); else if (state === 'SIGNED') this.mark('signed');
+    if (this.lastPreflight) this.lastPreflight.signature = state;
+  }
 }

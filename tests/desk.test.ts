@@ -345,6 +345,13 @@ test('TEST runs the full production path — discovery to realized PnL — and n
     assert.equal(pre.route, 'Raydium'); assert.equal(pre.entrySizeUsd, 2); assert.equal(pre.accountRentLamports, '2039280');
     assert.equal(view.positions.length, 1); assert.equal(view.positions[0]!.qtyRaw, '4000000000');
     assert.equal(view.ledger[0]!.status, 'PAPER_FILLED'); assert.equal(view.ledger[0]!.txSignature, null);
+    // One EXEC record per order: how long each step took after the decision, what the simulation filled against the quote.
+    const exec = engine.events.list().filter(e => e.stage === 'EXEC');
+    assert.equal(exec.length, 1);
+    assert.match(exec[0]!.message, /^BUY PAPER FILLED · quote \d+ ms · built \d+ ms · simulated \d+ ms · pre-flight \d+ ms · done \d+ ms · [+-]\d+\.\d\d % vs quote · priority \d+ lamports$/);
+    const ed = exec[0]!.detail!;
+    assert.equal(ed.outcome, 'PAPER_FILLED'); assert.equal(ed.reverted, false); assert.equal(ed.signedMs, undefined, 'TEST never signs');
+    assert.ok(typeof ed.quotedMs === 'number' && typeof ed.simulatedMs === 'number' && (ed.simulatedMs as number) >= (ed.quotedMs as number));
     w.priceFactor = 1.4;
     await engine.pulse();
     view = engine.status({ connected: true, address: owner.toBase58() });

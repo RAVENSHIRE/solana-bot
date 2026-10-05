@@ -30,6 +30,8 @@ export class LiveExecutor extends BaseExecutor {
 
   async swap(req: SwapRequest): Promise<SwapFill> {
     const started = Date.now();
+    // The wallet snapshot the guard needs runs while the quote is requested, not after it.
+    this.deps.guard?.prefetch?.();
     const quote = await this.checkedQuote(req);
     const owner = this.owner.toBase58();
     const authorization = await this.deps.guard?.beforeBuild(req, quote);
@@ -46,7 +48,8 @@ export class LiveExecutor extends BaseExecutor {
       throw new SwapError(`Swap-Transaktion konnte nicht gebaut werden: ${errorMessage(e)}`, 'build', 0n, null, { cause: e });
     }
 
-    if (this.deps.cfg.execution.preSimulate) {
+    // One simulation per order: a guard that simulated the built transaction (with account checks) already did it.
+    if (this.deps.cfg.execution.preSimulate && !this.deps.guard?.simulates) {
       let simErr: unknown = null;
       let logs: string[] | null = null;
       try {

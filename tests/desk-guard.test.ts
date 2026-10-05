@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Keypair } from '@solana/web3.js';
+import { Keypair, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
 import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { DeskGuard, EXIT_PRIORITY, type DeskGuardDeps } from '../src/desk/guard';
 import { SOL_MINT } from '../src/core/types';
 import type { JupiterQuote } from '../src/execution/jupiter-client';
 import type { SwapRequest } from '../src/execution/executor';
+import { LiveExecutor } from '../src/execution/live-executor';
 
 // DeskGuard boundaries (CTO quality ledger Q-15): each pre-signature gate exactly at its limit and one lamport past it.
 // Synthetic fixtures only; nothing is signed or sent.
@@ -15,7 +16,7 @@ const MINT = Keypair.fromSeed(new Uint8Array(32).fill(72)).publicKey.toBase58();
 const RENT = 2_039_280n, RESERVE = 3_000_000n, CAP = 100_000n, BASE_FEE = 5_000n;
 const ENTRY = 20_000_000n; // $2 at $100 per SOL
 
-function guard(o: { native?: bigint; mode?: 'PAPER' | 'LIVE'; paperCash?: bigint | null; heldRaw?: bigint; drill?: boolean; stopped?: boolean; exitSlippageBps?: number } = {}) {
+function guard(o: { native?: bigint; mode?: 'PAPER' | 'LIVE'; paperCash?: bigint | null; heldRaw?: bigint; drill?: boolean; stopped?: boolean; exitSlippageBps?: number; rpc?: unknown } = {}) {
   const connection = {
     getBalance: async () => Number(o.native ?? 1_000_000_000n),
     getParsedTokenAccountsByOwner: async () => ({ value: [] }),
@@ -23,7 +24,7 @@ function guard(o: { native?: bigint; mode?: 'PAPER' | 'LIVE'; paperCash?: bigint
   };
   const events: string[] = [];
   const deps: DeskGuardDeps = {
-    mode: o.mode ?? 'LIVE', rpc: { execute: async (_l: string, fn: (c: typeof connection) => unknown) => fn(connection) } as never,
+    mode: o.mode ?? 'LIVE', rpc: (o.rpc ?? { execute: async (_l: string, fn: (c: typeof connection) => unknown) => fn(connection) }) as never,
     jupiter: { assertFresh: () => undefined } as never, owner, mint: MINT, symbol: 'TEST', decimals: 6, tokenProgram: TOKEN_PROGRAM_ID, solUsd: 100,
     slippageBps: 100, exitSlippageBps: o.exitSlippageBps, maxDragBps: 150n, reserveLamports: RESERVE, configuredPriorityCap: CAP, baseEntryUsd: 2,
     paperCashLamports: o.paperCash ?? null, heldRaw: o.heldRaw ?? 0n, stopped: () => o.stopped ?? false, enforceDrag: o.drill ? false : undefined,
@@ -90,4 +91,33 @@ test('exits: never capped by drag or TEST cash, only the tracked size, the exit 
   await code(guard({ heldRaw: held }).g.beforeBuild(...sell(held + 1n, 20_000_000n, 20_000_000n)), 'UNTRACKED_POSITION');
   // LIVE: the wallet must hold the tokens it sells (the fake wallet holds none).
   await code(guard({ heldRaw: held, mode: 'LIVE' }).g.beforeBuild(...sell(held, 20_000_000n, 20_000_000n)), 'UNTRACKED_POSITION');
+});
+
+test('execution review X2/X3: rent read once per RPC manager, the wallet read runs while the quote is asked, one simulation per order, every step marked', async () => {
+  const reads = { rent: 0, balance: 0 };
+  const connection = { getBalance: async () => { reads.balance++; return 1_000_000_000; }, getParsedTokenAccountsByOwner: async () => ({ value: [] }),
+    getMinimumBalanceForRentExemption: async () => { reads.rent++; return Number(RENT); } };
+  const rpc = { execute: async (_l: string, fn: (c: typeof connection) => unknown) => fn(connection) };
+  const a = guard({ rpc }).g, b = guard({ rpc }).g;
+  await a.snapshot(); await a.snapshot(); await b.snapshot();
+  assert.equal(reads.rent, 1, 'the 165-byte minimum is read once, not twice per snapshot (three snapshots per buy)');
+  // The snapshot started with the quote is the one beforeBuild uses: one wallet read, not two.
+  const c = guard({ rpc }).g, before = reads.balance;
+  c.prefetch(); await c.beforeBuild(...buy(ENTRY, 1_000_000n, 1_000_000n));
+  assert.equal(reads.balance - before, 1);
+  assert.ok(c.marks.quoted, 'the quote step is marked'); assert.equal(c.simulates, true);
+  // The executor skips its own pre-simulation when the guard simulates; a guard that does not keeps it.
+  const tx = new VersionedTransaction(new TransactionMessage({ payerKey: owner, recentBlockhash: '11111111111111111111111111111111', instructions: [] }).compileToV0Message());
+  for (const simulates of [true, false]) {
+    let sims = 0;
+    const g = { simulates, beforeBuild: async () => ({ priorityFeeCapLamports: 0 }), beforeSign: async () => undefined,
+      beforeSend: async () => { throw new Error('stop before signing'); } };
+    const jupiter = { quote: async () => buy(ENTRY, 1_000_000n, 1_000_000n)[1], assertFresh: () => undefined,
+      buildSwap: async () => ({ swapTransaction: Buffer.from(tx.serialize()).toString('base64'), lastValidBlockHeight: 1, prioritizationFeeLamports: 0 }) };
+    const exec = new LiveExecutor({ cfg: { execution: { preSimulate: true, maxPriceImpactPct: 5 } }, owner, guard: g, jupiter, logger: { debug: () => undefined },
+      rpc: { execute: async (label: string, fn: (c: unknown) => unknown) => { if (label === 'simulateTransaction') sims++; return fn({ simulateTransaction: async () => ({ value: { err: null, logs: [] } }) }); } } } as never,
+      { publicKey: owner, signTransaction: async () => { throw new Error('never signed'); } } as never, {} as never);
+    await assert.rejects(exec.swap(buy(ENTRY, 1_000_000n, 1_000_000n)[0]), /stop before signing/);
+    assert.equal(sims, simulates ? 0 : 1, simulates ? 'the guard already simulated' : 'no guard simulation: the executor simulates');
+  }
 });

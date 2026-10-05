@@ -7,7 +7,9 @@ import type { RuleSpec } from './custom';
 export type StrategyId = string;
 
 export type Stage = 'SYSTEM' | 'SCANNING' | 'FILTERED' | 'WATCHLIST' | 'WAITING' | 'QUALIFIED' | 'QUOTE' | 'ROUTE' |
-  'SIMULATION' | 'PREFLIGHT' | 'AWAITING_SIGNATURE' | 'SUBMITTED' | 'CONFIRMED' | 'FAILED' | 'POSITION' | 'EXIT' | 'PNL';
+  'SIMULATION' | 'PREFLIGHT' | 'AWAITING_SIGNATURE' | 'SUBMITTED' | 'CONFIRMED' | 'FAILED' | 'POSITION' | 'EXIT' | 'PNL'
+  /** One per order: how long each step took, quoted against filled amount, the priority fee, reverted or not. */
+  | 'EXEC';
 
 export interface DeskEvent {
   id: number; at: number; mode: DeskMode; stage: Stage;
