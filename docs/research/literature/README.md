@@ -2,7 +2,10 @@
 
 Brief: [docs/swarm/briefs/RESEARCH.md](../../swarm/briefs/RESEARCH.md). Run of 3 Oct 2026, branch `claude/research-literature`.
 
-## Status: blocked. No literature card was written
+## Status: mostly blocked. One card, from a source the owner fetched
+
+Cards: [2026-nobrainflip-top-100-fomo-wallets.md](2026-nobrainflip-top-100-fomo-wallets.md): a practitioner
+analysis of FOMO's top 100 wallets, read from the full text the owner pasted on 5 Oct (W1–W3).
 
 The brief requires every claim to come from a source that was actually opened. In this cloud session the network
 policy blocks every host that holds the papers. Web search works, but it returns only titles and links, and a search
