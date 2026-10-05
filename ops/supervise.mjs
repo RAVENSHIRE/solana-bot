@@ -226,8 +226,11 @@ async function main() {
     fs.rmSync(offFile, { force: true });
     if (args.includes('--restart')) {
       fs.writeFileSync(path.join(dir, 'supervisor-restart.json'), JSON.stringify({ at: Date.now() }));
+      // The supervisor too: after a git pull its own code may have changed (it rebuilds the page before a start).
+      try { const pid = Number(fs.readFileSync(lockFile, 'utf8')); if (pid && pid !== process.pid) kill(pid); } catch { /* none */ }
+      fs.rmSync(lockFile, { force: true });
       for (const p of desk()) kill(p.pid);
-      log('restart requested');
+      log('restart requested (supervisor and desk processes)');
     }
     // A hidden supervisor of its own (no console window); a supervisor that already runs makes it exit at once.
     spawn(process.execPath, [fileURLToPath(import.meta.url)], { cwd: repo, stdio: 'ignore', windowsHide: true, detached: true }).unref();

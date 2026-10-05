@@ -108,7 +108,7 @@ export class TradingService {
     try { saved = JSON.parse(await fs.readFile(file, 'utf8')) as SavedSession; } catch { /* nothing saved yet */ }
     if (!saved?.running || (saved.mode !== 'PAPER' && saved.mode !== 'LIVE')) { this.restoring = false; return null; }
     let handle: DeskHandle;
-    try { handle = await this.ensureDesk(); } catch (error) { return this.retryRestore(attempt, `desk unavailable: ${rejectCode(error) ?? 'error'}`); }
+    try { handle = await this.ensureDesk(); } catch (error) { return this.retryRestore(saved.mode, attempt, `desk unavailable: ${rejectCode(error) ?? 'error'}`); }
     const tell = (title: string, body: string) => { log(`${title}: ${body}`); void handle.notify?.(title, body).catch(() => undefined); };
     if (saved.mode === 'PAPER') {
       const paper = handle.engines.PAPER;
@@ -136,13 +136,13 @@ export class TradingService {
       this.mode = 'LIVE';
       if (!live.scanner) live.start();
       live.pause();
-    } catch (error) { return this.retryRestore(attempt, rejectCode(error) ?? 'error', tell); }
+    } catch (error) { return this.retryRestore('LIVE', attempt, rejectCode(error) ?? 'error', tell); }
     this.restoring = false;
     tell('LIVE restored: exits only', 'The desk restarted while LIVE was running. LIVE is back for its open positions (stops, targets, rug exits); new entries stay paused until you press Resume.');
     return 'LIVE_EXITS_ONLY';
   }
 
-  private retryRestore(attempt: number, why: string, tell?: (title: string, body: string) => void): null {
+  private retryRestore(mode: DeskMode, attempt: number, why: string, tell?: (title: string, body: string) => void): null {
     const attempts = this.o.restoreAttempts ?? 10;
     if (attempt < attempts && !this.closed) {
       this.o.log?.(`session restore failed (${why}), retry ${attempt + 1}/${attempts}`);
@@ -151,8 +151,11 @@ export class TradingService {
       return null;
     }
     this.restoring = false;
-    const body = `The desk restarted while LIVE was running and could not bring it back (${why}). Open LIVE positions have no exits until you start LIVE again.`;
-    if (tell) tell('LIVE NOT restored', body); else this.o.log?.(`LIVE NOT restored: ${body}`);
+    const body = mode === 'LIVE'
+      ? `The desk restarted while LIVE was running and could not bring it back (${why}). Open LIVE positions have no exits until you start LIVE again.`
+      : `The desk restarted while TEST was running and could not bring it back (${why}). Start TEST in the dashboard once the desk is available.`;
+    const title = `${mode === 'LIVE' ? 'LIVE' : 'TEST'} NOT restored`;
+    if (tell) tell(title, body); else this.o.log?.(`${title}: ${body}`);
     return null;
   }
   private authorized = () => this.broker.connection().connected && Date.now() - this.heartbeat < 12_000;

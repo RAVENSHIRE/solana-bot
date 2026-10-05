@@ -22,8 +22,13 @@ export function atomicWriteFile(file: string, data: string, attempts = 8): Promi
 
 /**
  * Exklusiver Instanz-Lock mit PID. Ein Lock, dessen Prozess nicht mehr existiert (Absturz, geschlossenes
- * Fenster), wird einmal ersetzt; ein lebender oder unlesbarer Besitzer bleibt geschützt.
+ * Fenster), wird einmal ersetzt; ein lebender Besitzer bleibt geschützt. Ein leerer oder unlesbarer Lock schützt
+ * nur, solange er jünger als `EMPTY_LOCK_STALE_MS` ist: ein lebender Besitzer schreibt seine PID sofort nach dem
+ * Anlegen. Älter heisst, der Prozess starb dazwischen oder der Inhalt ging beim Abschalten verloren (Raven, 3 Oct:
+ * ein leerer Lock blockierte den Desk nach dem Neustart zwei Tage lang).
  */
+export const EMPTY_LOCK_STALE_MS = 60_000;
+
 export async function acquireProcessLock(file: string): Promise<fs.promises.FileHandle> {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -48,7 +53,10 @@ export async function acquireProcessLock(file: string): Promise<fs.promises.File
 
 async function deadLockOwner(file: string): Promise<number | null> {
   const text = (await fs.promises.readFile(file, 'utf8').catch(() => '')).trim();
-  if (!/^\d{1,10}$/.test(text)) return null;
+  if (!/^\d{1,10}$/.test(text)) {
+    const age = await fs.promises.stat(file).then(st => Date.now() - st.mtimeMs, () => 0);
+    return age > EMPTY_LOCK_STALE_MS ? 0 : null;
+  }
   const pid = Number(text);
   if (pid === process.pid) return null;
   try {

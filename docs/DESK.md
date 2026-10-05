@@ -38,7 +38,7 @@ research observer and the dashboard running:
   Phantom cannot sign by itself and is never resumed; the phone is told that its positions have no exits.
 - Logs over 50 MB are moved to `.1` at a restart. The supervisor's own log is `data-desk\supervisor.log`.
 
-Commands: `node ops\supervise.mjs --status` (last heartbeat), `--restart` (after a `git pull`; no phone message),
+Commands: `node ops\supervise.mjs --status` (last heartbeat), `--restart` (after a `git pull`: restarts the supervisor too, so its own new code applies; no phone message),
 `--stop` (stops everything and keeps the watchdog off), `--start`. `ops\uninstall-autostart.cmd` removes it. While it
 is installed, `dashboard\start-background.cmd` and `start-research.cmd` refuse to start a second copy.
 

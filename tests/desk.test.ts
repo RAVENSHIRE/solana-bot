@@ -161,7 +161,7 @@ test('ledger: TEST PnL books both network fees once and account rent until it is
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-test('process lock: a crashed owner is recovered; a live or unreadable owner still blocks', async () => {
+test('process lock: a crashed owner is recovered; a live owner or a fresh empty lock still blocks; an old empty lock is stale', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-lock-')), lock = path.join(dir, 'desk.lock');
   try {
     const child = spawn(process.execPath, ['-e', '']); await new Promise(r => child.once('exit', r));
@@ -170,7 +170,11 @@ test('process lock: a crashed owner is recovered; a live or unreadable owner sti
     await handle.close(); await fs.unlink(lock);
     const sleeper = spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)']);
     try { await fs.writeFile(lock, String(sleeper.pid)); await assert.rejects(acquireProcessLock(lock), /EEXIST/); } finally { sleeper.kill(); }
-    await fs.writeFile(lock, ''); await assert.rejects(acquireProcessLock(lock), /EEXIST/);
+    await fs.writeFile(lock, ''); await assert.rejects(acquireProcessLock(lock), /EEXIST/, 'an owner that just created it may not have written its pid yet');
+    // An empty lock from before a hard shutdown (Raven, 3 Oct): stale after a minute, so the desk can start again.
+    const old = new Date(Date.now() - 2 * 60_000); await fs.utimes(lock, old, old);
+    const again = await acquireProcessLock(lock); assert.equal(await fs.readFile(lock, 'utf8'), String(process.pid));
+    await again.close();
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 

@@ -271,6 +271,16 @@ test('session restore: TEST comes back after a restart, LIVE (local key) comes b
     assert.deepEqual(giveUp.phone, ['LIVE NOT restored']);
     await giveUp.trading.close();
 
+    // The desk itself cannot open (e.g. a stale lock): retried, then reported as TEST (the saved mode), never as LIVE.
+    await fs.writeFile(sessionFile, JSON.stringify({ mode: 'PAPER', running: true, paused: false, at: 'x' }));
+    const lines: string[] = [];
+    const locked = new TradingService(async () => { throw new DeskReject('INSTANCE_LOCK'); }, { sessionFile, restoreRetryMs: 10, restoreAttempts: 2, log: l => { lines.push(l); } });
+    await locked.restoreSession();
+    await wait(80);
+    assert.ok(lines.some(l => /^TEST NOT restored: .*INSTANCE_LOCK/.test(l)), lines.join(' | '));
+    assert.ok(!lines.some(l => /LIVE/.test(l)));
+    await locked.close();
+
     // A TEST that cannot start (an unresolved order) is reported, never thrown: a crash would loop under the supervisor.
     await fs.writeFile(sessionFile, JSON.stringify({ mode: 'PAPER', running: true, paused: false, at: 'x' }));
     const blocked = service('PHANTOM', false, { sessionFile });
