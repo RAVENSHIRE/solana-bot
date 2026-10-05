@@ -4,10 +4,11 @@
  * phone (DESK_NTFY_TOPIC / Telegram); every other candidate rule is recorded as a shadow call. Qualification is rerun
  * every 6 h in a child process. Read-only on chain: it never signs, trades or reads a private key.
  *
- *   npm run research:observe -- [--dir data-desk/research] [--sources public,publicnode[,helius]] [--min-free-mb 700] [--no-calls] [--no-phone] [--no-verified]
+ *   npm run research:observe -- [--dir data-desk/research] [--sources public,publicnode[,helius]] [--min-free-mb 700] [--no-calls] [--no-phone] [--no-verified] [--no-ladder]
  *
  * Also watches established coins with a blue check (Jupiter verified, or on the watchlist watch-tokens.json in the
- * research folder) and sends an INFO message when one starts to move (research/verified.ts).
+ * research folder) and sends an INFO message when one starts to move (research/verified.ts), and records the
+ * market-cap ladder on every chain into research/ladder (research/ladder.ts; facts only, no messages).
  *
  * Trade sources are merged, each transaction once. "helius" adds the first Helius endpoint of RPC_ENDPOINTS;
  * Helius may bill websocket traffic against the plan's credits, so it is off unless asked for.
@@ -15,6 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { Connection } from '@solana/web3.js';
 import { deskEnvironment } from '../desk/runtime';
 import { notifier, fomoUrl } from '../desk/watch';
 import { ResearchLedger } from '../research/ledger';
@@ -22,6 +24,8 @@ import { ResearchObserver, PUBLIC_RPC_WS, PUBLICNODE_WS } from '../research/obse
 import { CallEngine } from '../research/calls';
 import { LocalFeed, LOCAL_FEED } from '../research/local-feed';
 import { VerifiedWatch } from '../research/verified';
+import { LadderWatch } from '../research/ladder';
+import { rpcHolders } from '../research/holders';
 import type { Qualification } from '../research/qualify';
 
 const arg = (name: string) => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : undefined; };
@@ -55,7 +59,14 @@ async function main(): Promise<void> {
   await refreshSol();
   setInterval(() => void refreshSol(), 5 * 60_000).unref();
 
-  const phone = process.argv.includes('--no-phone') ? null : notifier(env);
+  const stamp = () => new Date().toISOString().slice(0, 19);
+  // Every failed phone delivery is logged at once and counted in the status line: a silent phone is visible in observer.log.
+  const phone = process.argv.includes('--no-phone') ? null : notifier(env, fetch, { onFailure: r => console.log(`${stamp()} phone delivery failed: ${r.channel} ${r.status !== null ? `HTTP ${r.status}` : r.error}`) });
+  const phoneStatus = () => {
+    if (!phone?.channels.length) return '';
+    const h = phone.health();
+    return ` · phone ${h.delivered}/${h.sent} delivered${h.failed ? `, ${h.failed} failed (last ${h.lastError} at ${new Date(h.lastFailureAt!).toISOString().slice(11, 19)})` : ''}`;
+  };
   const calls = process.argv.includes('--no-calls') ? null : new CallEngine({ ledger, notify: phone?.channels.length ? phone.notify : null, solUsd: () => solUsd, link: fomoUrl,
     log: line => console.log(`${new Date().toISOString().slice(0, 19)} ${line}`) });
   const file = path.join(dir, 'qualified.json');
@@ -89,6 +100,20 @@ async function main(): Promise<void> {
     log: line => console.log(`${new Date().toISOString().slice(0, 19)} ${line}`) });
   verified?.start();
 
+  // The market-cap ladder on every chain, in its own ledger folder; holder scans over the Helius endpoint when there is one.
+  let ladderLedger: ResearchLedger | null = null, ladder: LadderWatch | null = null;
+  if (!process.argv.includes('--no-ladder')) {
+    const ladderDir = path.join(dir, 'ladder');
+    ladderLedger = new ResearchLedger({ dir: ladderDir, minFreeMb: Number(arg('min-free-mb') ?? process.env.RESEARCH_MIN_FREE_MB ?? 700) });
+    await ladderLedger.start();
+    const endpoints = (env.RPC_ENDPOINTS ?? '').split(',').map(s => s.trim()).filter(Boolean);
+    const rpcUrl = endpoints.find(e => /helius/i.test(e)) ?? endpoints[0] ?? null;
+    ladder = new LadderWatch({ ledger: ladderLedger, stateFile: path.join(ladderDir, 'ladder-state.json'), watchFile: path.join(dir, 'watch-tokens.json'),
+      jupiterApiKey: env.JUPITER_API_KEY?.trim() || null, birdeyeApiKey: env.BIRDEYE_API_KEY?.trim() || null,
+      holders: rpcUrl ? rpcHolders(new Connection(rpcUrl, 'confirmed')) : null, log: line => console.log(`${new Date().toISOString().slice(0, 19)} ${line}`) });
+    ladder.start();
+  }
+
   // New launches and migrations for the desk on this machine (it stops polling the RPC for them while this runs).
   let observer: ResearchObserver | null = null;
   const feed = new LocalFeed(() => observer?.streamHealthy() ?? false);
@@ -97,10 +122,10 @@ async function main(): Promise<void> {
   observer.start();
   console.log(`research observer: ${dir} · trade sources: ${wanted.filter(w => ['public', 'publicnode', 'helius'].includes(w)).join(' + ') || 'public'} · ` +
     `calls: ${calls ? `on, phone ${phone?.channels.length ? phone.channels.join(' + ') : 'not configured'}` : 'off'} · status every minute`);
-  const stop = async () => { observer?.stop(); verified?.stop(); feed.close(); await ledger.close(); process.exit(0); };
+  const stop = async () => { observer?.stop(); verified?.stop(); ladder?.stop(); feed.close(); await ledger.close(); await ladderLedger?.close(); process.exit(0); };
   process.on('SIGINT', () => void stop());
   process.on('SIGTERM', () => void stop());
-  setInterval(() => console.log(`${observer!.status()}${verified ? ` · ${verified.status()}` : ''}`), 60_000).unref();
+  setInterval(() => console.log(`${observer!.status()}${verified ? ` · ${verified.status()}` : ''}${ladder ? ` · ${ladder.status()}` : ''}${phoneStatus()}`), 60_000).unref();
 }
 
 main().catch(error => { console.error(`research:observe failed: ${(error as Error).message}`); process.exit(1); });

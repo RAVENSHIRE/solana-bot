@@ -85,6 +85,7 @@ function Icon({ name, size = 20 }: { name: string; size?: number }) {
 /** Sidebar targets: sections of the trading desk (ids set in Desk.tsx). */
 const SECTIONS = [
   { id: 'desk-overview', label: 'Overview', icon: 'grid' },
+  { id: 'desk-coin-check', label: 'Coin check', icon: 'target' },
   { id: 'desk-strategies', label: 'Strategies', icon: 'target' },
   { id: 'desk-opening', label: 'Opening screen', icon: 'chart' },
   { id: 'desk-golden', label: 'Golden pocket', icon: 'target' },

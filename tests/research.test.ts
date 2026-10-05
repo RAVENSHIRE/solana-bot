@@ -307,6 +307,52 @@ test('qualification: a rule reaches the phone only with ≥ 100 profitable later
   assert.equal(requiredHitRate([{ reason: 'TAKE_PROFIT', netPct: 40 }, { reason: 'STOP', netPct: -20 }] as never), 20 / 60 * 100);
 });
 
+test('luck: bootstrap p-values, Holm\'s correction over every rule tested, and no rule carried by one spike', async () => {
+  const { bootstrapP, holm, trimmedMean, qualify, CRITERIA } = await import('../src/research/qualify');
+  // A steady edge: 200 trades alternating +40 % and −10 %. No edge: the same spread around 0.
+  const steady = Array.from({ length: 200 }, (_, i) => i % 2 ? 40 : -10), none = Array.from({ length: 200 }, (_, i) => i % 2 ? 25 : -25);
+  assert.ok(bootstrapP(steady, 2_000, 'a')! < 0.001);
+  assert.ok(bootstrapP(none, 2_000, 'b')! > 0.3);
+  assert.equal(bootstrapP(steady, 2_000, 'a'), bootstrapP(steady, 2_000, 'a'), 'seeded: the same data gives the same p');
+  assert.equal(bootstrapP([5], 100, 'c'), null);
+  // Holm with 4 tests at 0.05: thresholds 0.0125, 0.0167, 0.025, 0.05 in p order; everything after the first miss fails.
+  assert.deepEqual(holm([0.001, 0.04, 0.012, 0.3], 0.05).map(x => x.pass), [true, false, true, false]);
+  assert.deepEqual(holm([0.001, 0.04, 0.012, 0.3], 0.05).map(x => x.threshold), [0.0125, 0.025, 0.05 / 3, 0.05]);
+  // One spike: 199 trades at −2 %, one at +600 %: a positive average (+1 %), negative without the best trade.
+  const spike = [...Array.from({ length: 199 }, () => -2), 600];
+  assert.ok(spike.reduce((a, x) => a + x, 0) / 200 > 0);
+  assert.equal(trimmedMean(spike, 1), -2);
+  // In the gate: every rule now carries its p-value and Holm threshold; the good synthetic rule clears both.
+  const q = qualify(syntheticDataset(400, 2), freeCosts);
+  const all5 = q.rules.find(r => r.group === 'all' && r.delayS === 5)!;
+  assert.ok(all5.pValue !== null && all5.pThreshold !== null && all5.pValue <= all5.pThreshold, `${all5.pValue} vs ${all5.pThreshold}`);
+  assert.equal(all5.qualified, true, all5.reasons.join('; '));
+  assert.ok(q.rules.every(r => r.pThreshold !== null && r.pThreshold <= CRITERIA.alpha));
+  // The same launches with costs that leave a thin positive average (≈ +0.7 % on a ±22 % spread): not clear of luck.
+  const thin = qualify(syntheticDataset(400, 2), { ...freeCosts, fixedUsd: 0.35 }).rules.find(r => r.group === 'all' && r.delayS === 5)!;
+  assert.ok(thin.validation.meanPct > 0 && thin.validation.meanPct < 2, `${thin.validation.meanPct}`);
+  assert.equal(thin.qualified, false);
+  assert.ok(thin.reasons.some(x => /^could be luck: p = /.test(x)), thin.reasons.join('; '));
+});
+
+test('phone fill: the owner buys about 45 s after the call, at that moment\'s price; the gate shows the bot\'s price beside it', async () => {
+  const { simulate, GATE_COSTS, PHONE_FILL_MS } = await import('../src/research/direct');
+  const { qualify } = await import('../src/research/qualify');
+  const t0 = Date.parse('2026-10-02T00:00:00Z'), l = syntheticLaunch(0, t0, true);
+  // The winner trades at 30 SOL, touches 42 at 120 s. Add a run-up to 36 SOL at 40 s, inside the owner's 45 s.
+  l.trades.splice(3, 0, { ...l.trades[2]!, obs: l.createdObs + 40_000, vSol: 36e9, slot: 40 });
+  const x = { tpPct: 40, slPct: 20, maxHoldMin: 15 };
+  const bot = simulate(l, x, { ...freeCosts, delayS: 5 }, t0 + 3_600_000)!;
+  const phone = simulate(l, x, { ...freeCosts, latencyMs: PHONE_FILL_MS, fill: 'phone', delayS: 5 }, t0 + 3_600_000)!;
+  assert.equal(bot.entryAt, l.createdObs + 7_000); assert.equal(phone.entryAt, l.createdObs + 50_000);
+  assert.ok(phone.entryMcap > bot.entryMcap * 1.15, 'the owner pays the run-up');
+  assert.equal(bot.reason, 'TAKE_PROFIT'); assert.notEqual(phone.reason, 'TAKE_PROFIT', '42 SOL is only +17 % from 36');
+  assert.equal(GATE_COSTS.fill, 'phone'); assert.equal(GATE_COSTS.latencyMs, PHONE_FILL_MS);
+  const q = qualify(syntheticDataset(400, 2), { ...freeCosts, latencyMs: PHONE_FILL_MS, fill: 'phone' });
+  const all5 = q.rules.find(r => r.group === 'all' && r.delayS === 5)!;
+  assert.ok(all5.botFill && all5.botFill.n === all5.validation.n, 'the bot\'s result on the same later launches');
+});
+
 test('call engine: a qualified rule calls the phone at its decision time, other candidates are shadow calls, results are judged after the hold', async () => {
   const { qualify } = await import('../src/research/qualify');
   const { CallEngine } = await import('../src/research/calls');
@@ -352,6 +398,33 @@ test('call engine: a qualified rule calls the phone at its decision time, other 
   assert.equal(res.length, sig.length, 'each signal judged once');
   assert.ok(res.filter(r => r[4] === 1).every(r => r[6] === 'TAKE_PROFIT'), 'the winner hit its target');
   assert.equal(recs.filter(r => r[0] === 'QUAL').length, 1);
+});
+
+test('call engine: without explicit costs, live calls are judged at the gate\'s costs ($0.10 a round trip), not the cheaper simulation default', async () => {
+  const { qualify } = await import('../src/research/qualify');
+  const { CallEngine } = await import('../src/research/calls');
+  const { simulate, GATE_COSTS } = await import('../src/research/direct');
+  const q = qualify(syntheticDataset(400, 2), freeCosts);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'research-calls-costs-'));
+  const t0 = Date.parse('2026-10-03T00:00:00Z');
+  let now = t0;
+  const ledger = new ResearchLedger({ dir, now: () => now, freeBytes: async () => 5e9 });
+  await ledger.start();
+  const engine = new CallEngine({ ledger, now: () => now, notify: null, solUsd: () => 150 });
+  engine.setQualification(q);
+  const l = syntheticLaunch(0, t0, true);
+  now = t0 + 5_000; engine.tick([l]);
+  now = t0 + 62 * 60_000 + 95_000; engine.tick([]);
+  await ledger.close();
+  const read = async (f: string) => f.endsWith('.gz') ? gunzipSync(await fs.readFile(path.join(dir, f))).toString() : await fs.readFile(path.join(dir, f), 'utf8');
+  const recs = lines((await Promise.all((await fs.readdir(dir)).filter(f => f.startsWith('ev-')).sort().map(read))).join(''));
+  const res = recs.filter(r => r[0] === 'RES');
+  assert.ok(res.length > 0);
+  for (const r of res) {
+    const rule = q.rules.find(x => x.id === r[3])!;
+    const expected = simulate(l, rule.exit, { ...GATE_COSTS, delayS: rule.delayS }, now)!.netPct;
+    assert.ok(Math.abs((r[5] as number) - expected) < 0.01, `${rule.id} judged with the gate's costs (${r[5]} vs ${expected})`);
+  }
 });
 
 test('live and look-back features are the same code over the same facts', async () => {

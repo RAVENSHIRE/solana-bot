@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import { z } from 'zod';
-import { atomicWriteFile } from '../utils/fs';
+import { atomicWriteFile, setAside } from '../utils/fs';
 import { DESK } from './config';
 import type { DeskEvent, DeskMode, Stage } from './types';
 
@@ -20,6 +20,10 @@ export class EventLog {
   private unlogged: DeskEvent[] = [];
   constructor(readonly mode: DeskMode, private readonly file: string | null, private readonly now: () => number = Date.now) {}
 
+  /** Where an unreadable events file was moved before this log started empty. */
+  damaged: string | null = null;
+
+  /** An unreadable file (e.g. all zero bytes after a power cut) is moved aside: events are telemetry, the .log.jsonl history stays. */
   async load(): Promise<void> {
     if (!this.file) return;
     try {
@@ -28,7 +32,7 @@ export class EventLog {
       this.trim();
       this.next = (this.events.at(-1)?.id ?? 0) + 1;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('DESK_EVENTS_INVALID');
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') this.damaged = await setAside(this.file, this.now());
     }
   }
 

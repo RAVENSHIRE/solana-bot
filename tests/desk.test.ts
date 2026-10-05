@@ -161,7 +161,28 @@ test('ledger: TEST PnL books both network fees once and account rent until it is
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-test('process lock: a crashed owner is recovered; a live or unreadable owner still blocks', async () => {
+test('power cut: zero-byte TEST ledgers and event files are moved aside and start fresh; a damaged LIVE ledger still stops the desk', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-damaged-')), NOW = Date.parse('2026-10-05T12:00:00Z');
+  try {
+    // Raven, 3 Oct: every file written in the last second before the shutdown held only zero bytes.
+    for (const f of ['ledger-PAPER.json', 'ledger-PAPER-CRASH.json', 'ledger-LIVE-x.json', 'events-PAPER.json']) await fs.writeFile(path.join(dir, f), Buffer.alloc(3_672));
+    const paper = await DeskLedger.open(path.join(dir, 'ledger-PAPER.json'), 'PAPER', null, NOW);
+    assert.equal(paper.state.entries.length, 0); assert.equal(paper.state.createdAt, NOW);
+    assert.equal(paper.damaged, path.join(dir, 'ledger-PAPER.json.damaged-2026-10-05T12-00-00-000Z'));
+    assert.equal((await fs.stat(paper.damaged!)).size, 3_672, 'kept for a look');
+    await paper.save();
+    assert.equal((await DeskLedger.open(path.join(dir, 'ledger-PAPER.json'), 'PAPER', null, NOW)).damaged, null, 'the fresh one reads back');
+    await assert.rejects(DeskLedger.open(path.join(dir, 'ledger-LIVE-x.json'), 'LIVE', 'x', NOW), /LEDGER_INVALID/);
+    assert.equal((await fs.stat(path.join(dir, 'ledger-LIVE-x.json'))).size, 3_672, 'a LIVE ledger is never moved');
+    // The whole TEST engine opens, and says once what it moved.
+    const engine = await DeskEngine.create({ ...world().shared, mode: 'PAPER', dir, sender: null, wallet: () => null });
+    const said = engine.status({ connected: false, address: null }).events.filter(e => e.stage === 'FAILED' && /moved aside/.test(e.message));
+    assert.equal(said.length, 1); assert.match(said[0]!.message, /TEST starts fresh: events-PAPER\.json\.damaged-.*ledger-PAPER-CRASH\.json\.damaged-/);
+    assert.ok((await fs.readdir(dir)).some(f => f.startsWith('events-PAPER.json.damaged-')));
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('process lock: a crashed owner is recovered; a live owner or a fresh empty lock still blocks; an old empty lock is stale', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-lock-')), lock = path.join(dir, 'desk.lock');
   try {
     const child = spawn(process.execPath, ['-e', '']); await new Promise(r => child.once('exit', r));
@@ -170,7 +191,15 @@ test('process lock: a crashed owner is recovered; a live or unreadable owner sti
     await handle.close(); await fs.unlink(lock);
     const sleeper = spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)']);
     try { await fs.writeFile(lock, String(sleeper.pid)); await assert.rejects(acquireProcessLock(lock), /EEXIST/); } finally { sleeper.kill(); }
-    await fs.writeFile(lock, ''); await assert.rejects(acquireProcessLock(lock), /EEXIST/);
+    await fs.writeFile(lock, ''); await assert.rejects(acquireProcessLock(lock), /EEXIST/, 'an owner that just created it may not have written its pid yet');
+    // An empty lock from before a hard shutdown (Raven, 3 Oct): stale after a minute, so the desk can start again.
+    const old = new Date(Date.now() - 2 * 60_000); await fs.utimes(lock, old, old);
+    const again = await acquireProcessLock(lock); assert.equal(await fs.readFile(lock, 'utf8'), String(process.pid));
+    await again.close(); await fs.unlink(lock);
+    // What Raven's lock actually held after the shutdown: five zero bytes, not nothing.
+    await fs.writeFile(lock, Buffer.alloc(5)); await fs.utimes(lock, old, old);
+    const zeros = await acquireProcessLock(lock); assert.equal(await fs.readFile(lock, 'utf8'), String(process.pid));
+    await zeros.close();
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
@@ -1007,7 +1036,7 @@ test('LAUNCH rug defence: insiders selling is a RUG exit (remembered); insiders 
   }
 });
 
-test('OPEN: a breakout above a strong opening candle is alerted at once, bought, scaled into at 2× and 4×, held to 6×, then trailed', async () => {
+test('OPEN: a breakout above a strong opening candle is bought, scaled into at 2× and 4×, held to 6×, then trailed', async () => {
   const curve = { dexId: 'pumpfun', liquidity: null, marketCap: 28_000, fdv: 28_000, pairCreatedAt: NOW - 6 * 60_000, priceChange: { m5: 12, h1: 40 } };
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-open-')), { w, shared } = world(curve);
   try {
@@ -1027,10 +1056,8 @@ test('OPEN: a breakout above a strong opening candle is alerted at once, bought,
     await engine.pulse();
     const fresh = await engine.openingPass();
     assert.equal(fresh.length, 1);
-    assert.deepEqual(alerts.map(a => a.title), ['OPEN ABC: $27.0K, 6 min after launch'], 'alerted at once, before any scan');
-    assert.match(alerts[0]!.body, /\$20\.0K open → low \$7\.0K \(held \$6\.7K\) → \$27\.0K/);
-    assert.match(alerts[0]!.body, /Not a qualified call/);
-    assert.equal(alerts[0]!.click, `https://fomo.family/tokens/solana/${MINT}`, 'tapping the notification opens the coin in FOMO');
+    assert.deepEqual(alerts, [], 'a breakout 6 min after launch is shown and traded, but the phone gets sprints only');
+    assert.ok(engine.events.list().some(e => /^OPEN screen: ABC "Fantasy Index 6900"/.test(e.message)));
     await engine.pulse();
     let view = engine.status({ connected: false, address: null });
     assert.equal(view.positions.length, 1, view.candidates.find(c => c.mint === MINT)?.open?.signal.summary); assert.equal(view.positions[0]!.strategy, 'OPEN');
@@ -1074,6 +1101,31 @@ test('OPEN screen: a copycat breakout (bigger, older namesake) is never alerted 
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
+test('OPEN on the phone: only sprints (a breakout within 2 min of launch), at most 4 an hour, tap opens FOMO', async () => {
+  const curve = { dexId: 'pumpfun', liquidity: null, marketCap: 28_000, fdv: 28_000, pairCreatedAt: NOW - 6 * 60_000, priceChange: { m5: 12, h1: 40 } };
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-open-phone-')), { shared } = world(curve);
+  try {
+    const at = Date.now();
+    const sprint = (i: number, secs: number) => ({ mint: key(60 + i).toBase58(), symbol: `S${i}`, name: `Sprint ${i}`, at: at - secs * 1000, status: 'SIGNAL' as const, openHighUsd: 10_000,
+      lowUsd: 7_000, lastUsd: 28_900, peakUsd: 28_900, firstSampleAt: at - secs * 1000 + 3_000, lastSampleAt: at, signalAt: at, signalUsd: 28_900,
+      detail: '$10.0K open → $28.9K: broke above the opening high', samples: [[at - secs * 1000 + 3_000, 3_400]] as Array<[number, number]> });
+    let pending = [sprint(0, 68), sprint(1, 300), ...[2, 3, 4, 5, 6].map(i => sprint(i, 60 + i))];
+    const tracker = { observe: () => undefined, poll: async () => { const out = pending; pending = []; return out; }, get: () => null, list: () => [],
+      counts: () => ({ OPENING: 0, STRONG: 0, SIGNAL: 7, WEAK: 0, RUG: 0, GRADUATED: 0, EXPIRED: 0, UNKNOWN_OPEN: 0 }) };
+    const alerts: Array<{ title: string; body: string; click: string | null | undefined }> = [];
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }), opening: tracker as never,
+      notify: async (title, body, o) => { alerts.push({ title, body, click: o?.click }); }, alerts: new Set(['open']) });
+    for (const id of ['FAIR', 'CRASH', 'LAUNCH', 'OPEN', 'GOLDEN']) engine.setStrategy(id, false);
+    await engine.openingPass();
+    assert.deepEqual(alerts.map(a => a.title), ['OPEN S0: $28.9K, 68 s after launch', 'OPEN S2: $28.9K, 62 s after launch', 'OPEN S3: $28.9K, 63 s after launch',
+      'OPEN S4: $28.9K, 64 s after launch'], 'the 5-minute breakout is held back; the fifth and later sprints this hour too');
+    assert.match(alerts[0]!.body, /\$3\.4K → \$28\.9K in 68 s \(×8\.5\)/);
+    assert.match(alerts[0]!.body, /Not a qualified call/);
+    assert.equal(alerts[0]!.click, `https://fomo.family/tokens/solana/${key(60).toBase58()}`, 'tapping the notification opens the coin in FOMO');
+    assert.equal(engine.events.list().filter(e => /^OPEN screen: S\d/.test(e.message)).length, 7, 'every breakout is still shown');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
 test('GOLDEN POCKET: an only-up fill on a fresh pool is alerted, bought in TEST with the pattern stop, and sold when the pool trades under it; a retest is shown only', async () => {
   const pool = { pairCreatedAt: Date.now() - 3 * 60_000, priceChange: { m5: 30, h1: 30 }, volume: { m5: 60_000, h1: 60_000 }, marketCap: 113_000, fdv: 113_000 };
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-golden-')), { shared } = world(pool);
@@ -1089,9 +1141,9 @@ test('GOLDEN POCKET: an only-up fill on a fresh pool is alerted, bought in TEST 
     const held: string[][] = [];
     const tracker = { watchGraduations: () => undefined, hold: (m: string[]) => { held.push(m); }, poll: async () => { const out = pending; pending = []; return out; },
       get: (m: string) => m === MINT ? { ...watch, lastSampleAt: Date.now() } : null, list: () => [watch], counts: () => ({ IMPULSE: 4, DIP: 2, BROKEN_OUT: 1, ENTRY: 1, FAILED: 9, EXPIRED: 0, watched: 17 }) };
-    const alerts: string[] = [];
+    const alerts: string[] = [], phone = new Set<'golden'>(['golden']);
     const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }), golden: tracker as never,
-      notify: async title => { alerts.push(title); }, alerts: new Set(['golden']) });
+      notify: async title => { alerts.push(title); }, alerts: phone });
     for (const id of ['FAIR', 'CRASH', 'LAUNCH', 'OPEN']) engine.setStrategy(id, false);
     engine.setStrategy('GOLDEN', true);
     engine.start(); await engine.pulse();
@@ -1113,6 +1165,13 @@ test('GOLDEN POCKET: an only-up fill on a fresh pool is alerted, bought in TEST 
     view = engine.status({ connected: false, address: null });
     assert.equal(view.positions.length, 0);
     assert.ok(engine.events.list().some(e => /^GOLDEN · exit signal: POCKET_STOP \$104,000 ≤ \$104,500/.test(e.message)));
+    // The pools are read only while someone uses them: GOLDEN on, golden phone alerts, or a GOLDEN position.
+    engine.setStrategy('GOLDEN', false);
+    assert.equal(engine.goldenWanted(), true, 'golden alerts still go to the phone');
+    phone.delete('golden');
+    assert.equal(engine.goldenWanted(), false);
+    await engine.pulse();
+    assert.match(engine.status({ connected: false, address: null }).sources['Golden pocket (graduated pools, every 4 s)']!, /^paused/);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
