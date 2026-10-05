@@ -542,7 +542,7 @@ function Ledger({ d }: { d: DeskStatus }) {
 
 function PathAudit({ d }: { d: DeskStatus }) {
   return <section className="panel desk-card" aria-label="Execution path">
-    <div className="card-head"><h3>Actual execution path</h3><small>Phantom is the wallet and signer, not the DEX.</small></div>
+    <div className="card-head"><h3>Actual execution path</h3><small>Built from the running desk: what it reads, what it trades, and who holds the wallet and signs. The DEX is wherever Jupiter routes the order.</small></div>
     <dl className="kv two">{d.path.map(p => <div key={p.layer}><dt>{p.layer}</dt><dd>{p.provider}</dd></div>)}</dl>
     <h4>Data sources (last scan)</h4>
     <dl className="kv two">{Object.entries(d.sources).map(([k, v]) => <div key={k}><dt>{k}</dt><dd className={v.startsWith('UNAVAILABLE') ? 'unknown' : ''}>{v}</dd></div>)}</dl>

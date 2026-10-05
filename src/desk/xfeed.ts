@@ -17,6 +17,8 @@ export const XFEED = Object.freeze({
   query: '("ca:" OR "CA:" OR "pump.fun" OR "contract address" OR "just launched" OR "now live") (solana OR $SOL OR pump OR sol) -is:retweet',
   maxResults: 100,
   timeoutMs: 10_000,
+  /** After 401/402/403 (token, plan or no credits): asked again only this much later. */
+  hardFailureMs: 6 * 3_600_000,
 });
 
 const Post = z.object({ id: z.string(), text: z.string(), author_id: z.string().optional(), created_at: z.string().datetime(),
@@ -62,10 +64,13 @@ export class XFeed {
         return [];
       }
       if (!res.ok) {
-        // 402: the X developer account has no paid search access or credits; 401/403: token or plan. Retried every 15 min.
-        this.state.lastError = res.status === 402 ? 'X API HTTP 402: payment required — this X developer account has no search credits or paid plan'
-          : `X API HTTP ${res.status}${res.status === 401 || res.status === 403 ? ' (token invalid or plan without search)' : ''}`;
-        if ([401, 402, 403].includes(res.status)) this.state.nextAllowedAt = now + 15 * 60_000;
+        // 402: the X developer account has no paid search access or credits; 401/403: token or plan. Neither fixes
+        // itself, so the feed asks again only every 6 h (a restart after a change to the plan or .env asks at once).
+        const hard = [401, 402, 403].includes(res.status);
+        if (hard) this.state.nextAllowedAt = now + XFEED.hardFailureMs;
+        const next = hard ? ` · paused, next try ${new Date(this.state.nextAllowedAt!).toISOString().slice(11, 16)} UTC` : '';
+        this.state.lastError = (res.status === 402 ? 'X API HTTP 402: payment required — this X developer account has no search credits or paid plan'
+          : `X API HTTP ${res.status}${res.status === 401 || res.status === 403 ? ' (token invalid or plan without search)' : ''}`) + next;
         return [];
       }
       const body = Search.safeParse(await res.json());

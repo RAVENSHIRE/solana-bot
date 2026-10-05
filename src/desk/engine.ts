@@ -1822,24 +1822,39 @@ export class DeskEngine {
     };
   }
 
+  /**
+   * The desk's real path, built from its state rather than a fixed text: which feeds and screens run, which strategies
+   * are on, and who holds the wallet and signs. Phantom is a wallet and a signer only; the DEX is whatever Jupiter routes to.
+   */
   private pathView(): DeskStatus['path'] {
-    const d = this.d, rpc = d.cfg.rpc.endpoints.map(e => { try { return new URL(e).hostname; } catch { return 'configured RPC'; } }).join(', ');
-    const test = d.mode === 'PAPER', f = this.strategies.FAIR, c = this.strategies.CRASH;
+    const d = this.d, now = Date.now(), test = d.mode === 'PAPER', local = !test && d.signerKind === 'LOCAL_KEY';
+    const rpc = d.cfg.rpc.endpoints.map(e => { try { return new URL(e).hostname; } catch { return 'configured RPC'; } });
+    const on = this.ids().map(id => this.profile(id)).filter(p => p.enabled), off = this.ids().length - on.length;
+    const owner = d.wallet()?.owner.toBase58() ?? null, short = owner ? `${owner.slice(0, 4)}…${owner.slice(-4)}` : null;
+    const screens = ['trending and freshly migrated pools under $1M',
+      d.launches ? 'launch radar (fresh pump.fun launches: X page, website, rug checks)' : null,
+      d.opening ? 'opening screen (every curve\'s first minutes)' : null,
+      d.golden ? (this.goldenWanted() ? 'golden pocket (fresh graduations)' : 'golden pocket paused (GOLDEN off)') : null,
+      `watchlist (${this.watchlist().length})`].filter(Boolean).join(' · ');
     return [
-      { layer: 'Market data', provider: 'DexScreener (pairs, boosts, profiles) · GeckoTerminal (trending/new pools, trades)' },
-      { layer: 'Scanner', provider: 'Trending / migrated < $1M (priority < $100K) · ultra-early $2K–$10K, monitored to $100K' },
-      { layer: 'Strategies (parallel)', provider: `FAIR: fair launch + momentum in 2 scans${f.enabled ? '' : ' (OFF)'} · CRASH: young pumping pools, entered in 1 scan, exits within ${c.exits.maxHoldMin} min${c.enabled ? '' : ' (OFF)'}` },
-      { layer: 'Risk engine', provider: `Hard gates + execution guard (reserve ${sol(DESK.reserveLamports)} SOL, max drag FAIR ${Number(f.maxDragBps) / 100}% / CRASH ${Number(c.maxDragBps) / 100}%)` },
-      { layer: 'Quote provider', provider: 'Jupiter Swap API /quote' },
-      { layer: 'DEX / router', provider: 'Jupiter aggregator — the DEX route is shown per order' },
-      { layer: 'Transaction builder', provider: 'Jupiter /swap for the connected wallet address' },
-      { layer: 'RPC', provider: rpc || 'not configured' },
-      { layer: 'Wallet provider', provider: 'Phantom browser extension' },
-      { layer: 'Signer', provider: test ? 'None — TEST never requests a signature' : 'Phantom, one approval per transaction' },
-      { layer: 'Submission', provider: test ? 'None — paper fill from the unsigned simulation' : 'RPC sendTransaction with rebroadcast' },
-      { layer: 'Confirmation', provider: test ? 'Not applicable' : 'RPC signature status (confirmed) + on-chain balance deltas' },
+      { layer: 'Market data', provider: `DexScreener (pairs, boosts, profiles) · GeckoTerminal (trending/new pools, candles) · ${d.pumpStream?.healthy(now)
+        ? 'pump.fun launches, trades and graduations from the research observer\'s live stream' : 'pump.fun launches and graduations read from the RPC'}` },
+      { layer: 'Scanners', provider: screens },
+      { layer: `Strategies (${on.length} on${off ? `, ${off} off` : ''})`, provider: on.map(p => p.label).join(' · ') || 'none on' },
+      { layer: 'Risk engine', provider: `Hard gates per strategy + execution guard: reserve ${sol(DESK.reserveLamports)} SOL · max entry cost ${on.map(p => `${p.label} ${Number(p.maxDragBps) / 100}%`).join(', ')}` },
+      { layer: 'Quote', provider: 'Jupiter Swap API /quote: the best route over Solana DEXs' },
+      { layer: 'DEX', provider: 'Where Jupiter routes each order (pump.fun curve, PumpSwap, Raydium, Meteora …), shown per order' },
+      { layer: 'Transaction builder', provider: `Jupiter /swap for ${short ?? 'the desk wallet'}` },
+      { layer: 'RPC', provider: rpc.join(', ') || 'not configured' },
+      { layer: 'Wallet', provider: test ? `${short ?? 'no address set'}: an address only, TEST never holds a key`
+        : local ? `${short ?? 'not loaded'}: the local key on this PC (WALLET_PRIVATE_KEY), Phantom not needed` : `${short ?? 'not connected'}: Phantom browser extension` },
+      { layer: 'Signer', provider: test ? 'None: TEST never requests a signature'
+        : local ? 'The local key, in the desk process: no approval per trade, works while you are away' : 'Phantom, one approval per transaction in the browser' },
+      { layer: 'Submission', provider: test ? 'None: paper fill from the simulated swap' : `RPC sendTransaction (${rpc[0] ?? 'RPC'}), sent again every 2 s until confirmed or expired` },
+      { layer: 'Confirmation', provider: test ? 'Not applicable' : 'RPC signature status (confirmed) and the on-chain balance changes' },
     ];
   }
+
 }
 
 const usd = (n: number | null) => n === null ? 'UNKNOWN' : `${n < 0 ? '-' : ''}$${Math.abs(n).toFixed(4)}`;

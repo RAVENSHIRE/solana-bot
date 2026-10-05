@@ -1328,3 +1328,24 @@ test('the wallet balance is read while the scanner is off, so the dashboard show
     assert.equal(engine.events.list().filter(e => e.stage === 'SCANNING').length, 0, 'no scan, no order: a balance read only');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
+
+test('execution path: built from the running desk — every enabled strategy, and the wallet and signer as they really are (address only in TEST, local key or Phantom in LIVE)', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-path-')), { shared } = world();
+  try {
+    const layer = (p: Array<{ layer: string; provider: string }>, name: RegExp) => p.find(x => name.test(x.layer))?.provider ?? '';
+    const paper = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }) });
+    const p = paper.status({ connected: false, address: null }).path;
+    const short = `${owner.toBase58().slice(0, 4)}…${owner.toBase58().slice(-4)}`;
+    assert.match(layer(p, /^Strategies \(\d+ on/), /FAIR LAUNCH.*CRASH.*LAUNCH.*OPEN/);
+    assert.doesNotMatch(layer(p, /^Strategies/), /GOLDEN POCKET/, 'off by default, so not listed as running');
+    assert.equal(layer(p, /^Wallet$/), `${short}: an address only, TEST never holds a key`);
+    assert.match(layer(p, /^Signer$/), /^None/);
+    assert.match(layer(p, /^DEX$/), /Jupiter routes/); assert.doesNotMatch(layer(p, /^DEX$/), /Phantom/);
+    const signer = { publicKey: owner, signTransaction: async () => { throw new Error('not in this test'); } } as unknown as TransactionSigner;
+    const live = await DeskEngine.create({ ...shared, mode: 'LIVE', dir, sender: null, signerKind: 'LOCAL_KEY', authorized: () => true, wallet: () => ({ owner, signer }) });
+    const l = live.status({ connected: false, address: null }).path;
+    assert.match(layer(l, /^Wallet$/), /local key on this PC \(WALLET_PRIVATE_KEY\), Phantom not needed/);
+    assert.match(layer(l, /^Signer$/), /no approval per trade/);
+    assert.match(layer(l, /^Submission$/), /sendTransaction/);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});

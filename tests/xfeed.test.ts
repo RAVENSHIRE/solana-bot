@@ -33,8 +33,9 @@ test('X feed: a rate limit waits for the window to reset; a bad token is reporte
   assert.deepEqual(await limited.poll(NOW), []); assert.equal(limited.status().nextAllowedAt, reset * 1000);
   assert.deepEqual(await limited.poll(NOW + XFEED.pollMs), [], 'still waiting');
   const bad = new XFeed('tok', (async () => new Response('', { status: 403 })) as unknown as typeof fetch);
-  await bad.poll(NOW); assert.equal(bad.status().lastError, 'X API HTTP 403 (token invalid or plan without search)');
-  assert.equal(bad.status().nextAllowedAt, NOW + 15 * 60_000, 'retried every 15 minutes, not every 30 s');
+  await bad.poll(NOW); assert.match(bad.status().lastError!, /^X API HTTP 403 \(token invalid or plan without search\) · paused, next try \d\d:\d\d UTC$/);
+  assert.equal(bad.status().nextAllowedAt, NOW + XFEED.hardFailureMs, 'a token or plan does not fix itself: asked again after 6 h, not every 30 s');
+  assert.equal(XFEED.hardFailureMs, 6 * 3_600_000);
   const unpaid = new XFeed('tok', (async () => new Response('{"title":"CreditsDepleted"}', { status: 402 })) as unknown as typeof fetch);
   await unpaid.poll(NOW); assert.match(unpaid.status().lastError!, /^X API HTTP 402: payment required/);
   assert.deepEqual(postMints('new coin pump.fun/coin/' + MEME, []), [MEME]);
@@ -70,5 +71,12 @@ test('Claude review: one low-effort structured request with fallbacks; bounded p
   assert.equal(broke.available(NOW + 60_000), false); assert.equal(await broke.review(input, NOW + 60_000), null);
   assert.match(broke.status(), /1 failed/, 'no second request while resting');
   assert.equal(broke.available(NOW + 30 * 60_000 + 1), true);
+  // Still no credits: each further failure doubles the rest (1 h, 2 h, …), at most 6 h; credits do not come back by themselves.
+  let t = NOW + 30 * 60_000 + 1;
+  for (const restH of [1, 2, 4, 6, 6]) {
+    await broke.review(input, t);
+    assert.equal(broke.available(t + restH * 3_600_000 - 1), false, `rests ${restH} h`); assert.equal(broke.available(t + restH * 3_600_000), true);
+    t += restH * 3_600_000;
+  }
   assert.match(reviewPrompt({ ...input, x: null, website: null }, NOW), /Website: none\nX: none$/);
 });

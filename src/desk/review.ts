@@ -64,14 +64,21 @@ export interface Reviewer {
   /** Out of service after a hard failure (no credits, key rejected) until this time; 0 when fine. */
   downUntil(): number;
 }
-/** Hard failures (no credits, a rejected key) take a reviewer out of the rotation this long. */
+/**
+ * Hard failures (no credits, a rejected key) take a reviewer out of the rotation this long, doubled after each further
+ * hard failure up to `REVIEWER_MAX_COOLDOWN_MS` (credits do not come back by themselves); a good answer resets it.
+ */
 export const REVIEWER_COOLDOWN_MS = 30 * 60_000;
+export const REVIEWER_MAX_COOLDOWN_MS = 6 * 3_600_000;
+const restFor = (hardFailures: number) => Math.min(REVIEWER_MAX_COOLDOWN_MS, REVIEWER_COOLDOWN_MS * 2 ** Math.max(0, hardFailures - 1));
+const until = (at: number) => `paused until ${new Date(at).toISOString().slice(11, 16)} UTC`;
 
 export class LaunchReviewer implements Reviewer {
   private readonly client: Anthropic;
   private readonly used: number[] = [];
   private readonly stats = { sent: 0, ok: 0, failed: 0, lastError: null as string | null };
   private down = 0;
+  private hardFailures = 0;
   downUntil(): number { return this.down; }
   constructor(apiKey: string, client?: Anthropic, private readonly maxPerHour: number = REVIEW.maxPerHour) {
     this.client = client ?? new Anthropic({ apiKey, timeout: REVIEW.timeoutMs, maxRetries: 1 });
@@ -87,7 +94,7 @@ export class LaunchReviewer implements Reviewer {
   /** For the dashboard: reviews sent, answered, failed, and the last failure. */
   status(): string {
     const s = this.stats;
-    return `Claude review: ${s.ok} done${s.failed ? `, ${s.failed} failed (${s.lastError})` : ''}, ${this.used.length}/${this.maxPerHour} this hour`;
+    return `Claude review: ${s.ok} done${s.failed ? `, ${s.failed} failed (${s.lastError})` : ''}, ${Date.now() < this.down ? until(this.down) : `${this.used.length}/${this.maxPerHour} this hour`}`;
   }
 
   /** Null on any failure, refusal or cut-off answer: a missing review never blocks or boosts a launch. */
@@ -106,12 +113,12 @@ export class LaunchReviewer implements Reviewer {
         this.stats.failed++; this.stats.lastError = response.stop_reason ?? 'no answer'; return null;
       }
       const out = response.parsed_output;
-      this.stats.ok++;
+      this.stats.ok++; this.hardFailures = 0;
       return { ...out, idea: Math.max(0, Math.min(10, out.idea)), professionalism: Math.max(0, Math.min(10, out.professionalism)),
         scamSignals: out.scamSignals.slice(0, 5).map(s => clip(s, 160)), summary: clip(out.summary, 300), model: response.model, at: now };
     } catch (error) {
       this.stats.failed++;
-      if (/credit balance is too low/i.test((error as Error).message ?? '') || error instanceof Anthropic.AuthenticationError) this.down = now + REVIEWER_COOLDOWN_MS;
+      if (/credit balance is too low/i.test((error as Error).message ?? '') || error instanceof Anthropic.AuthenticationError) this.down = now + restFor(++this.hardFailures);
       this.stats.lastError = /credit balance is too low/i.test((error as Error).message ?? '') ? 'no API credits — add credits under Plans & Billing in the Anthropic console'
         : error instanceof Anthropic.AuthenticationError ? 'API key rejected' : error instanceof Anthropic.RateLimitError ? 'rate limited'
         : error instanceof Anthropic.APIConnectionError ? 'offline' : error instanceof Anthropic.APIError ? `API ${error.status}` : 'failed';
@@ -136,6 +143,7 @@ export class GeminiReviewer implements Reviewer {
   private readonly used: number[] = [];
   private readonly stats = { sent: 0, ok: 0, failed: 0, lastError: null as string | null };
   private down = 0;
+  private hardFailures = 0;
   private modelChecked = false;
   constructor(private readonly apiKey: string, private model: string = GEMINI.defaultModel, private readonly fetcher: typeof fetch = fetch,
     private readonly maxPerHour: number = REVIEW.maxPerHour) {}
@@ -147,7 +155,7 @@ export class GeminiReviewer implements Reviewer {
   }
   status(): string {
     const s = this.stats;
-    return `Gemini review (${this.model}): ${s.ok} done${s.failed ? `, ${s.failed} failed (${s.lastError})` : ''}, ${this.used.length}/${this.maxPerHour} this hour`;
+    return `Gemini review (${this.model}): ${s.ok} done${s.failed ? `, ${s.failed} failed (${s.lastError})` : ''}, ${Date.now() < this.down ? until(this.down) : `${this.used.length}/${this.maxPerHour} this hour`}`;
   }
   private async call(input: ReviewInput, now: number): Promise<Response> {
     return this.fetcher(`${GEMINI.base}/models/${this.model}:generateContent`, { method: 'POST', signal: AbortSignal.timeout(REVIEW.timeoutMs),
@@ -173,14 +181,14 @@ export class GeminiReviewer implements Reviewer {
     try {
       let res = await this.call(input, now);
       if (res.status === 404 && await this.pickModel()) res = await this.call(input, now);
-      if (res.status === 401 || res.status === 403) { this.down = now + REVIEWER_COOLDOWN_MS; throw new Error(`API key rejected (HTTP ${res.status})`); }
+      if (res.status === 401 || res.status === 403) { this.down = now + restFor(++this.hardFailures); throw new Error(`API key rejected (HTTP ${res.status})`); }
       if (res.status === 429) throw new Error('rate limited or out of quota');
       if (!res.ok) throw new Error(`API ${res.status}`);
       const body = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }> };
       const text = body.candidates?.[0]?.content?.parts?.map(p => p.text ?? '').join('') ?? '';
       const out = Verdict.safeParse(JSON.parse(text));
       if (!out.success) throw new Error(`unreadable answer (${body.candidates?.[0]?.finishReason ?? 'no reason'})`);
-      this.stats.ok++;
+      this.stats.ok++; this.hardFailures = 0;
       const v = out.data;
       return { ...v, idea: Math.max(0, Math.min(10, v.idea)), professionalism: Math.max(0, Math.min(10, v.professionalism)),
         scamSignals: v.scamSignals.slice(0, 5).map(x => clip(x, 160)), summary: clip(v.summary, 300), model: this.model, at: now };
