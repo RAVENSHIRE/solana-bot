@@ -13,7 +13,11 @@ export interface PumpEventSource {
   migrations(): Graduation[];
   /** Each curve's market cap (SOL) as the last observed trade left it; null when the stream cannot answer. */
   curves(mints: string[]): Promise<Map<string, StreamCurve> | null>;
+  /** The observer as the desk last saw it (for the dashboard's health strip); absent: not known. */
+  observer?(): ObserverHealth;
 }
+/** `seenAt`: the observer's last answer; `report`: its own GET /health (phone deliveries, research-ledger writes). */
+export interface ObserverHealth { seenAt: number | null; streamHealthy: boolean; report: Record<string, unknown> | null; reportAt: number | null }
 export interface StreamCurve { sol: number; at: number; complete: boolean }
 
 export class LocalPumpStream implements PumpEventSource {
@@ -25,6 +29,9 @@ export class LocalPumpStream implements PumpEventSource {
   private timer: NodeJS.Timeout | null = null;
   private busy = false;
   polls = 0; failures = 0;
+  private report: Record<string, unknown> | null = null;
+  private reportAt: number | null = null;
+  private lastReportTry = 0;
   constructor(private readonly url = 'http://127.0.0.1:3101/pump/events', private readonly fetcher: typeof fetch = fetch, private readonly everyMs = 1_000) {}
 
   start(): void {
@@ -37,6 +44,17 @@ export class LocalPumpStream implements PumpEventSource {
   healthy(now = Date.now()): boolean { return this.upstreamHealthy && now - this.lastOkAt < 10_000; }
   drainCreates(): LaunchEvent[] { const out = this.creates; this.creates = []; return out; }
   migrations(): Graduation[] { return this.recentMigrations; }
+  observer(): ObserverHealth { return { seenAt: this.lastOkAt || null, streamHealthy: this.upstreamHealthy, report: this.report, reportAt: this.reportAt }; }
+
+  /** The observer's GET /health, at most every 30 s; an observer without it (older version) just has no report. */
+  private async readReport(): Promise<void> {
+    if (Date.now() - this.lastReportTry < 30_000) return;
+    this.lastReportTry = Date.now();
+    try {
+      const res = await this.fetcher(this.url.replace(/\/pump\/events$/, '/health'), { signal: AbortSignal.timeout(3_000) });
+      if (res.ok) { this.report = await res.json() as Record<string, unknown>; this.reportAt = Date.now(); }
+    } catch { /* the events poll already shows whether the observer answers */ }
+  }
 
   async curves(mints: string[]): Promise<Map<string, StreamCurve> | null> {
     if (!mints.length) return new Map();
@@ -64,6 +82,7 @@ export class LocalPumpStream implements PumpEventSource {
       if (this.creates.length > 5_000) this.creates.splice(0, this.creates.length - 5_000);
       if (this.recentMigrations.length > 2_000) this.recentMigrations.splice(0, this.recentMigrations.length - 2_000);
       this.after = j.seq; this.upstreamHealthy = j.healthy; this.lastOkAt = Date.now();
+      await this.readReport();
     } catch { this.failures++; }
     finally { this.busy = false; }
   }

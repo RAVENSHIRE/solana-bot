@@ -24,6 +24,7 @@ import { ResearchObserver, PUBLIC_RPC_WS, PUBLICNODE_WS } from '../research/obse
 import { CallEngine } from '../research/calls';
 import { LocalFeed, LOCAL_FEED } from '../research/local-feed';
 import { VerifiedWatch } from '../research/verified';
+import { AliveReporter, aliveFile } from '../research/alive';
 import { LadderWatch } from '../research/ladder';
 import { rpcHolders } from '../research/holders';
 import type { Qualification } from '../research/qualify';
@@ -116,7 +117,11 @@ async function main(): Promise<void> {
 
   // New launches and migrations for the desk on this machine (it stops polling the RPC for them while this runs).
   let observer: ResearchObserver | null = null;
-  const feed = new LocalFeed(() => observer?.streamHealthy() ?? false);
+  const startedAt = Date.now();
+  // The desk's dashboard reads this (GET /health): observer heartbeat, research-ledger writes, phone deliveries.
+  const feed = new LocalFeed(() => observer?.streamHealthy() ?? false, () => ({ startedAt,
+    ledger: { bytes: ledger.bytes, records: ledger.records, writeErrors: ledger.writeErrors, lastWriteError: ledger.lastWriteError, lowDisk: ledger.lowDisk },
+    phone: phone?.channels.length ? phone.health() : null }));
   await feed.listen(Number(env.RESEARCH_FEED_PORT) || LOCAL_FEED.port).catch((error: Error) => console.log(`local feed for the desk not started: ${error.message}`));
   observer = new ResearchObserver({ ledger, tradeSources: sources, calls, feed, log: line => console.log(line) });
   observer.start();
@@ -125,6 +130,17 @@ async function main(): Promise<void> {
   const stop = async () => { observer?.stop(); verified?.stop(); ladder?.stop(); feed.close(); await ledger.close(); await ladderLedger?.close(); process.exit(0); };
   process.on('SIGINT', () => void stop());
   process.on('SIGTERM', () => void stop());
+  // Dead-man: one ALIVE message a day (07:00 UTC or later); when it does not arrive, something is down.
+  const ago = (at: number | null, now: number) => at === null ? 'never' : now - at < 120_000 ? `${Math.round((now - at) / 1000)} s ago` : now - at < 7_200_000 ? `${Math.round((now - at) / 60_000)} min ago` : `${((now - at) / 3_600_000).toFixed(1)} h ago`;
+  const alive = phone?.channels.length ? new AliveReporter({ file: aliveFile(dir), notify: phone.notify, lines: now => {
+    const h = phone.health();
+    return [`Observer up ${((now - startedAt) / 3_600_000).toFixed(1)} h · launch stream ${observer?.streamHealthy() ? 'live' : 'DOWN'}.`,
+      `Desk last read the feed ${ago(feed.lastPollAt, now)}.`,
+      `Phone: ${h.delivered}/${h.sent} delivered since start${h.failed ? `, ${h.failed} failed (last: ${h.lastError})` : ''}.`,
+      `Research ledger: ${(ledger.bytes / 1048576).toFixed(0)} MB written${ledger.writeErrors ? `, ${ledger.writeErrors} write errors` : ''}${ledger.lowDisk ? ', LOW DISK' : ''}.`,
+      calls ? `Calls: ${calls.stats.calls} sent, ${calls.stats.judged} judged.` : 'Calls: off.'];
+  } }) : null;
+  if (alive) { void alive.tick(); setInterval(() => void alive.tick(), 60_000).unref(); }
   setInterval(() => console.log(`${observer!.status()}${verified ? ` · ${verified.status()}` : ''}${ladder ? ` · ${ladder.status()}` : ''}${phoneStatus()}`), 60_000).unref();
 }
 

@@ -7,6 +7,7 @@ import http from 'node:http';
  *
  *   GET /pump/events?after=<seq>  →  { seq, healthy, creates: [...], migrations: [...] }
  *   GET /pump/curves?mints=a,b,…   →  { healthy, curves: { mint: [market cap SOL, observed ms, complete 0/1] } }
+ *   GET /health                    →  { at, healthy, ...the observer's status (ledger writes, phone delivery) }
  *
  * The curve market cap is the one the last observed trade left (every TradeEvent carries the curve's reserves), so the
  * desk's opening screen needs no RPC read per curve.
@@ -22,7 +23,12 @@ export class LocalFeed {
   private readonly seenCreates = new Set<string>();
   private readonly curves = new Map<string, [number, number, 0 | 1]>();
   private server: http.Server | null = null;
-  constructor(private readonly healthy: () => boolean = () => true) {}
+  /** When the desk last read the feed: the observer's daily alive message says whether the desk is up. */
+  lastPollAt: number | null = null;
+  constructor(private readonly healthy: () => boolean = () => true, private readonly status: () => Record<string, unknown> = () => ({})) {}
+
+  /** The observer's own health for the desk's dashboard (no secrets: counters, times, error classes). */
+  health(now = Date.now()): Record<string, unknown> { return { at: now, healthy: this.healthy(), ...this.status() }; }
 
   addCreate(c: Omit<FeedCreate, 'seq'>): void {
     if (this.seenCreates.has(c.mint)) return;
@@ -61,9 +67,12 @@ export class LocalFeed {
         const send = (body: unknown) => res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify(body));
         if (req.method === 'GET' && url.pathname === '/pump/events') {
           const after = Number(url.searchParams.get('after') ?? 0);
+          this.lastPollAt = Date.now();
           send(this.since(Number.isFinite(after) ? after : 0));
         } else if (req.method === 'GET' && url.pathname === '/pump/curves') {
           send(this.curvesFor((url.searchParams.get('mints') ?? '').split(',').filter(Boolean)));
+        } else if (req.method === 'GET' && url.pathname === '/health') {
+          send(this.health());
         } else res.writeHead(404).end();
       });
       server.once('error', reject);

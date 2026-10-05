@@ -38,7 +38,8 @@ import { OPENING, openingSpeed, type OpeningState, type OpeningTracker } from '.
 import { GOLDEN, PUMP_QUOTE_MINT, WSOL_MINT, type GoldenSignal, type GoldenTracker } from './golden-pocket';
 
 import { curveState, insiderExit, insiderHolding, RISK } from './launch-risk';
-import { fomoUrl, type Notify, type NotifyOptions } from './watch';
+import { fomoUrl, type Notify, type NotifyHealth, type NotifyOptions } from './watch';
+import { healthLines } from './health';
 import { PRESETS, loadRuleSpecs, removeRuleSpec, ruleCheck, ruleMarketHint, ruleProfile, saveRuleSpec, type RuleSpec } from './custom';
 import type { DeskResearchHooks } from '../research/integration/desk-recorder';
 import type { ChannelResult } from '../research/alerts/evidence';
@@ -54,6 +55,8 @@ export interface DeskDeps {
   wallet: () => DeskWallet | null;
   /** LIVE: the browser session is connected and alive. */
   authorized: () => boolean;
+  /** The desk notifier's delivery record, for the dashboard's health strip. */
+  phoneHealth?: () => NotifyHealth;
   sender: TransactionSender | null;
   website?: (url: string | null) => Promise<WebsiteCheck>;
   /** Strategy settings; defaults to strategyProfiles() of the desk capital and RS_* rules. */
@@ -1797,6 +1800,7 @@ export class DeskEngine {
       ...(d.xfeed ? { xFeed: (({ configured, lastPollAt, lastError, posts, signals }) => ({ configured, lastPollAt, lastError, posts, signals }))(d.xfeed.status()) } : {}),
       preflights: [...this.preflights].reverse(), positions, ledger: rows,
       sources: this.sources, path: this.pathView(),
+      health: healthLines({ observer: d.pumpStream?.observer?.() ?? null, streamOff: !d.pumpStream, phone: d.phoneHealth?.() ?? null, channels: d.alertChannels?.length ?? 0 }, Date.now()),
     };
   }
 

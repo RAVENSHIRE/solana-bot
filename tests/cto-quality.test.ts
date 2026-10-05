@@ -116,3 +116,44 @@ test('CTO-07 (Q-20, OPEN cap): sent alerts and the OPEN phone cap survive a rest
   assert.equal(after.openPhoneSlot(now), false, 'the restart does not reset the OPEN cap');
   assert.equal(after.openPhoneSlot(now + 11 * 60_000), true, 'the oldest slot expires after an hour');
 });
+
+test('CTO-08 (Q-17): the daily ALIVE message goes out once a day from 07:00 UTC, also across restarts', async () => {
+  const { AliveReporter } = await import('../src/research/alive');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cto-alive-')), file = path.join(dir, 'alive.json'), sent: string[] = [];
+  let now = Date.parse('2026-10-05T06:59:00Z');
+  const reporter = () => new AliveReporter({ file, now: () => now, notify: async (t, b) => { sent.push(`${t}|${b}`); }, lines: () => ['desk last read the feed 2 s ago'] });
+  const a = reporter();
+  assert.equal(await a.tick(), false, 'not before 07:00 UTC');
+  now = Date.parse('2026-10-05T07:00:30Z');
+  assert.equal(await a.tick(), true); assert.equal(await a.tick(), false, 'once a day');
+  assert.equal(await reporter().tick(), false, 'a restart the same day does not send it again');
+  now = Date.parse('2026-10-06T09:15:00Z');
+  assert.equal(await reporter().tick(), true, 'the next day');
+  assert.equal(sent.length, 2); assert.match(sent[0]!, /^ALIVE: research observer\|desk last read the feed/);
+});
+
+test('CTO-09 (Q-17): the desk reads the observer\'s /health and the dashboard strip flags a silent observer or a failing phone', async () => {
+  const { LocalFeed } = await import('../src/research/local-feed');
+  const { LocalPumpStream } = await import('../src/desk/pump-stream');
+  const { healthLines } = await import('../src/desk/health');
+  const feed = new LocalFeed(() => true, () => ({ startedAt: Date.now() - 3_600_000, ledger: { writeErrors: 2 }, phone: { sent: 3, delivered: 2, failed: 1, lastOkAt: 1, lastFailureAt: 2, lastError: 'ntfy HTTP 429' } }));
+  await feed.listen(0);
+  const port = ((feed as unknown as { server: { address(): { port: number } } }).server).address().port;
+  try {
+    const stream = new LocalPumpStream(`http://127.0.0.1:${port}/pump/events`);
+    await stream.poll();
+    assert.ok(feed.lastPollAt !== null, 'the observer knows when the desk last read it');
+    const seen = stream.observer();
+    assert.ok(seen.seenAt !== null && seen.report !== null);
+    const now = Date.now(), lines = healthLines({ observer: seen, streamOff: false, phone: null, channels: 0 }, now);
+    const obs = lines.find(l => l.label === 'Research observer')!, phone = lines.find(l => l.label.startsWith('Observer phone'))!;
+    assert.equal(obs.bad, true, '2 ledger write errors'); assert.match(obs.text, /2 ledger write errors/);
+    assert.equal(phone.bad, true, 'the last delivery failed'); assert.match(phone.text, /ntfy HTTP 429/);
+    const later = healthLines({ observer: seen, streamOff: false, phone: null, channels: 0 }, now + 5 * 60_000);
+    assert.match(later.find(l => l.label === 'Research observer')!.text, /DOWN\?/, 'no answer for 5 min');
+    const never = healthLines({ observer: { seenAt: null, streamHealthy: false, report: null, reportAt: null }, streamOff: false, phone: null, channels: 0 }, now);
+    assert.equal(never[0]!.bad, true);
+    const recovered = healthLines({ observer: null, streamOff: true, channels: 1, phone: { sent: 2, delivered: 1, failed: 1, lastOkAt: now, lastFailureAt: now - 1_000, lastError: 'ntfy TypeError' } }, now);
+    assert.equal(recovered.find(l => l.label.startsWith('Desk phone'))!.bad, false, 'a delivery after the failure clears the warning');
+  } finally { feed.close(); }
+});
