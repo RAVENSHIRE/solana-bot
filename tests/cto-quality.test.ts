@@ -100,11 +100,11 @@ test('CTO-07 (Q-20, OPEN cap): sent alerts and the OPEN phone cap survive a rest
     const e: Record<string, unknown> = { d: { dir, mode: 'PAPER', alerts: new Set(['open']) }, launchAlerts: new Map<string, number>(), openPhoneSent: [] as number[],
       alertWrite: Promise.resolve(), event: () => undefined };
     for (const m of ['alertMemoryFile', 'loadAlertMemory', 'saveAlertMemory', 'openPhoneSlot']) e[m] = proto[m]!.bind(e);
-    return e as { launchAlerts: Map<string, number>; openPhoneSent: number[]; alertWrite: Promise<void>; loadAlertMemory: () => Promise<void>; saveAlertMemory: () => void; openPhoneSlot: (n: number) => boolean };
+    return e as { launchAlerts: Map<string, number>; openPhoneSent: number[]; alertWrite: Promise<void>; loadAlertMemory: () => Promise<void>; saveAlertMemory: () => void; openPhoneSlot: (n: number, cap?: number | null) => boolean };
   };
   const before = engine();
-  for (let i = 0; i < 4; i++) assert.equal(before.openPhoneSlot(now - 50 * 60_000 + i * 60_000), true);
-  assert.equal(before.openPhoneSlot(now), false, '4 an hour');
+  for (let i = 0; i < 4; i++) assert.equal(before.openPhoneSlot(now - 50 * 60_000 + i * 60_000, 4), true);
+  assert.equal(before.openPhoneSlot(now, 4), false, 'a cap of 4 an hour');
   before.launchAlerts.set('open:MINT1', now - 60_000);
   before.launchAlerts.set('radar:OLD', now - ALERT_MEMORY.keepMs - 60_000);
   before.saveAlertMemory(); await before.alertWrite;
@@ -113,8 +113,9 @@ test('CTO-07 (Q-20, OPEN cap): sent alerts and the OPEN phone cap survive a rest
   assert.ok(after.launchAlerts.has('open:MINT1'), 'a coin alerted before the restart is not alerted again');
   assert.ok(!after.launchAlerts.has('radar:OLD'), 'keys older than the memory window are dropped');
   assert.equal(after.openPhoneSent.length, 4);
-  assert.equal(after.openPhoneSlot(now), false, 'the restart does not reset the OPEN cap');
-  assert.equal(after.openPhoneSlot(now + 11 * 60_000), true, 'the oldest slot expires after an hour');
+  assert.equal(after.openPhoneSlot(now, 4), false, 'the restart does not reset the cap');
+  assert.equal(after.openPhoneSlot(now + 11 * 60_000, 4), true, 'the oldest slot expires after an hour');
+  assert.equal(after.openPhoneSlot(now + 12 * 60_000, null), true, 'no cap (the default): every breakout');
 });
 
 test('CTO-08 (Q-17): the daily ALIVE message goes out once a day from 07:00 UTC, also across restarts', async () => {

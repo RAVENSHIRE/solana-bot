@@ -32,12 +32,7 @@ export const OPENING = Object.freeze({
   maxTracked: 600,
   /** A bonding curve's market cap is far below this; a larger value means an unknown curve layout. */
   maxCurveUsd: 500_000,
-  /**
-   * The phone gets only sprints: a breakout within 2 minutes of launch (the owner's GOOP HEAD case, 3 Oct), at most
-   * 4 an hour. On 3 Oct every breakout went out, about 12 an hour, and the free ntfy quota ran out (HTTP 429): no
-   * alert of any kind reached the phone after that. Every breakout is still shown and recorded.
-   */
-  phoneWithinMs: 120_000, phonePerHour: 4,
+  // Phone alerts for breakouts (which, how many, text, colours): desk/opening-alerts.ts.
 });
 
 export type OpeningStatus = 'OPENING' | 'STRONG' | 'SIGNAL' | 'WEAK' | 'RUG' | 'GRADUATED' | 'EXPIRED' | 'UNKNOWN_OPEN';

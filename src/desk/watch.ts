@@ -196,8 +196,11 @@ function pick(r: WatchRule): WatchInput {
   return { mint: r.mint, wallet: r.wallet, trailingStopPct: r.trailingStopPct, marketCapFloorUsd: r.marketCapFloorUsd, marketCapTargetUsd: r.marketCapTargetUsd, action: r.action, note: r.note };
 }
 
-/** Extras a channel may use: ntfy opens `click` when the notification is tapped (e.g. the coin in FOMO). */
-export interface NotifyOptions { click?: string | null; tags?: string[] }
+/**
+ * Extras a channel may use: ntfy opens `click` when the notification is tapped (e.g. the coin in FOMO), shows `tags`
+ * (emoji shortcodes become icons) and rings by `priority` (default high).
+ */
+export interface NotifyOptions { click?: string | null; tags?: string[]; priority?: 'min' | 'low' | 'default' | 'high' | 'max' }
 export type Notify = (title: string, body: string, options?: NotifyOptions) => Promise<void>;
 
 /** Delivery record of one notifier: a message counts as delivered when at least one channel accepted it. */
@@ -215,7 +218,7 @@ export function notifier(env: NodeJS.ProcessEnv, fetcher: typeof fetch = fetch, 
   if (topic && /^[A-Za-z0-9_-]{8,64}$/.test(topic)) {
     const server = (env.DESK_NTFY_SERVER?.trim() || 'https://ntfy.sh').replace(/\/$/, '');
     send.push((title, body, o) => {
-      const headers: Record<string, string> = { Title: title.replace(/[^\x20-\x7e]/g, ''), Priority: 'high' };
+      const headers: Record<string, string> = { Title: title.replace(/[^\x20-\x7e]/g, ''), Priority: o?.priority ?? 'high' };
       if (o?.click && /^https:\/\/[^\s]+$/.test(o.click)) headers.Click = o.click;
       const tags = (o?.tags ?? []).filter(t => /^[a-z0-9_]{1,32}$/.test(t));
       if (tags.length) headers.Tags = tags.join(',');

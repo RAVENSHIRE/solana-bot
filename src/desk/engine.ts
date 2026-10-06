@@ -39,6 +39,7 @@ import { GOLDEN, PUMP_QUOTE_MINT, WSOL_MINT, type GoldenSignal, type GoldenTrack
 import { structure, structureLine } from './structure';
 import { byProgress, LEVEL1, levelRow, levelTrades, type LevelRow } from './levels';
 import { brandName } from './brands';
+import { capText, OPENING_SCREEN_ALERT_CONFIG, type OpeningAlertToken } from './opening-alerts';
 /** CRASH's window: pools are sampled for structure up to 15 minutes after their graduation. */
 const STRUCTURE_FOLLOW_MS = 15 * 60_000;
 
@@ -87,6 +88,8 @@ export interface DeskDeps {
   deliver?: (title: string, body: string, options?: NotifyOptions) => Promise<ChannelResult[]>;
   /** Configured phone channels (ntfy, Telegram), recorded with each alert. */
   alertChannels?: readonly string[];
+  /** Opening-screen alerts on their own ntfy topic/server (DESK_OPENING_NTFY_TOPIC), so they cannot use up the main quota. */
+  openingNotify?: Notify | null;
   /**
    * Research recorder (src/research): every alert as an immutable evidence snapshot, the signal tape as events. Its
    * methods never throw and never wait, so it cannot delay or break a scan, an alert or an exit. Absent: nothing recorded.
@@ -1161,17 +1164,17 @@ export class DeskEngine {
       const launch = feed?.recent(now).find(l => l.mint === state.mint) ?? null, ctx = { mint: state.mint, symbol: state.symbol };
       const block = launch?.rug ?? (launch?.ca.status === 'IMPERSONATOR' ? launch.ca.detail : null) ?? this.launchCopycats.get(state.mint) ?? brandName(state.symbol, state.name)
         ?? await this.launchCopycat({ mint: state.mint, name: state.name, symbol: state.symbol, at: state.at });
-      if (block) { this.event('FILTERED', `OPEN screen: ${state.symbol} broke out (${state.detail}) but ${block} — no alert, never bought`, ctx); continue; }
+      const cfg = OPENING_SCREEN_ALERT_CONFIG;
+      if (block) {
+        this.event('FILTERED', `OPEN screen: ${state.symbol} broke out (${state.detail}) but ${block} — ${cfg.includeBlocked ? 'alerted (includeBlocked)' : 'no alert'}, never bought`, ctx);
+        if (cfg.includeBlocked) this.openingAlert(state, now, `⚠ ${block.split(':')[0]}`);
+        continue;
+      }
       const signal = { state, launch, at: now };
       this.openSignals.set(state.mint, signal); fresh.push(signal);
       const age = Math.max(1, Math.round((now - state.at) / 60_000)), speed = openingSpeed(state);
       this.event('QUALIFIED', `OPEN screen: ${state.symbol} "${state.name}" ${age} min old · ${state.detail}${speed ? ` · ${speed.text}` : ''}`, ctx);
-      const secs = Math.max(0, Math.round(((state.signalAt ?? now) - state.at) / 1000));
-      // A key already alerted (e.g. before a restart) never uses up one of the hour's phone slots.
-      this.alertOnce(`open:${state.mint}`, `OPEN ${state.symbol}: $${((state.signalUsd ?? 0) / 1000).toFixed(1)}K, ${secs < 120 ? `${secs} s` : `${Math.round(secs / 60)} min`} after launch`,
-        [`${state.name}${speed ? ` · ${speed.text}` : ''}`, state.detail, launch?.insiders?.detail ?? '',
-          'Not a qualified call. Fast openers often rug within minutes: take profit early.', fomoUrl(state.mint)].filter(Boolean).join('\n'), 'open',
-        !this.retired('OPEN') && !this.launchAlerts.has(`open:${state.mint}`) && secs * 1000 <= OPENING.phoneWithinMs && this.openPhoneSlot(now));
+      this.openingAlert(state, now);
     }
     // A breakout is traded fresh: start a scan now instead of waiting for the next one.
     if (fresh.length && this.strategies.OPEN.enabled && !this.work) this.nextScanAt = Date.now();
@@ -1318,18 +1321,34 @@ export class DeskEngine {
     return `COPYCAT of ${original.baseToken.symbol ?? '?'} ${mint.slice(0, 4)}…${mint.slice(-4)} ($${Math.round(original.marketCap ?? original.fdv ?? 0).toLocaleString('en-US')}, ${Math.round((l.at - original.pairCreatedAt!) / 60_000)} min older)`;
   }
 
-  /** One phone alert per key, for the kinds DESK_ALERTS selects (default: none). */
-  /** An OPEN alert may go to the phone: OPEN alerts are switched on and fewer than `OPENING.phonePerHour` went out in the last hour. */
-  private openPhoneSlot(now: number): boolean {
-    if (!(this.d.alerts ?? DEFAULT_ALERTS).has('open')) return false;
+  /**
+   * An opening-screen alert may go to the phone: the config is on, the dashboard switch is on, and fewer than its
+   * `maxPerHour` went out in the last hour (null: no limit). The hour's sends survive a restart (alert memory).
+   */
+  private openPhoneSlot(now: number, maxPerHour = OPENING_SCREEN_ALERT_CONFIG.maxPerHour): boolean {
+    if (!OPENING_SCREEN_ALERT_CONFIG.enabled || !(this.d.alerts ?? DEFAULT_ALERTS).has('open')) return false;
     while (this.openPhoneSent.length && now - this.openPhoneSent[0]! > 3_600_000) this.openPhoneSent.shift();
-    if (this.openPhoneSent.length >= OPENING.phonePerHour) return false;
+    if (maxPerHour !== null && this.openPhoneSent.length >= maxPerHour) return false;
     this.openPhoneSent.push(now);
     return true;
   }
 
+  /** One opening-screen breakout as a phone alert, coloured by its speed (desk/opening-alerts.ts). */
+  private openingAlert(state: OpeningState, now: number, warning: string | null = null): void {
+    const key = `open:${state.mint}`;
+    if (this.launchAlerts.has(key)) return;
+    const cfg = OPENING_SCREEN_ALERT_CONFIG, speed = openingSpeed(state), band = cfg.getTagAndPriority(speed?.multiple ?? null);
+    const token: OpeningAlertToken = { name: state.name, ticker: state.symbol, speed: speed ? speed.multiple.toFixed(1) : '--',
+      openingCandle: capText(state.openHighUsd), currentPrice: capText(state.lastUsd ?? state.signalUsd), low: capText(state.lowUsd), peak: capText(state.peakUsd),
+      age: Math.max(0, Math.round((now - state.at) / 60_000)), ca: state.mint };
+    const body = [warning, cfg.formatMessage(token, band.badge), cfg.footer].filter(Boolean).join('\n');
+    this.alertOnce(key, cfg.formatTitle(token), body, 'open', this.openPhoneSlot(now), { priority: band.priority, tags: band.tags, notify: this.d.openingNotify ?? null });
+  }
+
+  /** One phone alert per key, for the kinds DESK_ALERTS selects (default: none). */
+
   /** `phone` false: recorded (and on the dashboard) like any alert, but not sent. */
-  private alertOnce(key: string, title: string, body: string, kind: AlertKind, phone = true): void {
+  private alertOnce(key: string, title: string, body: string, kind: AlertKind, phone = true, extra: { priority?: NotifyOptions['priority']; tags?: string[]; notify?: Notify | null } = {}): void {
     if (this.launchAlerts.has(key) || !this.d.notify) return;
     this.launchAlerts.set(key, Date.now());
     if (this.launchAlerts.size > ALERT_MEMORY.maxKeys) this.launchAlerts.delete(this.launchAlerts.keys().next().value!);
@@ -1339,9 +1358,11 @@ export class DeskEngine {
     const record = this.recordAlert(key, title, body, kind, selected, phone);
     if (!selected.has(kind) || !phone) return;
     // Tapping the notification opens the coin in FOMO.
-    const mint = key.slice(key.indexOf(':') + 1), options: NotifyOptions = { click: /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint) ? fomoUrl(mint) : null, tags: [kind] };
+    const mint = key.slice(key.indexOf(':') + 1), options: NotifyOptions = { click: /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint) ? fomoUrl(mint) : null,
+      tags: extra.tags ?? [kind], ...(extra.priority ? { priority: extra.priority } : {}) };
     const text = record?.body ?? body, evidence = record?.evidence, research = this.d.research;
-    if (evidence && research && this.d.deliver) void this.d.deliver(title, text, options).then(r => research.delivered(evidence, r), () => undefined);
+    if (extra.notify) void extra.notify(title, text, options).catch(() => undefined);
+    else if (evidence && research && this.d.deliver) void this.d.deliver(title, text, options).then(r => research.delivered(evidence, r), () => undefined);
     else void this.d.notify(title, text, options).catch(() => undefined);
   }
 

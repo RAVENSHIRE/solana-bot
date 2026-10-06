@@ -22,6 +22,8 @@ import { assessAuthenticity, checkWebsite, parseXLink, XClient, type WebsiteChec
 import { analyze } from '../src/desk/analysis';
 import { DeskLedger } from '../src/desk/ledger';
 import { DeskEngine } from '../src/desk/engine';
+import { OPENING_SCREEN_ALERT_CONFIG } from '../src/desk/opening-alerts';
+import type { NotifyOptions } from '../src/desk/watch';
 import { crashCheck, exitReason, exitRuleText, scaleAdvice, strategyStats } from '../src/desk/strategies';
 import { replayExit, sizedReturn } from '../src/desk/replay';
 import { signals, simulatePool, summarize, type EntryRule, type PoolSeries } from '../src/desk/backtest';
@@ -825,7 +827,7 @@ test('CRASH variants in TEST: C1 and C2 take the same signal and hold the same c
   }
 });
 
-test('OPEN is retired: off in TEST and LIVE whatever a saved switch says, cannot be switched on, no breakout reaches the phone', async () => {
+test('OPEN is retired: off in TEST and LIVE whatever a saved switch says, cannot be switched on; its breakouts still reach the phone (owner, 6 Oct)', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-retired-')), { shared } = world();
   try {
     await fs.writeFile(path.join(dir, 'settings-PAPER.json'), JSON.stringify({ strategies: { OPEN: true } }));
@@ -835,7 +837,7 @@ test('OPEN is retired: off in TEST and LIVE whatever a saved switch says, cannot
     assert.throws(() => engine.setStrategy('OPEN', true), /STRATEGY_RETIRED/);
     engine.setStrategy('OPEN', false);
     assert.equal(engine.status({ connected: false, address: null }).strategies.find(s => s.id === 'CRASH')!.retired, false);
-    // A sprint breakout with OPEN switched on for the phone: shown, recorded, never sent.
+    // A breakout with the opening-screen phone switch on: sent (owner, 6 Oct), though OPEN never buys it.
     const at = Date.now(), sprint = { mint: key(60).toBase58(), symbol: 'S0', name: 'Sprint', at: at - 68_000, status: 'SIGNAL' as const, openHighUsd: 10_000, lowUsd: 7_000,
       lastUsd: 28_900, peakUsd: 28_900, firstSampleAt: at - 65_000, lastSampleAt: at, signalAt: at, signalUsd: 28_900, detail: '$10.0K open → $28.9K', samples: [] };
     let pending = [sprint];
@@ -844,8 +846,9 @@ test('OPEN is retired: off in TEST and LIVE whatever a saved switch says, cannot
     const phone = await DeskEngine.create({ ...world().shared, mode: 'PAPER', dir: dir2, sender: null, wallet: () => ({ owner, signer: null }), opening: tracker as never,
       notify: async t => { alerts.push(t); }, alerts: new Set(['open']) });
     await phone.openingPass();
-    assert.deepEqual(alerts, []);
-    assert.ok(phone.events.list().some(e => /^OPEN screen: S0/.test(e.message)), 'the opening screen still shows it');
+    assert.deepEqual(alerts, ['OPEN S0 x-- at $28.9K']);
+    assert.ok(phone.events.list().some(e => /^OPEN screen: S0/.test(e.message)), 'the opening screen shows it');
+    assert.equal(phone.status({ connected: false, address: null }).positions.length, 0, 'never bought');
     await fs.rm(dir2, { recursive: true, force: true });
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
@@ -1232,7 +1235,7 @@ test('OPEN: a breakout above a strong opening candle is bought, scaled into at 2
     await engine.pulse();
     const fresh = await engine.openingPass();
     assert.equal(fresh.length, 1);
-    assert.deepEqual(alerts, [], 'a breakout 6 min after launch is shown and traded, but the phone gets sprints only');
+    assert.deepEqual(alerts.map(a => a.title), ['OPEN ABC x-- at $27.0K'], 'every breakout reaches the phone (owner, 6 Oct), the 6-min one too');
     assert.ok(engine.events.list().some(e => /^OPEN screen: ABC "Fantasy Index 6900"/.test(e.message)));
     await engine.pulse();
     let view = engine.status({ connected: false, address: null });
@@ -1277,28 +1280,44 @@ test('OPEN screen: a copycat breakout (bigger, older namesake) is never alerted 
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-test('OPEN on the phone: only sprints (a breakout within 2 min of launch), at most 4 an hour, tap opens FOMO', async () => {
+test('opening screen on the phone: every breakout, coloured by its speed (×2.1–2.9 the target), tap opens FOMO; an own channel and an hourly cap when configured', async () => {
   const curve = { dexId: 'pumpfun', liquidity: null, marketCap: 28_000, fdv: 28_000, pairCreatedAt: NOW - 6 * 60_000, priceChange: { m5: 12, h1: 40 } };
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-open-phone-')), { shared } = world(curve);
   try {
     const at = Date.now();
-    const sprint = (i: number, secs: number) => ({ mint: key(60 + i).toBase58(), symbol: `S${i}`, name: `Sprint ${i}`, at: at - secs * 1000, status: 'SIGNAL' as const, openHighUsd: 10_000,
-      lowUsd: 7_000, lastUsd: 28_900, peakUsd: 28_900, firstSampleAt: at - secs * 1000 + 3_000, lastSampleAt: at, signalAt: at, signalUsd: 28_900,
-      detail: '$10.0K open → $28.9K: broke above the opening high', samples: [[at - secs * 1000 + 3_000, 3_400]] as Array<[number, number]> });
-    let pending = [sprint(0, 68), sprint(1, 300), ...[2, 3, 4, 5, 6].map(i => sprint(i, 60 + i))];
-    const tracker = { observe: () => undefined, poll: async () => { const out = pending; pending = []; return out; }, get: () => null, list: () => [],
-      counts: () => ({ OPENING: 0, STRONG: 0, SIGNAL: 7, WEAK: 0, RUG: 0, GRADUATED: 0, EXPIRED: 0, UNKNOWN_OPEN: 0 }) };
-    const alerts: Array<{ title: string; body: string; click: string | null | undefined }> = [];
-    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', retired: new Set(), dir, sender: null, wallet: () => ({ owner, signer: null }), opening: tracker as never,
-      notify: async (title, body, o) => { alerts.push({ title, body, click: o?.click }); }, alerts: new Set(['open']) });
+    // First read → breakout at $28.9K: ×8.5 (fast), ×2.4 (the target band), ×1.5 (standard).
+    const sprint = (i: number, secs: number, firstUsd: number) => ({ mint: key(60 + i).toBase58(), symbol: `S${i}`, name: `Sprint ${i}`, at: at - secs * 1000, status: 'SIGNAL' as const,
+      openHighUsd: 10_000, lowUsd: 7_000, lastUsd: 28_900, peakUsd: 31_000, firstSampleAt: at - secs * 1000 + 3_000, lastSampleAt: at, signalAt: at, signalUsd: 28_900,
+      detail: '$10.0K open → $28.9K: broke above the opening high', samples: [[at - secs * 1000 + 3_000, firstUsd]] as Array<[number, number]> });
+    const tracker = (list: ReturnType<typeof sprint>[]) => {
+      let pending = list;
+      return { observe: () => undefined, poll: async () => { const out = pending; pending = []; return out; }, get: () => null, list: () => [], counts: () => ({}) };
+    };
+    type Sent = { title: string; body: string; click: string | null | undefined; priority: string | undefined; tags: string[] | undefined };
+    const alerts: Sent[] = [], own: Sent[] = [];
+    const push = (to: Sent[]) => async (title: string, body: string, o?: NotifyOptions) => { to.push({ title, body, click: o?.click, priority: o?.priority, tags: o?.tags }); };
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', retired: new Set(), dir, sender: null, wallet: () => ({ owner, signer: null }),
+      opening: tracker([sprint(0, 68, 3_400), sprint(1, 300, 12_000), sprint(2, 62, 19_300)]) as never, notify: push(alerts), alerts: new Set(['open']) });
     for (const id of ['FAIR', 'CRASH', 'LAUNCH', 'OPEN', 'GOLDEN']) engine.setStrategy(id, false);
     await engine.openingPass();
-    assert.deepEqual(alerts.map(a => a.title), ['OPEN S0: $28.9K, 68 s after launch', 'OPEN S2: $28.9K, 62 s after launch', 'OPEN S3: $28.9K, 63 s after launch',
-      'OPEN S4: $28.9K, 64 s after launch'], 'the 5-minute breakout is held back; the fifth and later sprints this hour too');
-    assert.match(alerts[0]!.body, /\$3\.4K → \$28\.9K in 68 s \(×8\.5\)/);
-    assert.match(alerts[0]!.body, /Not a qualified call/);
+    assert.deepEqual(alerts.map(a => [a.title, a.priority, a.tags?.[0]]), [['OPEN S0 x8.5 at $28.9K', 'default', 'red_circle'], ['OPEN S1 x2.4 at $28.9K', 'high', 'yellow_circle'],
+      ['OPEN S2 x1.5 at $28.9K', 'low', 'large_blue_circle']], 'every breakout, the 5-minute one too, with its colour');
+    assert.match(alerts[1]!.body, /^🎯 \[TARGET SWEET SPOT\] Sprint 1 \(\$S1\)\n• Velocity Speed: 2\.4\n• Open: \$10\.0K ➔ Now: \$28\.9K\n• Low: \$7\.0K \| Peak: \$31\.0K\n• Age: 5m\n• CA: `/);
+    assert.match(alerts[0]!.body, /^⚡ \[HIGH SPEED\]/); assert.match(alerts[2]!.body, /^👀 \[STANDARD DETECT\]/); assert.match(alerts[0]!.body, /Not a qualified call/);
     assert.equal(alerts[0]!.click, `https://fomo.family/tokens/solana/${key(60).toBase58()}`, 'tapping the notification opens the coin in FOMO');
-    assert.equal(engine.events.list().filter(e => /^OPEN screen: S\d/.test(e.message)).length, 7, 'every breakout is still shown');
+    assert.equal(engine.events.list().filter(e => /^OPEN screen: S\d/.test(e.message)).length, 3, 'every breakout is shown');
+    // An own channel (DESK_OPENING_NTFY_TOPIC) and an hourly cap from the config block.
+    const cap = OPENING_SCREEN_ALERT_CONFIG.maxPerHour;
+    OPENING_SCREEN_ALERT_CONFIG.maxPerHour = 1;
+    try {
+      const dir2 = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-open-own-')), main: Sent[] = [];
+      const capped = await DeskEngine.create({ ...world(curve).shared, mode: 'PAPER', retired: new Set(), dir: dir2, sender: null, wallet: () => ({ owner, signer: null }),
+        opening: tracker([sprint(3, 60, 12_000), sprint(4, 61, 12_000)]) as never, notify: push(main), openingNotify: push(own), alerts: new Set(['open']) });
+      await capped.openingPass();
+      assert.deepEqual(own.map(a => a.title), ['OPEN S3 x2.4 at $28.9K'], 'the second breakout this hour is over the cap of 1');
+      assert.deepEqual(main, [], 'the main channel (rug alerts) is not used');
+      await fs.rm(dir2, { recursive: true, force: true });
+    } finally { OPENING_SCREEN_ALERT_CONFIG.maxPerHour = cap; }
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 

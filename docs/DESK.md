@@ -488,6 +488,23 @@ The position shows **NO ROUTE since …** under *Open positions*. It is re-quote
 
 Advisory only — the desk never changes a size by itself. A strategy shows READY for the next rung after ≥ 20 closed trades with positive net PnL, profit factor ≥ 1.3 and a max drawdown within half its sleeve. Paper fills ignore latency and MEV, so confirm with LIVE fills before sizing up real money. The next size also needs pool liquidity of about 50× the entry (≈ 2 % impact); most sub-$1M meme pools cannot absorb $1K+ orders.
 
+### Opening-screen phone alerts (every breakout, coloured by speed)
+
+The owner, 6 Oct: every token the opening screen finds goes to the phone, the ×2.1–2.9 speed band highlighted. The
+whole setup is one block, `src/desk/opening-alerts.ts` (`OPENING_SCREEN_ALERT_CONFIG`): on/off, an optional hourly
+cap (`maxPerHour`, default none), whether blocked coins are sent too (`includeBlocked`, default no: copycats,
+impersonators, rugged creators and brand names stay off), the speed bands with their ntfy priority and tags, the
+title and the message text. Restart the desk after editing it.
+- **What is sent:** each breakout once (the moment a strong open breaks back above its opening high), with the
+  dashboard's Speed (×N, from the first curve read to the breakout): ×2.1–2.9 `high` 🟡🎯, above `default` 🔴🚀,
+  below `low` 🔵👀. ntfy has no message colour; the tags become the coloured icons, and the priority sets the sound.
+- **Switch:** the dashboard chip "Opening screen" (phone-alerts.json) must be on as well. OPEN itself stays retired:
+  these coins are never bought.
+- **Quota:** on 6 Oct, 08–17 UTC, about 14 breakouts an hour (at most 26). On 3 Oct about 12 an hour used up the free
+  ntfy.sh quota, and after that no alert reached the phone, rug alerts included. Put this feed on its own server with
+  `DESK_OPENING_NTFY_TOPIC` and `DESK_OPENING_NTFY_SERVER` (a self-hosted ntfy or a paid account; ntfy.sh counts per IP
+  address), or set `maxPerHour`.
+
 ### Brand-name coins
 
 The owner, 5 Oct: "these are scam coins, not interested in trading memecoin APPLE NVIDIA, makes no sense". A coin

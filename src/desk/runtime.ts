@@ -53,7 +53,7 @@ const ENV_KEYS = ['RPC_ENDPOINTS', 'RPC_MAX_RPS', 'RPC_TIMEOUT_MS', 'JUPITER_API
   'CRASH_EXIT_MODE', 'CRASH_TRAIL_ACTIVATION_PCT', 'CRASH_TRAIL_STOP_PCT', 'CRASH_RIDE_MAX_HOLD_MIN', 'CRASH_REENTRY_MIN',
   'DESK_LIVE_SIGNER', 'DESK_LIVE_MAX_ENTRIES', 'DESK_DEPLOYMENT_MODE', 'DESK_PAPER_FAIR_ENABLED', 'DESK_PAPER_CRASH_ENABLED',
   'DESK_LIVE_FAIR_ENABLED', 'DESK_LIVE_CRASH_ENABLED', 'DESK_FAIR_LOSS_REENTRY_MIN', 'DESK_CRASH_LOSS_REENTRY_MIN',
-  'DESK_FAIR_FRESH_SIGNAL', 'DESK_CRASH_FRESH_SIGNAL', 'DESK_NTFY_TOPIC', 'DESK_NTFY_SERVER', 'DESK_TELEGRAM_BOT_TOKEN', 'DESK_TELEGRAM_CHAT_ID', 'ANTHROPIC_API_KEY',
+  'DESK_FAIR_FRESH_SIGNAL', 'DESK_CRASH_FRESH_SIGNAL', 'DESK_NTFY_TOPIC', 'DESK_NTFY_SERVER', 'DESK_OPENING_NTFY_TOPIC', 'DESK_OPENING_NTFY_SERVER', 'DESK_TELEGRAM_BOT_TOKEN', 'DESK_TELEGRAM_CHAT_ID', 'ANTHROPIC_API_KEY',
   'DESK_X_QUERY', 'DESK_AI_REVIEW', 'DESK_AI_REVIEWS_PER_HOUR', 'OPEN_CAPITAL_USD', 'OPEN_ADD_AT', 'GOLDEN_CAPITAL_USD', 'GOLDEN_RETEST_ENTRIES', 'BIRDEYE_API_KEY', 'DESK_ALERTS',
   'DESK_RESEARCH', 'DESK_ALERT_EVIDENCE', 'DESK_PUMP_STREAM', 'RESEARCH_FEED_PORT', 'GEMINI_API_KEY', 'GEMINI_MODEL'];
 /** DESK_ALERTS: a comma list of golden, rug, open, launch, radar (or "all", or "none"); unknown names are ignored, empty means the default (none). */
@@ -162,7 +162,11 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
     // Its only-up fills are also followed as shadow trades (research P2, no money): data-desk/golden-shadow.jsonl.
     const shadowFile = path.join(o.dataDir, 'golden-shadow.jsonl');
     const golden = new GoldenTracker(rpc, GOLDEN_RULES, new GoldenShadow(r => { void fs.appendFile(shadowFile, `${JSON.stringify(r)}\n`).catch(() => undefined); }));
-    const alerts = notifier(env, fetch, { onFailure: r => logger.warn('Phone delivery failed', { channel: r.channel, status: r.status, error: r.error }) }), launches = new LaunchFeed(rpc, fetch, undefined, undefined,
+    const alerts = notifier(env, fetch, { onFailure: r => logger.warn('Phone delivery failed', { channel: r.channel, status: r.status, error: r.error }) });
+    // Opening-screen alerts on their own ntfy topic and server when set (desk/opening-alerts.ts), else on the main channel.
+    const openingChannel = env.DESK_OPENING_NTFY_TOPIC?.trim() ? notifier({ DESK_NTFY_TOPIC: env.DESK_OPENING_NTFY_TOPIC, DESK_NTFY_SERVER: env.DESK_OPENING_NTFY_SERVER }, fetch,
+      { onFailure: r => logger.warn('Opening-screen phone delivery failed', { channel: r.channel, status: r.status, error: r.error }) }) : null;
+    const launches = new LaunchFeed(rpc, fetch, undefined, undefined,
       { rugs, review: reviewer ? (i, now) => reviewer.review(i, now) : null, reviewAvailable: reviewer ? now => reviewer.available(now) : undefined,
         onDecoded: (events, now) => opening.observe(events, now), stream: pumpStream });
     // Research record (src/research): every alert as an immutable evidence snapshot, and the signal tape, as events in
@@ -186,10 +190,10 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
     const sender = new TransactionSender(rpc, logger, { confirmTimeoutMs: cfg.execution.confirmTimeoutMs, pollIntervalMs: 1500, rebroadcastIntervalMs: 2000 });
     const engines = {
       // TEST needs only an address to build and simulate; without Phantom it uses the public key from .env, never a secret.
-      PAPER: await DeskEngine.create({ ...shared, ...researchDeps, launches, xfeed, opening, golden, pumpStream, aiReview: reviewer ? () => reviewer.status() : null, notify: alerts.notify, alerts: phoneAlerts, mode: 'PAPER', sender: null,
+      PAPER: await DeskEngine.create({ ...shared, ...researchDeps, launches, xfeed, opening, golden, pumpStream, aiReview: reviewer ? () => reviewer.status() : null, notify: alerts.notify, openingNotify: openingChannel?.channels.length ? openingChannel.notify : null, alerts: phoneAlerts, mode: 'PAPER', sender: null,
         wallet: () => context.wallet('PAPER') ?? (paperAddress ? { owner: paperAddress, signer: null } : null) }),
       // LOCAL_KEY: signed in this process and independent of the browser session; PHANTOM: the browser session signs.
-      LIVE: await DeskEngine.create({ ...shared, ...researchDeps, launches, xfeed, opening, golden, pumpStream, aiReview: reviewer ? () => reviewer.status() : null, notify: alerts.notify, alerts: phoneAlerts, mode: 'LIVE', sender, signerKind: live.signer, liveMaxEntries: live.maxEntries,
+      LIVE: await DeskEngine.create({ ...shared, ...researchDeps, launches, xfeed, opening, golden, pumpStream, aiReview: reviewer ? () => reviewer.status() : null, notify: alerts.notify, openingNotify: openingChannel?.channels.length ? openingChannel.notify : null, alerts: phoneAlerts, mode: 'LIVE', sender, signerKind: live.signer, liveMaxEntries: live.maxEntries,
         ...(localSigner ? { authorized: () => true, wallet: () => ({ owner: localSigner.publicKey, signer: localSigner }) }
           : { wallet: () => context.wallet('LIVE') }) }),
     };

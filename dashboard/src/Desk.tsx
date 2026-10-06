@@ -809,7 +809,7 @@ function GoldenPocket({ d }: { d: DeskStatus }) {
  * few seconds. A launch whose first one-minute candle reached $10K and that never fell below $6.7K is watched; when it
  * breaks back above its opening high (×1.3) an alert goes out at once and OPEN buys, holds for at least 6× and adds.
  */
-const PHONE_KINDS: Array<[string, string]> = [['open', 'OPEN breakouts (retired: never sent)'], ['golden', 'GOLDEN fills'], ['rug', 'rug sales (coins we hold, TEST or LIVE)'], ['launch', 'LAUNCH entry-ready'], ['radar', 'radar finds']];
+const PHONE_KINDS: Array<[string, string]> = [['open', 'Opening screen: every breakout, coloured by speed'], ['golden', 'GOLDEN fills'], ['rug', 'rug sales (coins we hold, TEST or LIVE)'], ['launch', 'LAUNCH entry-ready'], ['radar', 'radar finds']];
 
 function OpeningScreen({ d, t }: { d: DeskStatus; t: TradingSession }) {
   const o = d.opening, list = o?.list ?? [], k = (v: number | null) => v == null ? '--' : `$${(v / 1000).toFixed(1)}K`;
