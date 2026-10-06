@@ -1,6 +1,7 @@
 import { PublicKey, type Connection } from '@solana/web3.js';
 import { bondingCurveAddress } from './launch-risk';
 import { OPENING_RULES } from './config';
+import type { ScreenTape } from './screen-tape';
 
 /**
  * Opening screen — the owner's basic screen for fresh pump.fun launches, from FIX6900 (6bQ4…SmvC) on 1 Oct:
@@ -30,6 +31,11 @@ export const OPENING = Object.freeze({
   /** Every launch is watched for its opening candle; launches first seen later than this cannot be judged. */
   firstSampleWithinMs: 45_000,
   maxTracked: 600,
+  /**
+   * The card's history (owner, 6 Oct: "don't lose any data"): strong opens, breakouts, rugs, graduations and expiries
+   * stay listed this long, at most `historyMax` of them, and survive a restart (data-desk/opening-screen.jsonl).
+   */
+  historyMs: 24 * 3_600_000, historyMax: 1_000,
   /** A bonding curve's market cap is far below this; a larger value means an unknown curve layout. */
   maxCurveUsd: 500_000,
   // Phone alerts for breakouts (which, how many, text, colours): desk/opening-alerts.ts.
@@ -97,6 +103,16 @@ export function openingSpeed(s: Pick<OpeningState, 'at' | 'samples' | 'signalAt'
 }
 
 type Rpc = { execute<T>(label: string, fn: (c: Connection) => Promise<T>): Promise<T> };
+/** Statuses the card lists (with an opening candle of at least `minOpenUsd`). */
+const LISTED: ReadonlySet<OpeningStatus> = new Set(['STRONG', 'SIGNAL', 'RUG', 'GRADUATED', 'EXPIRED']);
+/** One saved row of the card: the state without its samples, plus the first sample (the speed needs it). */
+export type OpeningRecord = Omit<OpeningState, 'samples'> & { firstSample: [number, number] | null };
+/** Where the card's rows are kept between restarts: every status change is appended; `load` gives them back. */
+export interface OpeningStore { load(): OpeningRecord[]; save(r: OpeningRecord): void }
+export const openingRecord = (s: OpeningState): OpeningRecord => {
+  const { samples, ...rest } = s;
+  return { ...rest, firstSample: samples[0] ?? null };
+};
 type CurveStream = { healthy(now: number): boolean; curves(mints: string[]): Promise<Map<string, { sol: number; complete: boolean }> | null> };
 
 /** Watches every new launch's curve; reports each breakout signal once. Never throws. */
@@ -104,7 +120,27 @@ export class OpeningTracker {
   private readonly states = new Map<string, OpeningState>();
   /** Where the last read's market caps came from. */
   source: 'stream' | 'rpc' | null = null;
-  constructor(private readonly rpc: Rpc, private readonly stream: CurveStream | null = null) {}
+  /** Every curve read and status change, on disk with its time (desk/screen-tape.ts); null: not recorded. */
+  tape: Pick<ScreenTape, 'openingSample' | 'openingChange'> | null = null;
+  constructor(private readonly rpc: Rpc, private readonly stream: CurveStream | null = null, private readonly store: OpeningStore | null = null, now = Date.now()) {
+    // The card's rows from before a restart: the last record of each coin within the history window. A strong open still
+    // inside its watch window is watched again.
+    try {
+      for (const r of store?.load() ?? []) {
+        if (!LISTED.has(r.status) || now - r.at > OPENING.historyMs) continue;
+        const { firstSample, ...rest } = r;
+        this.states.set(r.mint, { ...rest, samples: firstSample ? [firstSample] : [] });
+      }
+    } catch { /* an unreadable history starts empty */ }
+  }
+
+  /** Records a status change, and saves the row when the card lists it (never throws: the screen must not stop over a full disk). */
+  private keep(s: OpeningState, before: OpeningStatus, now: number): void {
+    if (s.status === before) return;
+    this.tape?.openingChange(s, now);
+    if (!LISTED.has(s.status) || (s.openHighUsd ?? 0) < OPENING.minOpenUsd) return;
+    try { this.store?.save(openingRecord(s)); } catch { /* the screen goes on */ }
+  }
 
   /** One batch of curves: from the live stream while it is healthy, otherwise from the RPC. Null: no answer. */
   private async read(batch: OpeningState[], now: number): Promise<Array<{ sol: number; complete: boolean } | null> | null> {
@@ -126,22 +162,22 @@ export class OpeningTracker {
       this.states.set(l.mint, { mint: l.mint, symbol: l.symbol, name: l.name, at: l.at, status: 'OPENING', openHighUsd: null, lowUsd: null, lastUsd: null, peakUsd: null,
         firstSampleAt: null, lastSampleAt: null, signalAt: null, signalUsd: null, detail: 'waiting for the first sample', samples: [] });
     }
-    // Finished launches are dropped after a while; strong opens and signals stay listed longest.
+    // Unlisted launches (first minute, weak opens) go after a few minutes; the card's rows stay for the history window.
+    const listed = (s: OpeningState) => LISTED.has(s.status) && (s.openHighUsd ?? 0) >= OPENING.minOpenUsd;
     for (const [mint, s] of this.states) {
-      const keep = s.status === 'SIGNAL' || s.status === 'STRONG' ? 2 * 60 * 60_000 : s.status === 'OPENING' ? 10 * 60_000 : 15 * 60_000;
+      const keep = listed(s) ? OPENING.historyMs : s.status === 'OPENING' ? 10 * 60_000 : 15 * 60_000;
       if (now - s.at > keep) this.states.delete(mint);
     }
-    if (this.states.size > OPENING.maxTracked) {
-      const drop = [...this.states.values()].filter(s => s.status !== 'STRONG' && s.status !== 'SIGNAL').sort((a, b) => a.at - b.at).slice(0, this.states.size - OPENING.maxTracked);
-      for (const s of drop) this.states.delete(s.mint);
-    }
+    const unlisted = [...this.states.values()].filter(s => !listed(s)), rows = [...this.states.values()].filter(listed);
+    for (const s of unlisted.sort((a, b) => a.at - b.at).slice(0, Math.max(0, unlisted.length - OPENING.maxTracked))) this.states.delete(s.mint);
+    for (const s of rows.sort((a, b) => a.at - b.at).slice(0, Math.max(0, rows.length - OPENING.historyMax))) this.states.delete(s.mint);
   }
 
   /** Reads every watched curve; returns the launches that signalled on this read. */
   async poll(now: number, solUsd: number | null): Promise<OpeningState[]> {
     if (!solUsd) return [];
     const due = [...this.states.values()].filter(s => s.status === 'OPENING' || (s.status === 'STRONG' && now - s.at <= OPENING.watchMs));
-    for (const s of this.states.values()) if (s.status === 'STRONG' && now - s.at > OPENING.watchMs) { s.status = 'EXPIRED'; s.detail = `no breakout within ${OPENING.watchMs / 60_000} min`; }
+    for (const s of this.states.values()) if (s.status === 'STRONG' && now - s.at > OPENING.watchMs) { s.status = 'EXPIRED'; s.detail = `no breakout within ${OPENING.watchMs / 60_000} min`; this.keep(s, 'STRONG', now); }
     const signals: OpeningState[] = [];
     for (let i = 0; i < due.length; i += 100) {
       const batch = due.slice(i, i + 100);
@@ -150,19 +186,22 @@ export class OpeningTracker {
       batch.forEach((s, j) => {
         const cap = caps[j];
         if (!cap) return;
-        if (cap.complete) { if (s.status === 'OPENING' || s.status === 'STRONG') { s.status = 'GRADUATED'; s.detail = `graduated before a breakout (last ${k(s.lastUsd)})`; } return; }
+        const before = s.status;
+        if (cap.complete) { if (s.status === 'OPENING' || s.status === 'STRONG') { s.status = 'GRADUATED'; s.detail = `graduated before a breakout (last ${k(s.lastUsd)})`; this.keep(s, before, now); } return; }
         const usd = cap.sol * solUsd;
         if (usd > OPENING.maxCurveUsd) return;
         if (openingStep(s, now, usd)) signals.push(s);
+        this.tape?.openingSample(s, now, usd);
+        this.keep(s, before, now);
       });
     }
     return signals;
   }
 
   get(mint: string): OpeningState | null { return this.states.get(mint) ?? null; }
-  /** Strong opens, signals and recent rugs, newest first. */
+  /** The card: strong opens, breakouts, rugs, graduations and expiries of the last 24 h, newest first. */
   list(): OpeningState[] {
-    return [...this.states.values()].filter(s => ['STRONG', 'SIGNAL', 'RUG', 'GRADUATED', 'EXPIRED'].includes(s.status) && (s.openHighUsd ?? 0) >= OPENING.minOpenUsd)
+    return [...this.states.values()].filter(s => LISTED.has(s.status) && (s.openHighUsd ?? 0) >= OPENING.minOpenUsd)
       .sort((a, b) => (b.signalAt ?? 0) - (a.signalAt ?? 0) || b.at - a.at);
   }
   counts(): Record<OpeningStatus, number> {

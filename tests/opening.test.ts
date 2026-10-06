@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Keypair } from '@solana/web3.js';
-import { OPENING, OpeningTracker, curveMarketCapSol, openingStep, type OpeningState } from '../src/desk/opening';
+import { OPENING, OpeningTracker, curveMarketCapSol, openingSpeed, openingStep, type OpeningRecord, type OpeningState } from '../src/desk/opening';
 import { exitReason } from '../src/desk/strategies';
 import { strategyProfiles, deskCapital } from '../src/desk/config';
 
@@ -73,4 +73,55 @@ test('OPEN exits: no profit-taking before 6× the first entry; the $6.7K floor i
   assert.match(exitReason(p.exits, { ...base, peakMultiple: 6.2 })!, /^TRAILING_STOP -40\.00% from peak/);
   assert.match(exitReason(p.exits, { ...base, peakMultiple: 2, marketCapUsd: 6_600 })!, /^MCAP_FLOOR \$6,600 ≤ \$6,700/);
   assert.equal(exitReason(p.exits, { ...base, pnlPct: -60, peakMultiple: 1, marketCapUsd: 9_000, fromPeakPct: -60 }), null, 'a deep dip above the floor is held');
+});
+
+test('the card keeps its rows: every listed status change is saved and comes back after a restart (24 h); every read goes to the screen tape', async () => {
+  const solUsd = 100, mint = key(4), old = key(5);
+  const curve = (usd: number) => { const b = Buffer.alloc(151); b.writeBigUInt64LE(1_000_000_000_000_000n, 8); b.writeBigUInt64LE(BigInt(Math.round(usd / solUsd * 1e9)), 16);
+    b.writeBigUInt64LE(1_000_000_000_000_000n, 40); return b; };
+  let cap = 20_000;
+  const conn = { getMultipleAccountsInfo: async (keys: unknown[]) => keys.map(() => ({ data: curve(cap) })) };
+  const rpc = { execute: async (_l: string, fn: (c: never) => unknown) => fn(conn as never) } as never;
+  const saved: OpeningRecord[] = [], tape: string[] = [];
+  const store = { load: () => saved, save: (r: OpeningRecord) => { saved.push(r); } };
+  const t = new OpeningTracker(rpc, null, store, T0);
+  t.tape = { openingSample: (s, at, usd) => { tape.push(`OS ${s.status} ${usd}`); }, openingChange: s => { tape.push(`OC ${s.status}`); } };
+  t.observe([{ mint, symbol: 'AAA', name: 'A', at: T0 }], T0 + 5_000);
+  await t.poll(T0 + 10_000, solUsd);                 // opening minute: $20K
+  cap = 9_000; await t.poll(T0 + 70_000, solUsd);    // strong open
+  cap = 27_000; await t.poll(T0 + 200_000, solUsd);  // breakout
+  assert.deepEqual(saved.map(r => r.status), ['STRONG', 'SIGNAL'], 'each listed status change, once');
+  assert.deepEqual(saved[1]!.firstSample, [T0 + 10_000, 20_000], 'the first read, for the speed');
+  assert.deepEqual(tape, ['OS OPENING 20000', 'OS STRONG 9000', 'OC STRONG', 'OS SIGNAL 27000', 'OC SIGNAL'], 'every read, then the change it caused');
+  // A restart: the same rows; one from yesterday is not brought back.
+  saved.push({ ...saved[1]!, mint: old, symbol: 'OLD', at: T0 - 25 * 3_600_000 });
+  const after = new OpeningTracker(rpc, null, store, T0 + 300_000);
+  assert.deepEqual(after.list().map(s => [s.symbol, s.status]), [['AAA', 'SIGNAL']]);
+  assert.equal(openingSpeed(after.get(mint)!)?.multiple.toFixed(2), '1.35', 'the speed survives the restart');
+  // Rows stay listed for the history window, not 2 hours.
+  after.observe([], T0 + 5 * 3_600_000);
+  assert.equal(after.list().length, 1);
+  after.observe([], T0 + OPENING.historyMs + 1);
+  assert.equal(after.list().length, 0);
+});
+
+test('the history file and the screen tape on disk: append, reload the last record per coin, compact records', async () => {
+  const fs = await import('node:fs'), os = await import('node:os'), path = await import('node:path');
+  const { openingStore } = await import('../src/desk/runtime');
+  const { screenTape } = await import('../src/desk/screen-tape');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opening-store-')), file = path.join(dir, 'opening-screen.jsonl');
+  try {
+    const store = openingStore(file), now = Date.now();
+    const row = (status: OpeningState['status'], at = now) => ({ ...state(at), status, openHighUsd: 20_000, firstSample: [at, 5_000] as [number, number] });
+    assert.deepEqual(store.load(), [], 'no file yet');
+    store.save(row('STRONG')); store.save(row('SIGNAL')); fs.appendFileSync(file, '{"torn');
+    assert.deepEqual(store.load().map(r => r.status), ['SIGNAL'], 'the last record of the coin; a torn line is skipped');
+    const recs: unknown[][] = [];
+    const tape = screenTape({ put: r => { recs.push(r as unknown[]); }, lowDisk: false });
+    tape.openingSample({ ...state(now), status: 'STRONG' }, now, 12_345.6);
+    tape.goldenSample(key(9), now, 98_765.4, 20_000.2, 'IMPULSE');
+    assert.deepEqual(recs, [['OS', now, { $m: key(1) }, 'STRONG', 12_346], ['GS', now, { $m: key(9) }, 98_765, 20_000, 'IMPULSE']]);
+    const quiet = screenTape({ put: () => { throw new Error('disk'); }, lowDisk: false });
+    assert.doesNotThrow(() => quiet.openingSample(state(now), now, 1), 'a failing write never stops the screen');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

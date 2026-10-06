@@ -40,6 +40,7 @@ import { structure, structureLine } from './structure';
 import { byProgress, LEVEL1, levelRow, levelTrades, type LevelRow } from './levels';
 import { brandName } from './brands';
 import { capText, OPENING_SCREEN_ALERT_CONFIG, type OpeningAlertToken } from './opening-alerts';
+import type { ScreenTape } from './screen-tape';
 /** CRASH's window: pools are sampled for structure up to 15 minutes after their graduation. */
 const STRUCTURE_FOLLOW_MS = 15 * 60_000;
 
@@ -90,6 +91,8 @@ export interface DeskDeps {
   alertChannels?: readonly string[];
   /** Opening-screen alerts on their own ntfy topic/server (DESK_OPENING_NTFY_TOPIC), so they cannot use up the main quota. */
   openingNotify?: Notify | null;
+  /** The live screens on disk with their timestamps (desk/screen-tape.ts): every candidate of every scan is written here. */
+  screens?: Pick<ScreenTape, 'candidate'> | null;
   /**
    * Research recorder (src/research): every alert as an immutable evidence snapshot, the signal tape as events. Its
    * methods never throw and never wait, so it cannot delay or break a scan, an alert or an exit. Absent: nothing recorded.
@@ -883,6 +886,7 @@ export class DeskEngine {
       this.watch.set(mint, { firstSeenAt: candidate.firstSeenAt, observations: candidate.observations, lastLiquidityUsd: s.metrics.liquidityUsd,
         lastPriceUsd: s.metrics.priceUsd, momentumStreak: candidate.momentumStreak });
       this.candidates.set(mint, candidate);
+      this.d.screens?.candidate(candidate, this.verdicts(candidate), now, this.d.mode);
       if (candidate.crash?.signal) counts.crash++;
       for (const r of Object.values(candidate.rules ?? {})) if (r.signal) counts.custom++;
       // The tape also keeps pools blocked only by the buy/sell ratio, so that gate can be measured against what they did.
@@ -1949,7 +1953,7 @@ export class DeskEngine {
         const notes = Object.fromEntries(this.ids().flatMap(id => { const n = this.entryNotes.get(`${id}:${c.mint}`); return n ? [[id, n]] : []; }));
         return { ...c, entryNotes: notes, stale: c.updatedAt < this.lastCompletedScanAt, verdicts: this.verdicts(c) };
       }).sort((a, b) => Number(a.stale) - Number(b.stale) || rank(b) - rank(a) || Number(!!b.crash?.signal) - Number(!!a.crash?.signal) || composite(b) - composite(a)).slice(0, 40),
-      ...(d.opening ? { opening: { counts: d.opening.counts(), list: d.opening.list().slice(0, 20).map(o => ({ mint: o.mint, symbol: o.symbol, name: o.name, at: o.at, status: o.status,
+      ...(d.opening ? { opening: { counts: d.opening.counts(), list: d.opening.list().slice(0, 200).map(o => ({ mint: o.mint, symbol: o.symbol, name: o.name, at: o.at, status: o.status,
         openHighUsd: o.openHighUsd, lowUsd: o.lowUsd, lastUsd: o.lastUsd, peakUsd: o.peakUsd, signalAt: o.signalAt, signalUsd: o.signalUsd, detail: o.detail,
         held: this.heldBy(o.mint) ?? null, entry: this.candidates.get(o.mint)?.open?.signal.summary ?? null, speed: openingSpeed(o)?.text ?? null })),
         phone: [...(this.d.alerts ?? DEFAULT_ALERTS)] } } : {}),

@@ -820,8 +820,8 @@ function OpeningScreen({ d, t }: { d: DeskStatus; t: TradingSession }) {
   const [rows, more] = useTop(list);
   return <section className="panel desk-card" aria-label="Opening screen">
     <div className="card-head"><h3>Opening screen · 10K+ opening candle, never below 6.7K, breakout above the open</h3>
-      <small>{o ? `${o.counts.OPENING ?? 0} launches in their first minute · ${o.counts.STRONG ?? 0} strong opens watched · ${o.counts.SIGNAL ?? 0} breakouts · ${o.counts.RUG ?? 0} fell below 6.7K · ${o.counts.WEAK ?? 0} weak opens skipped`
-        : 'Runs while TEST or LIVE scans.'} Market caps are read from each launch's bonding curve every 4 s.</small></div>
+      <small>{o ? `${o.counts.OPENING ?? 0} launches in their first minute · ${o.counts.STRONG ?? 0} strong opens watched · last 24 h: ${o.counts.SIGNAL ?? 0} breakouts, ${o.counts.RUG ?? 0} fell below 6.7K · ${o.counts.WEAK ?? 0} weak opens skipped`
+        : 'Runs while TEST or LIVE scans.'} Market caps are read from each launch's bonding curve every 4 s. The rows of the last 24 h are kept on disk (data-desk/opening-screen.jsonl) and survive a restart.</small></div>
     {o?.phone && <div className="chips phone-alerts" role="group" aria-label="Phone alerts">
       <small>Phone (ntfy; tap opens FOMO):</small>
       {PHONE_KINDS.map(([kind, text]) => <button key={kind} type="button" className={`chip ${phone.has(kind) ? 'on' : 'off'}`} aria-pressed={phone.has(kind)} disabled={busy}

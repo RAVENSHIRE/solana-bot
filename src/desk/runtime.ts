@@ -1,4 +1,4 @@
-import { createReadStream } from 'node:fs';
+import fsSync, { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
@@ -26,7 +26,7 @@ import { XClient } from './social';
 import { KNOWN_RUGS, RugList } from './launch-risk';
 import { GeminiReviewer, LaunchReviewer, REVIEW, RotatingReviewer, type Reviewer } from './review';
 import { XFeed, XFEED } from './xfeed';
-import { OpeningTracker } from './opening';
+import { OPENING, OpeningTracker, type OpeningRecord, type OpeningStore } from './opening';
 import { GoldenTracker } from './golden-pocket';
 import { GoldenShadow } from './golden-shadow';
 import { RECORDER_WATCH, RecorderWatch } from './recorder-watch';
@@ -35,6 +35,8 @@ import { localKeySigner } from './local-signer';
 import { DeskResearchRecorder } from '../research/integration/desk-recorder';
 import { addToWatchlist, checkCoin, type CoinCheck } from '../research/coin-check';
 import { rpcHolders } from '../research/holders';
+import { ResearchLedger } from '../research/ledger';
+import { screenTape } from './screen-tape';
 import { GECKO_REST_MS, SharedRest, geckoRestFile } from '../data/shared-rest';
 import { PublicKey } from '@solana/web3.js';
 import type { DeskMode } from './types';
@@ -56,6 +58,24 @@ const ENV_KEYS = ['RPC_ENDPOINTS', 'RPC_MAX_RPS', 'RPC_TIMEOUT_MS', 'JUPITER_API
   'DESK_FAIR_FRESH_SIGNAL', 'DESK_CRASH_FRESH_SIGNAL', 'DESK_NTFY_TOPIC', 'DESK_NTFY_SERVER', 'DESK_OPENING_NTFY_TOPIC', 'DESK_OPENING_NTFY_SERVER', 'DESK_TELEGRAM_BOT_TOKEN', 'DESK_TELEGRAM_CHAT_ID', 'ANTHROPIC_API_KEY',
   'DESK_X_QUERY', 'DESK_AI_REVIEW', 'DESK_AI_REVIEWS_PER_HOUR', 'OPEN_CAPITAL_USD', 'OPEN_ADD_AT', 'GOLDEN_CAPITAL_USD', 'GOLDEN_RETEST_ENTRIES', 'BIRDEYE_API_KEY', 'DESK_ALERTS',
   'DESK_RESEARCH', 'DESK_ALERT_EVIDENCE', 'DESK_PUMP_STREAM', 'RESEARCH_FEED_PORT', 'GEMINI_API_KEY', 'GEMINI_MODEL'];
+/**
+ * The opening screen's history file: one JSON line per status change of a listed row. Loading keeps the last record of
+ * each coin; a file over 20 MB is rewritten with the last day only.
+ */
+export function openingStore(file: string): OpeningStore {
+  return {
+    load() {
+      if (!fsSync.existsSync(file)) return [];
+      const lines = fsSync.readFileSync(file, 'utf8').split('\n').filter(Boolean), last = new Map<string, OpeningRecord>();
+      for (const line of lines) { try { const r = JSON.parse(line) as OpeningRecord; if (r?.mint) last.set(r.mint, r); } catch { /* a torn line */ } }
+      const kept = [...last.values()].filter(r => Date.now() - r.at <= OPENING.historyMs);
+      if (fsSync.statSync(file).size > 20e6) fsSync.writeFileSync(file, kept.map(r => JSON.stringify(r)).join('\n') + (kept.length ? '\n' : ''));
+      return kept;
+    },
+    save(r) { fsSync.appendFileSync(file, `${JSON.stringify(r)}\n`); },
+  };
+}
+
 /** DESK_ALERTS: a comma list of golden, rug, open, launch, radar (or "all", or "none"); unknown names are ignored, empty means the default (none). */
 export function alertKinds(raw: string | undefined): ReadonlySet<AlertKind> {
   const names = (raw ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
@@ -157,11 +177,17 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
     const pumpStream = env.DESK_PUMP_STREAM?.trim().toLowerCase() === 'off' ? null : new LocalPumpStream(`http://127.0.0.1:${Number(env.RESEARCH_FEED_PORT) || 3101}/pump/events`);
     pumpStream?.start();
     // Opening screen: every launch's curve market cap from its first seconds (the owner's basic screen, OPEN strategy).
-    const opening = new OpeningTracker(rpc, pumpStream);
+    // The opening screen's rows survive a restart (owner, 6 Oct: "don't lose any data"): every status change is appended here.
+    const opening = new OpeningTracker(rpc, pumpStream, openingStore(path.join(o.dataDir, 'opening-screen.jsonl')));
     // GOLDEN POCKET: every fresh graduation's PumpSwap pool, its reserves read on chain every few seconds.
     // Its only-up fills are also followed as shadow trades (research P2, no money): data-desk/golden-shadow.jsonl.
     const shadowFile = path.join(o.dataDir, 'golden-shadow.jsonl');
     const golden = new GoldenTracker(rpc, GOLDEN_RULES, new GoldenShadow(r => { void fs.appendFile(shadowFile, `${JSON.stringify(r)}\n`).catch(() => undefined); }));
+    // Every reading of the live screens on disk with its time (desk/screen-tape.ts): data-desk/screens/ev-*.jsonl, hourly, gzipped.
+    const screenLedger = new ResearchLedger({ dir: path.join(o.dataDir, 'screens') });
+    await screenLedger.start();
+    const screens = screenTape(screenLedger);
+    opening.tape = screens; golden.tape = screens;
     const alerts = notifier(env, fetch, { onFailure: r => logger.warn('Phone delivery failed', { channel: r.channel, status: r.status, error: r.error }) });
     // Opening-screen alerts on their own ntfy topic and server when set (desk/opening-alerts.ts), else on the main channel.
     const openingChannel = env.DESK_OPENING_NTFY_TOPIC?.trim() ? notifier({ DESK_NTFY_TOPIC: env.DESK_OPENING_NTFY_TOPIC, DESK_NTFY_SERVER: env.DESK_OPENING_NTFY_SERVER }, fetch,
@@ -190,10 +216,10 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
     const sender = new TransactionSender(rpc, logger, { confirmTimeoutMs: cfg.execution.confirmTimeoutMs, pollIntervalMs: 1500, rebroadcastIntervalMs: 2000 });
     const engines = {
       // TEST needs only an address to build and simulate; without Phantom it uses the public key from .env, never a secret.
-      PAPER: await DeskEngine.create({ ...shared, ...researchDeps, launches, xfeed, opening, golden, pumpStream, aiReview: reviewer ? () => reviewer.status() : null, notify: alerts.notify, openingNotify: openingChannel?.channels.length ? openingChannel.notify : null, alerts: phoneAlerts, mode: 'PAPER', sender: null,
+      PAPER: await DeskEngine.create({ ...shared, ...researchDeps, launches, xfeed, opening, golden, pumpStream, aiReview: reviewer ? () => reviewer.status() : null, notify: alerts.notify, openingNotify: openingChannel?.channels.length ? openingChannel.notify : null, screens, alerts: phoneAlerts, mode: 'PAPER', sender: null,
         wallet: () => context.wallet('PAPER') ?? (paperAddress ? { owner: paperAddress, signer: null } : null) }),
       // LOCAL_KEY: signed in this process and independent of the browser session; PHANTOM: the browser session signs.
-      LIVE: await DeskEngine.create({ ...shared, ...researchDeps, launches, xfeed, opening, golden, pumpStream, aiReview: reviewer ? () => reviewer.status() : null, notify: alerts.notify, openingNotify: openingChannel?.channels.length ? openingChannel.notify : null, alerts: phoneAlerts, mode: 'LIVE', sender, signerKind: live.signer, liveMaxEntries: live.maxEntries,
+      LIVE: await DeskEngine.create({ ...shared, ...researchDeps, launches, xfeed, opening, golden, pumpStream, aiReview: reviewer ? () => reviewer.status() : null, notify: alerts.notify, openingNotify: openingChannel?.channels.length ? openingChannel.notify : null, screens, alerts: phoneAlerts, mode: 'LIVE', sender, signerKind: live.signer, liveMaxEntries: live.maxEntries,
         ...(localSigner ? { authorized: () => true, wallet: () => ({ owner: localSigner.publicKey, signer: localSigner }) }
           : { wallet: () => context.wallet('LIVE') }) }),
     };
@@ -231,6 +257,7 @@ export async function createDesk(o: { envDir: string; dataDir: string }, context
       if (heartbeat) clearInterval(heartbeat);
       clearInterval(recorderTimer);
       await recorder?.close().catch(() => undefined);
+      await screenLedger.close().catch(() => undefined);
       await data.flush(); await lock.close(); await fs.unlink(lockPath);
     } };
   } catch (error) { await research?.close().catch(() => undefined); await lock.close(); await fs.unlink(lockPath); throw error; }

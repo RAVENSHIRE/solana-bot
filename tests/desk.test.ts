@@ -600,6 +600,18 @@ test('CRASH enters a young pump in its first scan (no fair launch needed), exits
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
+test('every candidate of every scan goes to the screen tape with its time, metrics and verdicts', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-screens-')), { shared } = world(YOUNG_PUMP, 'insider');
+  try {
+    const rows: Array<{ mint: string; at: number; mode: string; verdicts: string[] }> = [];
+    const engine = await DeskEngine.create({ ...shared, mode: 'PAPER', dir, sender: null, wallet: () => ({ owner, signer: null }),
+      screens: { candidate: (c, v, at, mode) => { rows.push({ mint: c.mint, at, mode, verdicts: v.map(x => `${x.id}:${x.signal}`) }); } } });
+    engine.start(); await engine.pulse();
+    assert.ok(rows.some(r => r.mint === MINT && r.mode === 'PAPER' && r.verdicts.includes('CRASH:true')), JSON.stringify(rows));
+    assert.ok(rows.every(r => Number.isFinite(r.at)));
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
 test('a coin named after a real company is never bought (owner, 5 Oct: brand-name coins are scams)', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desk-brand-')), { shared } = world({ ...YOUNG_PUMP, baseToken: { address: MINT, symbol: 'NVDA', name: 'NVIDIA AI' } }, 'insider');
   try {

@@ -1,3 +1,4 @@
+import type { ScreenTape } from './screen-tape';
 import { PublicKey, type Connection } from '@solana/web3.js';
 import type { Candle } from './replay';
 import { addSample, type Bar } from './structure';
@@ -230,6 +231,8 @@ type Rpc = { execute<T>(label: string, fn: (c: Connection) => Promise<T>): Promi
  * the exits. Never throws.
  */
 export class GoldenTracker {
+  /** Every pool read, on disk with its time (desk/screen-tape.ts); null: not recorded. */
+  tape: Pick<ScreenTape, 'goldenSample'> | null = null;
   private readonly watches = new Map<string, GoldenWatch>();
   private readonly held = new Set<string>();
   private readonly followed = new Set<string>();
@@ -309,6 +312,7 @@ export class GoldenTracker {
         w.lastLiquidityUsd = 2 * (quote / 10 ** QUOTE_DECIMALS[q]!) * usd;
         addSample(w.bars, w.startAt, now, cap);
         this.shadow?.sample(w.mint, cap, now);
+        this.tape?.goldenSample(w.mint, now, cap, w.lastLiquidityUsd, w.state.phase);
         const entry = pocketStep(w.state, this.rules, { t: now, o: cap, h: cap, l: cap, c: cap });
         if (!entry) return;
         const sol = quoteUsd(WSOL_MINT), graduationUsd = sol ? GRADUATION_MCAP_SOL * sol : null, first = w.bars[0];

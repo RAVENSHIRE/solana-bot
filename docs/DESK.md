@@ -488,6 +488,23 @@ The position shows **NO ROUTE since …** under *Open positions*. It is re-quote
 
 Advisory only — the desk never changes a size by itself. A strategy shows READY for the next rung after ≥ 20 closed trades with positive net PnL, profit factor ≥ 1.3 and a max drawdown within half its sleeve. Paper fills ignore latency and MEV, so confirm with LIVE fills before sizing up real money. The next size also needs pool liquidity of about 50× the entry (≈ 2 % impact); most sub-$1M meme pools cannot absorb $1K+ orders.
 
+### What is stored on disk, with exact times (nothing a screen shows lives only in memory)
+
+The owner, 6 Oct: "I can't re-evaluate or optimize the code if the progression with exact timestamps exists only in
+memory." Everything the dashboard shows is now written down as it happens:
+
+| What | File (data-desk/) | When |
+| --- | --- | --- |
+| Every reading of the live screens: opening-screen curve reads (`OS`) and status changes (`OC`), Golden Pocket pool reads (`GS`), every candidate of every scan with its metrics and each strategy's verdict (`CS`) | `screens/ev-YYYYMMDD-HH.jsonl` (hourly, gzipped after the hour; desk/screen-tape.ts) | every 4 s / 20 s |
+| The opening-screen card itself (24 h of rows, reloaded after a restart) | `opening-screen.jsonl` | each status change |
+| Every decision: filters, signals, entries, quotes, orders, exits, alerts | `events-PAPER.log.jsonl` (and `-LIVE`) | as it happens |
+| CRASH signal tape | `tape-PAPER.jsonl` | every scan |
+| Trades | `ledger-PAPER-<STRATEGY>.json` (+ archived cycles) | each fill |
+| Every pump.fun launch, curve trade and minute candle | `research/ev-*.jsonl.gz` (research recorder) | as it happens |
+
+Before 6 Oct the screens' own readings were only in memory; for earlier days, the event log and the research
+recorder hold the same history (`logs/opening-window.mjs 17:00 17:30` rebuilds the opening screen for a time window).
+
 ### Opening-screen phone alerts (every breakout, coloured by speed)
 
 The owner, 6 Oct: every token the opening screen finds goes to the phone, the ×2.1–2.9 speed band highlighted. The
