@@ -159,6 +159,31 @@ test('observer: a launch from creation to candles, raw trades only in its first 
   assert.equal((of('S')[0]![3] as { v: string }).v, 'CONFIRMED');
 });
 
+test('observer: a coin it is not following is picked up again from its trades once its curve is 25 % full (candles only, never a new launch)', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'research-adopt-'));
+  let now = Date.parse('2026-10-05T18:10:00Z');
+  const ledger = new ResearchLedger({ dir, now: () => now, freeBytes: async () => 5e9 });
+  await ledger.start();
+  FakeSocket.all = [];
+  const obs = new ResearchObserver({ ledger, now: () => now, factory: url => new FakeSocket(url), tradeSources: ['wss://logs'] });
+  obs.start();
+  const [portal, logs] = FakeSocket.all;
+  portal!.onopen?.({}); logs!.onopen?.({});
+  const revived = pk(), quiet = pk(), buyer = pk(), sec = Math.floor(now / 1000);
+  const trade = (mint: ReturnType<typeof pk>, ts: number, realTok: number, sig: string) => logs!.onmessage?.({ data: JSON.stringify({ params: { result: { context: { slot: 9 }, value: { signature: sig, err: null,
+    logs: [tradeLog({ mint: mint.toBuffer(), user: buyer.toBuffer(), buy: true, lamports: 1e8, tokens: 3e12, ts, vSol: 60e9, vTok: 5e14, realTok })] } } } }) });
+  trade(revived, sec, 793.1e12 * 0.4, 'r1');   // 60 % full: picked up
+  trade(revived, sec + 5, 793.1e12 * 0.4, 'r2');
+  trade(quiet, sec, 793.1e12 * 0.9, 'q1');     // 10 % full: still untracked
+  now += 2 * 60_000;
+  obs.tick(); obs.stop(); await ledger.close();
+  const recs = lines(await fs.readFile(path.join(dir, 'ev-20261005-18.jsonl'), 'utf8'));
+  const dict = new Map(recs.filter(r => r[0] === 'M').map(r => [r[1], r[2]]));
+  assert.deepEqual(recs.filter(r => r[0] === 'K').map(r => dict.get(r[2])), [revived.toBase58()], 'a minute candle for the revived coin only');
+  assert.equal(recs.filter(r => r[0] === 'T').length, 0, 'no raw trades for a coin picked up late');
+  assert.equal(obs.totals.adopted, 1); assert.equal(obs.totals.untracked, 1);
+});
+
 test('metadata goes through pump.fun\'s gateway, never ipfs.io', async () => {
   const { metadataUrl } = await import('../src/desk/launches');
   const cid = 'bafkreih5thta47hbpo36sc7l5jygoxqz6nnqvzojeriu6gh6fdpejejdfu';

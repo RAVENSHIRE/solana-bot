@@ -22,6 +22,12 @@ import type { LocalFeed } from './local-feed';
  */
 export const OBSERVE = Object.freeze({
   rawWindowMs: 10 * 60_000, extendProgress: 0.25, extendWindowMs: 60 * 60_000,
+  /**
+   * A coin the observer is not following (it restarted, or dropped the coin when it went quiet) is picked up again
+   * when it trades with its curve this full: minute candles only, no raw trades, no reads, never a new launch for the
+   * call engine. RESERVE (5 Oct) traded on for 5 h after a restart had dropped it; its W and breakout were never recorded.
+   */
+  adoptProgress: 0.25,
   candleForMs: 6 * 3_600_000, dropIdleMs: 30 * 60_000, dropAfterCompleteMs: 10 * 60_000,
   /** Candles of a minute are closed this long after it ended (trades arrive a few seconds late). */
   candleGraceMs: 20_000,
@@ -44,6 +50,8 @@ interface Read { at: number; kind: 'x' | 'site'; active: boolean }
 interface Track {
   mint: string; createdMs: number; uri: string | null; buyers: Set<string>; progress: number; lastTradeMs: number; candle: Candle | null;
   completeMs: number | null; xHandle: string | null; site: string | null; reads: Read[]; metaTries: number; metaDone: boolean; posts: Set<string>;
+  /** Picked up again from its trades (OBSERVE.adoptProgress): `createdMs` is the pick-up time, not the launch. */
+  adopted?: boolean;
 }
 
 export interface ObserverDeps {
@@ -64,7 +72,7 @@ export interface ObserverDeps {
 }
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000;
-const zero = () => ({ createsPortal: 0, createsLog: 0, trades: 0, tradesLogged: 0, untracked: 0, completes: 0, migrations: 0, candles: 0,
+const zero = () => ({ createsPortal: 0, createsLog: 0, trades: 0, tradesLogged: 0, untracked: 0, adopted: 0, completes: 0, migrations: 0, candles: 0,
   metaOk: 0, metaFail: 0, xReads: 0, xCached: 0, xLimited: 0, xErrors: 0, xLate: 0, xInactive: 0, siteReads: 0, siteInactive: 0, gaps: 0 });
 
 export class ResearchObserver {
@@ -189,7 +197,12 @@ export class ResearchObserver {
   private onTrade(e: PumpTrade, slot: number | null, sig: string, now: number): void {
     this.count('trades');
     this.d.feed?.addCurve(e.mint, curveMcapSol(e.vSol, e.vTok), now);
-    const t = this.tracks.get(e.mint);
+    let t = this.tracks.get(e.mint);
+    if (!t && curveProgress(e.realTok) >= OBSERVE.adoptProgress) {
+      t = { mint: e.mint, createdMs: now, uri: null, buyers: new Set(), progress: 0, lastTradeMs: now, candle: null, completeMs: null,
+        xHandle: null, site: null, reads: [], metaTries: 0, metaDone: true, posts: new Set(), adopted: true };
+      this.tracks.set(e.mint, t); this.count('adopted');
+    }
     if (!t) { this.count('untracked'); return; }
     const mc = curveMcapSol(e.vSol, e.vTok), progress = curveProgress(e.realTok), minute = Math.floor(e.ts / 60);
     if (t.candle && t.candle.minute !== minute) this.closeCandle(t);
@@ -206,7 +219,7 @@ export class ResearchObserver {
       l.trades.push({ obs: now, ts: e.ts, slot: slot ?? 0, w: this.wallet(e.user), buy: e.isBuy, lamports: e.lamports, vSol: e.vSol, vTok: e.vTok, realTok: e.realTok });
       if (mc < NORMAL_CURVE_FLOOR_SOL) l.mayhem = true;
     }
-    if (!this.d.ledger.lowDisk && (age <= OBSERVE.rawWindowMs || (progress >= OBSERVE.extendProgress && age <= OBSERVE.extendWindowMs))) {
+    if (!this.d.ledger.lowDisk && !t.adopted && (age <= OBSERVE.rawWindowMs || (progress >= OBSERVE.extendProgress && age <= OBSERVE.extendWindowMs))) {
       this.count('tradesLogged');
       this.d.ledger.put(['T', now, e.ts, slot, { $m: e.mint }, { $w: e.user }, e.isBuy ? 1 : 0, e.lamports, e.tokens, e.vSol, e.vTok, e.realTok, sig]);
     }

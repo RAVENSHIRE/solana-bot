@@ -67,6 +67,11 @@ are numbers from the file's own dictionaries (`["M", i, mint]`, `["W", i, wallet
 | `STAT` | obs, counters for the last 10 minutes |
 | `START` / `STOP` | obs, settings / totals |
 
+A coin the observer is not following (after a restart, or after it was dropped for going quiet) is picked up again
+from its trades once its curve is at least 25 % full: its `K` candles continue, with no `T` records and no reads, and it
+is never treated as a new launch (`adopted` in `STAT`). Before 6 Oct, a restart lost every live coin: RESERVE's W and
+breakout (5 Oct, 20:00–01:00 Zurich time) were never recorded, and 3,000–5,600 trades per 10 min were only counted.
+
 ## Study design (the report)
 
 Decision times 60, 120, 300 and 600 s after creation. Features use only records observed by then: curve progress,
