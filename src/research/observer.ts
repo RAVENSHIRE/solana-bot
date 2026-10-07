@@ -198,7 +198,7 @@ export class ResearchObserver {
     this.count('trades');
     this.d.feed?.addCurve(e.mint, curveMcapSol(e.vSol, e.vTok), now);
     let t = this.tracks.get(e.mint);
-    if (!t && curveProgress(e.realTok) >= OBSERVE.adoptProgress) {
+    if (!t && curveProgress(e.realTok) >= OBSERVE.adoptProgress && Math.abs(e.ts * 1000 - now) <= 600_000) {
       t = { mint: e.mint, createdMs: now, uri: null, buyers: new Set(), progress: 0, lastTradeMs: now, candle: null, completeMs: null,
         xHandle: null, site: null, reads: [], metaTries: 0, metaDone: true, posts: new Set(), adopted: true };
       this.tracks.set(e.mint, t); this.count('adopted');

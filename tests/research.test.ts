@@ -43,6 +43,15 @@ test('pump.fun events: trades, creations and completions decode from transaction
   assert.equal(ev[2]!.kind === 'complete' && ev[2]!.e.mint, mint.toBase58());
 });
 
+test('pump.fun events: only data the pump.fun program logged; a router\'s own "TradeEvent" (same tag, other layout) is skipped', () => {
+  const pump = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P', router = 'RouteR1111111111111111111111111111111111111';
+  const mint = pk(), user = pk(), trade = (ts: number) => tradeLog({ mint: mint.toBuffer(), user: user.toBuffer(), buy: true, lamports: 1e8, tokens: 3e12, ts, vSol: 60e9, vTok: 5e14, realTok: 4e14 });
+  const ev = pumpEvents([`Program ${router} invoke [1]`, `Program ${pump} invoke [2]`, 'Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [3]',
+    'Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA success', trade(1_790_000_000), `Program ${pump} consumed 40000 of 200000 compute units`, `Program ${pump} success`,
+    trade(-6_004_799_502_955), `Program ${router} success`]);
+  assert.deepEqual(ev.map(e => e.kind === 'trade' && e.e.ts), [1_790_000_000], 'pump.fun\'s event inside the router call counts; the router\'s own does not');
+});
+
 test('X posts: the post time comes from its id, and contract addresses are found in the text, not the profile', () => {
   assert.equal(new Date(snowflakeMs('2105790296105841114')!).toISOString(), '2026-10-01T22:41:44.940Z');
   const mint = '7VertkgF9KLhxxJXHX6uaWuoYZTP9LdGj2bWmVXVpump';
@@ -175,13 +184,14 @@ test('observer: a coin it is not following is picked up again from its trades on
   trade(revived, sec, 793.1e12 * 0.4, 'r1');   // 60 % full: picked up
   trade(revived, sec + 5, 793.1e12 * 0.4, 'r2');
   trade(quiet, sec, 793.1e12 * 0.9, 'q1');     // 10 % full: still untracked
+  trade(pk(), 9e15, 793.1e12 * 0.4, 'g1');      // a time far from now (a misread event): never picked up
   now += 2 * 60_000;
   obs.tick(); obs.stop(); await ledger.close();
   const recs = lines(await fs.readFile(path.join(dir, 'ev-20261005-18.jsonl'), 'utf8'));
   const dict = new Map(recs.filter(r => r[0] === 'M').map(r => [r[1], r[2]]));
   assert.deepEqual(recs.filter(r => r[0] === 'K').map(r => dict.get(r[2])), [revived.toBase58()], 'a minute candle for the revived coin only');
   assert.equal(recs.filter(r => r[0] === 'T').length, 0, 'no raw trades for a coin picked up late');
-  assert.equal(obs.totals.adopted, 1); assert.equal(obs.totals.untracked, 1);
+  assert.equal(obs.totals.adopted, 1); assert.equal(obs.totals.untracked, 2);
 });
 
 test('metadata goes through pump.fun\'s gateway, never ipfs.io', async () => {
@@ -213,6 +223,7 @@ test('dataset: point-in-time features and labels — nothing after the decision 
     ['XT', t0 + 6 * 60_000, 0, 'tryagency', '2', t0 + 80_000, { a: 'tryagency', t: 'CA', mint: 1 }],
     ...T,
     ['K', Math.floor(s0 / 60) + 30, 0, 50, 400, 50, 400, 0, 0, 0, 0, 0, 0, 1],
+    ['K', 151320947479678240, 0, 1282051.284, 1282051.284, 1282051.284, 1282051.284, 0, 793100000000000, 0, 1, 0, 0, 1], // a misread event's candle (6 Oct)
     ['X', t0 + 31 * 60_000, s0 + 1860, 0],
     ['GAP', t0 + 400_000, 'logs0', 'logs0: closed (1006)'],
     ['M', 1, 'MINTB'], ['PC', t0 + 7 * 3600e3, 0, 1, 'sig', 'Later', 'LATER', null, 0.1, 1e6, 28, 0]];
@@ -220,6 +231,7 @@ test('dataset: point-in-time features and labels — nothing after the decision 
   const ds = readDataset([path.join(dir, 'ev-20261002-12.jsonl')]);
   const a = ds.launches.get('MINTA')!;
   assert.equal(a.creator, 'DEV'); assert.equal(a.trades.length, 7);
+  assert.equal(a.candles.length, 1, 'a candle with an impossible time is skipped'); assert.equal(ds.last, t0 + 7 * 3600e3, 'and never becomes the dataset\'s end');
   const f60 = features(a, 60, { creatorLaunches: 0, creatorGraduations: 0 }, blindSpots(ds));
   assert.equal(f60.buyers, 4, 'buyers up to 60 s only'); assert.equal(f60.trades, 4);
   assert.equal(f60.xCaPost, false, 'the CA post at +80 s is not known at 60 s (nor before +110 s: 30 s to see it)');

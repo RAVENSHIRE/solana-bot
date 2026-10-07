@@ -74,7 +74,8 @@ export function readDataset(files: string[], o: { from?: number; to?: number; mi
       if (tag === 'W') { wallets[r[1] as number] = r[2] as string; continue; }
       // A candle's field 1 is its minute (unix minutes); it is complete, i.e. known, when the minute ends.
       const obs = tag === 'K' ? (r[1] as number) * 60_000 + 60_000 : r[1] as number;
-      if (typeof obs !== 'number') continue;
+      // A time outside 2001–2099 is a misread record (another program's event decoded as a trade, 6–7 Oct): skipped.
+      if (typeof obs !== 'number' || !(obs > 1e12 && obs < 4.1e12)) continue;
       if ((o.from !== undefined && obs < o.from) || (o.to !== undefined && obs > o.to)) continue;
       if (tag !== 'STAT') { first = Math.min(first, obs); last = Math.max(last, obs); }
       const mintOf = (i: unknown) => typeof i === 'number' ? mints[i] ?? null : null;

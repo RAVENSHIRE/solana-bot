@@ -57,11 +57,21 @@ export function decodeCreateEvent(b: Buffer): PumpCreate | null {
 
 export type PumpEvent = { kind: 'trade'; e: PumpTrade } | { kind: 'complete'; e: PumpComplete } | { kind: 'create'; e: PumpCreate };
 
-/** Every pump.fun event in one transaction's logs, in log order. Unknown or malformed events are skipped. */
+/**
+ * Every pump.fun event in one transaction's logs, in log order. Unknown or malformed events are skipped. Only data the
+ * pump.fun program itself logged counts: an Anchor event's tag is a hash of its name, so a router or bot program in the
+ * same transaction that logs its own "TradeEvent" carries the same tag with another layout (garbage mint, time and
+ * reserves; 57 such candles reached the ledger 6–7 Oct). The invoke/success lines tell whose data a line is; logs
+ * without them (a test, a trimmed log) are read as before.
+ */
 export function pumpEvents(logs: readonly string[]): PumpEvent[] {
-  const out: PumpEvent[] = [];
+  const out: PumpEvent[] = [], stack: string[] = [];
   for (const line of logs) {
+    const invoke = /^Program (\w+) invoke \[\d+\]/.exec(line);
+    if (invoke) { stack.push(invoke[1]!); continue; }
+    if (/^Program \w+ (success|failed)/.test(line)) { stack.pop(); continue; }
     if (!line.startsWith('Program data: ')) continue;
+    if (stack.length && stack.at(-1) !== PUMP_PROGRAM_ID) continue;
     let b: Buffer;
     try { b = Buffer.from(line.slice(14), 'base64'); } catch { continue; }
     if (b.length < 8) continue;
