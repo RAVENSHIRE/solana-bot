@@ -21,9 +21,17 @@ export const CALLS = Object.freeze({
   maxOpen: 50_000,
   /**
    * INFO messages (not calls): a launch whose own X account posted its contract address and has a checkmark (blue,
-   * gold or grey) or ≥ `infoMinFollowers` followers. At most `infoPerHour`, once per launch.
+   * gold or grey) or ≥ `infoMinFollowers` followers. Recorded once per launch; at most `infoPerHour` reach the phone (the
+   * cap counts phone messages only, so quiet records under the floor never use it up).
    */
   infoMinFollowers: 1_000, infoPerHour: 8,
+  /**
+   * The phone's floor (owner, 12 Oct: "I don't need a notification if it is below 9.7K market cap or 100 SOL now"): an
+   * INFO or a call reaches the phone only when the coin's market cap at that moment is at least `phoneMinMcapSol` and,
+   * when the SOL price is known, at least `phoneMinMcapUsd`. An unknown market cap (mayhem curve, no trade yet) cannot
+   * show it is above, so it is not sent either. The ledger record is written exactly as before; only the phone is quiet.
+   */
+  phoneMinMcapSol: 100, phoneMinMcapUsd: 9_700,
   /**
    * The creator's history for rules that use it (organicXClean): earlier launches by the same wallet seen in this
    * window, and how many had graduated by the decision time, as the look-back counts them in its 48 h (qualify.ts).
@@ -44,6 +52,12 @@ export interface CallDeps {
 }
 interface Signal { l: LaunchFacts; rule: RuleEvidence; qualified: boolean; decisionAt: number }
 
+/** The phone's market-cap floor (CALLS.phoneMinMcapSol / phoneMinMcapUsd) for a coin at `mcSol` now. */
+export function phoneWorthy(mcSol: number | null, solUsd: number | null): boolean {
+  if (mcSol === null || !Number.isFinite(mcSol) || mcSol < CALLS.phoneMinMcapSol) return false;
+  return solUsd === null || mcSol * solUsd >= CALLS.phoneMinMcapUsd;
+}
+
 const usdK = (usd: number) => usd >= 1e6 ? `$${(usd / 1e6).toFixed(2)}M` : `$${(usd / 1e3).toFixed(1)}K`;
 
 export class CallEngine {
@@ -51,6 +65,7 @@ export class CallEngine {
   private readonly done = new Map<string, Set<number>>();
   private open: Signal[] = [];
   private readonly infoSent = new Map<string, number>();
+  private readonly infoPhone: number[] = [];
   /** Every launch seen, by creator: the live side of `creatorLaunches` / `creatorGraduations`. */
   private readonly creators = new Map<string, Array<{ createdObs: number; completeObs: number | null }>>();
   private readonly creatorOf = new Map<string, { creator: string; createdObs: number; completeObs: number | null }>();
@@ -93,7 +108,6 @@ export class CallEngine {
     if (!this.d.notify || this.infoSent.has(l.mint) || !read.profile) return;
     const now = this.now, p = read.profile;
     for (const [m, at] of this.infoSent) if (now - at > 3_600_000) this.infoSent.delete(m);
-    if (this.infoSent.size >= CALLS.infoPerHour) return;
     const own = read.posts.find(x => x.author?.toLowerCase() === handle.toLowerCase() && x.raw.includes(l.mint));
     const org = p.verifiedType === 'business' || p.verifiedType === 'government';
     const established = p.verified === true || (p.followers ?? 0) >= CALLS.infoMinFollowers;
@@ -115,8 +129,11 @@ export class CallEngine {
       this.d.link ? this.d.link(l.mint) : `https://pump.fun/coin/${l.mint}`,
     ].join('\n');
     this.d.ledger.put(['INFO', now, { $m: l.mint }, handle, { badge: p.verifiedType ?? (p.verified ? 'blue' : null), f: p.followers, ownCa: 1, mcSol }]);
-    // Coins named after a real company never reach the phone (owner, 5 Oct: brand-name coins are scams); the record stays.
-    if (brandName(l.symbol, l.name)) return;
+    // Coins named after a real company never reach the phone (owner, 5 Oct: brand-name coins are scams), nor a coin under
+    // the phone's market-cap floor (owner, 12 Oct); the record stays.
+    while (this.infoPhone.length && now - this.infoPhone[0]! > 3_600_000) this.infoPhone.shift();
+    if (brandName(l.symbol, l.name) || !phoneWorthy(mcSol, sol) || this.infoPhone.length >= CALLS.infoPerHour) return;
+    this.infoPhone.push(now);
     void this.d.notify(`INFO ${l.symbol ?? l.mint.slice(0, 6)}: project posted its CA${org ? ` (${badge})` : ''}`, body).catch(() => undefined);
   }
   qualification(): Qualification | null { return this.q; }
@@ -149,7 +166,7 @@ export class CallEngine {
     const f = features(l, delayS, this.creatorHistory(l, at), []);
     if (f.mcapSol === null) return;
     for (const rule of q.rules.filter(r => r.delayS === delayS && GROUPS[r.group].test(f))) {
-      const qualified = rule.qualified, sent = qualified && !!this.d.notify && !brandName(l.symbol, l.name);
+      const qualified = rule.qualified, sent = qualified && !!this.d.notify && !brandName(l.symbol, l.name) && phoneWorthy(f.mcapSol, this.d.solUsd?.() ?? null);
       if (qualified) this.stats.calls++; else this.stats.shadows++;
       this.d.ledger.put(['SIG', this.now, { $m: l.mint }, rule.id, qualified ? 1 : 0, Math.round(f.mcapSol * 1000) / 1000, sent ? 1 : 0,
         { b: f.buyers, top1: f.top1, eff: f.effectiveBuyers, v60: f.velocity60, p: f.progress, dev: f.devBuySol, devSold: f.devSold, x: f.hasX, site: f.hasSite,

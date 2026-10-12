@@ -99,7 +99,11 @@ The desk sends nothing to ntfy by default (no rug confirmations). The research o
    - **a new launch whose own X account posted its contract address** and has a checkmark (blue, gold or grey) or
      ≥ 1,000 followers: the account (badge, followers, age), how many seconds after launch it posted the CA, the market
      cap, buyers and the link. A launch that only *links* a big or checkmarked account (often a copycat) does not count.
-     At most 8 per hour, one per launch; `INFO` records.
+     Every such launch gets an `INFO` record (once per launch). The phone gets it only when the coin is at **≥ 100 SOL
+     and ≥ $9.7K market cap at that moment** (owner, 12 Oct; `CALLS.phoneMinMcapSol` / `phoneMinMcapUsd`); a mayhem curve
+     or a launch with no trade yet has no known market cap and is not sent either. At most 8 per hour to the phone. The
+     same floor applies to CALL messages (their `SIG` record has sent = 0 under it). Before 12 Oct the 8-per-hour cap also
+     stopped the records in busy hours.
    - **an established coin with a blue check that starts to move** (`src/research/verified.ts`): every 5 minutes the
      observer reads Jupiter's hourly top-trending, top-organic and top-traded lists (free token API). A coin counts when
      Jupiter marks it verified (its `isVerified` flag: the blue check in Jupiter and most Solana wallets), it is a

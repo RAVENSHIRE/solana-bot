@@ -412,14 +412,17 @@ test('call engine: a qualified rule calls the phone at its decision time, other 
   assert.equal(sent.length, 1);
   assert.match(sent[0]![0], /^Research: \d+ rule\(s\) now calling$/);
   sent.length = 0;
-  const l = syntheticLaunch(0, t0, true);
-  now = t0 + 5_000; engine.tick([l]);
+  // The synthetic launches trade at about 30 SOL: this one is moved to 150 SOL (5×, same moves) to clear the phone's floor;
+  // the same launch at 30 SOL is called too, but only recorded (owner, 12 Oct: nothing under 100 SOL / $9.7K).
+  const l = { ...syntheticLaunch(0, t0, true), trades: syntheticLaunch(0, t0, true).trades.map(t => ({ ...t, vSol: t.vSol * 5 })) };
+  const low = { ...syntheticLaunch(0, t0, true), mint: 'LOW' };
+  now = t0 + 5_000; engine.tick([l, low]);
   const live = q.rules.filter(r => r.qualified && r.delayS === 5);
   assert.ok(live.length >= 1);
-  assert.equal(sent.length, live.length, 'one phone call per qualified rule that matched');
+  assert.equal(sent.length, live.length, 'one phone call per qualified rule that matched, none for the 30 SOL launch');
   assert.match(sent[0]![0], /^CALL T0: \+40% target$/);
-  assert.match(sent[0]![1], /Buy now at \$4\.5K \(30 SOL\) market cap, 5 s after launch\./);
-  assert.match(sent[0]![1], /Sell at \$6\.3K \(42 SOL\) \(\+40%\)/);
+  assert.match(sent[0]![1], /Buy now at \$22\.5K \(150 SOL\) market cap, 5 s after launch\./);
+  assert.match(sent[0]![1], /Sell at \$31\.5K \(210 SOL\) \(\+40%\)/);
   assert.match(sent[0]![1], /https:\/\/fomo\.family\/tokens\/solana\/M0$/);
   now = t0 + 5_000; engine.tick([l]);
   assert.equal(sent.length, live.length, 'a decision is evaluated once');
@@ -433,7 +436,8 @@ test('call engine: a qualified rule calls the phone at its decision time, other 
   const read = async (f: string) => f.endsWith('.gz') ? gunzipSync(await fs.readFile(path.join(dir, f))).toString() : await fs.readFile(path.join(dir, f), 'utf8');
   const recs = lines((await Promise.all((await fs.readdir(dir)).filter(f => f.startsWith('ev-')).sort().map(read))).join(''));
   const sig = recs.filter(r => r[0] === 'SIG'), res = recs.filter(r => r[0] === 'RES');
-  assert.equal(sig.filter(r => r[4] === 1).length, live.length);
+  assert.equal(sig.filter(r => r[4] === 1 && r[6] === 1).length, live.length);
+  assert.equal(sig.filter(r => r[4] === 1 && r[6] === 0).length, live.length, 'the 30 SOL launch: the same calls, recorded, not sent');
   assert.ok(sig.some(r => r[4] === 0 && r[3] === held.id), 'a matching rule that is not qualified is recorded as a shadow call, never sent');
   assert.equal(res.length, sig.length, 'each signal judged once');
   assert.ok(res.filter(r => r[4] === 1).every(r => r[6] === 'TAKE_PROFIT'), 'the winner hit its target');
@@ -579,7 +583,7 @@ test('reviews: Gemini answers while Claude is out of credits', async () => {
   assert.match(r.status(), /Gemini review \(gemini-3\.5-flash\): 3 done/);
 });
 
-test('info messages: a checkmarked or established project account that posted its CA; capped, once per launch', async () => {
+test('info messages: a checkmarked or established project account that posted its CA; capped, once per launch, never under 100 SOL / $9.7K', async () => {
   const { CallEngine, CALLS } = await import('../src/research/calls');
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'research-info-'));
   const now = Date.parse('2026-10-03T10:00:00Z');
@@ -591,7 +595,9 @@ test('info messages: a checkmarked or established project account that posted it
     verified: false, verifiedType: null, website: null, bio: null, ...o });
   const read = (mint: string, p: ReturnType<typeof profile>, posted: boolean) => ({ status: 'OK' as const, http: 200, detail: '', profile: p,
     posts: posted ? [{ id: '1', at: now - 30_000, author: p.handle, text: `CA ${mint}`, views: 100, likes: 1, reposts: 0, replies: 0, quotes: 0, repost: false, replyTo: null, raw: JSON.stringify({ t: `CA ${mint}` }) }] : [] });
-  const l = syntheticLaunch(0, now - 60_000, true);
+  // The synthetic launches trade at about 30 SOL; `at` moves a launch's curve to `sol` (market cap in SOL).
+  const at = (x: ReturnType<typeof syntheticLaunch>, sol: number) => ({ ...x, trades: x.trades.map(t => ({ ...t, vSol: sol * 1e9 })) });
+  const l = at(syntheticLaunch(0, now - 60_000, true), 150);
   engine.xRead(l, 'proj', read(l.mint, profile({}), true));
   assert.equal(sent.length, 0, 'an unchecked 50-follower account posting its CA is not enough');
   engine.xRead(l, 'proj', read(l.mint, profile({ verified: true, verifiedType: 'individual' }), true));
@@ -600,20 +606,30 @@ test('info messages: a checkmarked or established project account that posted it
   assert.match(sent[0]![1], /Not a qualified call/); assert.match(sent[0]![1], /blue check, 50 followers, account 5 days old/); assert.match(sent[0]![1], /posted this contract address 30 s after launch/);
   engine.xRead(l, 'proj', read(l.mint, profile({ verified: true, verifiedType: 'individual' }), true));
   assert.equal(sent.length, 1, 'once per launch');
-  const org = syntheticLaunch(1, now - 60_000, true);
+  const org = at(syntheticLaunch(1, now - 60_000, true), 150);
   // A launch that merely links a gold-check company account is often a copycat: nothing without the account's own CA post.
   engine.xRead(org, 'bigco', read(org.mint, profile({ handle: 'bigco', verified: true, verifiedType: 'business', followers: 120_000 }), false));
   assert.equal(sent.length, 1);
   engine.xRead(org, 'bigco', read(org.mint, profile({ handle: 'bigco', verified: true, verifiedType: 'business', followers: 120_000 }), true));
   assert.match(sent[1]![0], /^INFO T1: project posted its CA \(gold check \(organisation\)\)$/);
   assert.match(sent[1]![1], /SOL\) market cap/);
-  // A mayhem coin: its curve price does not follow its trades, so no market cap is printed (it read "$0.0K (0 SOL)").
-  const mayhem = { ...syntheticLaunch(2, now - 60_000, true), mayhem: true };
-  engine.xRead(mayhem, 'bigco', read(mayhem.mint, profile({ handle: 'bigco', verified: true, verifiedType: 'business', followers: 120_000 }), true));
-  assert.match(sent[2]![1], /market cap unknown \(mayhem mode/); assert.doesNotMatch(sent[2]![1], /\$0\.0K/);
-  for (let i = 3; i < 30; i++) { const x = syntheticLaunch(i, now - 60_000, true); engine.xRead(x, 'bigco', read(x.mint, profile({ handle: 'bigco', verified: true, verifiedType: 'government' }), true)); }
-  assert.equal(sent.length, CALLS.infoPerHour, 'capped per hour');
+  assert.match(sent[1]![1], /\$22\.5K \(150 SOL\) market cap/);
+  // Under the phone's floor (owner, 12 Oct): a fresh 30 SOL launch, 100 SOL when SOL is $90 ($9.0K), and a mayhem coin
+  // whose market cap is unknown are recorded but not sent.
+  const big = { handle: 'bigco', verified: true, verifiedType: 'business' as const, followers: 120_000 };
+  const fresh = syntheticLaunch(2, now - 60_000, true), mayhem = { ...at(syntheticLaunch(3, now - 60_000, true), 150), mayhem: true };
+  engine.xRead(fresh, 'bigco', read(fresh.mint, profile(big), true));
+  engine.xRead(mayhem, 'bigco', read(mayhem.mint, profile(big), true));
+  const cheapSol = new CallEngine({ ledger, now: () => now, notify: async (t, b) => { sent.push([t, b]); }, solUsd: () => 90 }), edge = at(syntheticLaunch(4, now - 60_000, true), 100);
+  cheapSol.xRead(edge, 'bigco', read(edge.mint, profile(big), true));
+  assert.equal(sent.length, 2, 'nothing under 100 SOL, under $9.7K, or with an unknown market cap');
+  assert.deepEqual([CALLS.phoneMinMcapSol, CALLS.phoneMinMcapUsd], [100, 9_700]);
+  for (let i = 5; i < 30; i++) { const x = at(syntheticLaunch(i, now - 60_000, true), 150); engine.xRead(x, 'bigco', read(x.mint, profile({ handle: 'bigco', verified: true, verifiedType: 'government' }), true)); }
+  assert.equal(sent.length, CALLS.infoPerHour, 'the phone is capped per hour; the quiet ones do not use up the cap');
   await ledger.close();
+  const recs = (await fs.readdir(dir)).filter(f => f.endsWith('.jsonl'));
+  const infos = (await Promise.all(recs.map(f => fs.readFile(path.join(dir, f), 'utf8')))).join('').split('\n').filter(x => x.startsWith('["INFO"'));
+  assert.equal(infos.length, 30, 'every INFO is recorded, sent or not');
 });
 
 test('verified coins: a blue-check memecoin that starts to move is an INFO message; stables, unverified coins and repeats are not', async () => {
